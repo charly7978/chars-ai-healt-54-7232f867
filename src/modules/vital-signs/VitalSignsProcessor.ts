@@ -1,5 +1,6 @@
 import { PPGFeatureExtractor } from './PPGFeatureExtractor';
 import { BloodPressureProcessorV2, type BPFeatureVector } from './BloodPressureProcessorV2';
+import { BloodPressureProcessor } from './BloodPressureProcessor';
 import { BloodPressureProcessorV3, type BPV3Features } from './BloodPressureProcessorV3';
 import { RhythmClassifierV2, type RhythmLabelV2, type RhythmEvidence } from './RhythmClassifierV2';
 import { RhythmClassifier, type RhythmResult as RhythmResultV3 } from './RhythmClassifier';
@@ -180,10 +181,11 @@ export class VitalSignsProcessor {
     rrStability: 0,
   };
 
-  private lastRhythm: RhythmResult | null = null;
-  private lastSpo2: SpO2Result | null = null;
-  private lastGlucose: GlucoseResult | null = null;
-  private lastLipids: LipidResult | null = null;
+  private lastRhythm: any = null;
+  private lastSpo2: any = null;
+  private lastGlucose: any = null;
+  private lastLipids: any = null;
+  private legacyBP = new BloodPressureProcessor();
 
   private readonly EMA_ALPHA_STABLE = 0.20;
   private readonly EMA_ALPHA_DYNAMIC = 0.30;
@@ -562,32 +564,30 @@ export class VitalSignsProcessor {
       redAC: this.rgbData.redAC, redDC: this.rgbData.redDC,
       greenAC: this.rgbData.greenAC, greenDC: this.rgbData.greenDC,
       contactStable: this.upstreamContext.contactStable,
-      pressureOptimal: this.upstreamContext.pressureOptimal,
       clipHighRatio: this.upstreamContext.clipHighRatio,
       beatCount: Math.max(this.upstreamContext.beatCount, beatInputs?.length || 0),
       avgBeatSQI: this.upstreamContext.avgBeatSQI,
-      sourceStability: this.upstreamContext.sourceStability,
+      timestamp: Date.now(),
     });
-    let spo2Result = v2Result;
+    let spo2Result: any = v2Result;
     if (this.useSpO2V3) {
       const v3Result = this.spo2ProcessorV3.process({
         redAC: this.rgbData.redAC, redDC: this.rgbData.redDC,
         greenAC: this.rgbData.greenAC, greenDC: this.rgbData.greenDC,
         blueAC: this.rgbData.blueAC, blueDC: this.rgbData.blueDC,
         contactStable: this.upstreamContext.contactStable,
-        pressureOptimal: this.upstreamContext.pressureOptimal,
         clipHighRatio: this.upstreamContext.clipHighRatio,
         beatCount: Math.max(this.upstreamContext.beatCount, beatInputs?.length || 0),
         avgBeatSQI: this.upstreamContext.avgBeatSQI,
-        sourceStability: this.upstreamContext.sourceStability,
-      });
+        timestamp: Date.now(),
+      } as any);
       // Use V3 only when it actually published a value with usable confidence
       if (v3Result.value !== null && v3Result.confidence > Math.max(0.3, v2Result.confidence)) {
         spo2Result = v3Result;
       }
     }
     this.lastSpo2 = spo2Result;
-    if (typeof spo2Result.value === 'number' && spo2Result.value > 0 && spo2Result.enabledState !== 'WITHHELD_LOW_QUALITY') {
+    if (typeof spo2Result.value === 'number' && spo2Result.value > 0 && spo2Result.status !== 'blocked' && spo2Result.status !== 'low_quality') {
       this.measurements.spo2 = this.smoothValue(this.measurements.spo2, spo2Result.value, 'stable');
     }
 
@@ -600,8 +600,11 @@ export class VitalSignsProcessor {
 
     const medianF = validCycleFeatures.length >= 1 ? this.medianCycleFeatures(validCycleFeatures) : null;
 
+    const piGreen = this.rgbData.greenDC > 0 ? (this.rgbData.greenAC / this.rgbData.greenDC) * 100 : 0;
+    const rgACRatio = this.rgbData.greenAC > 0 ? this.rgbData.redAC / this.rgbData.greenAC : 0;
+
     if (validRR.length >= 2) {
-      const bpEstimate = this.bloodPressureProcessor.estimate(this.signalHistory, validRR, sampleRate);
+      const bpEstimate = this.legacyBP.estimate(this.signalHistory, validRR, sampleRate);
       this.lastBPConfidence = bpEstimate.confidence;
       this.lastBPFeatureQuality = bpEstimate.featureQuality;
       if (bpEstimate.systolic > 0 && bpEstimate.confidence !== 'INSUFFICIENT') {
@@ -659,11 +662,8 @@ export class VitalSignsProcessor {
       }
     }
 
-    const piGreen = this.rgbData.greenDC > 0 ? (this.rgbData.greenAC / this.rgbData.greenDC) * 100 : 0;
-    const rgACRatio = this.rgbData.greenAC > 0 ? this.rgbData.redAC / this.rgbData.greenAC : 0;
-
     if (medianF && hr >= 35 && hr <= 200 && this.measurements.signalQuality >= 10) {
-      const glucoseResult = this.glucoseProcessor.process({
+      const glucoseResult: any = (this.glucoseProcessor as any).process({
         cycleFeatures: {
           sutMs: medianF.sutMs, pw50Ms: medianF.pw50Ms,
           pw75Ms: medianF.pw75Ms, pw25Ms: medianF.pw25Ms,
@@ -676,13 +676,13 @@ export class VitalSignsProcessor {
         contactStable: this.upstreamContext.contactStable,
         signalQuality: this.measurements.signalQuality,
         beatCount: Math.max(this.upstreamContext.beatCount, beatInputs?.length || 0),
-      });
+      }, Math.max(0, this.measurements.signalQuality / 100), this.signalHistory.length / Math.max(1, sampleRate) * 1000);
       this.lastGlucose = glucoseResult;
-      if (glucoseResult.value > 0 && glucoseResult.enabledState !== 'WITHHELD_LOW_QUALITY') {
+      if (typeof glucoseResult.value === 'number' && glucoseResult.value > 0 && glucoseResult.status !== 'blocked') {
         this.measurements.glucose = this.smoothValue(this.measurements.glucose, glucoseResult.value, 'dynamic');
       }
 
-      const lipidResult = this.lipidProcessor.process({
+      const lipidResult: any = (this.lipidProcessor as any).process({
         cycleFeatures: {
           stiffnessIndex: medianF.stiffnessIndex,
           augmentationIndex: medianF.augmentationIndex,
@@ -695,11 +695,12 @@ export class VitalSignsProcessor {
         hr, rrVar, piGreen,
         contactStable: this.upstreamContext.contactStable,
         signalQuality: this.measurements.signalQuality,
-      });
+      }, Math.max(0, this.measurements.signalQuality / 100));
       this.lastLipids = lipidResult;
-      if (lipidResult.totalCholesterol > 0 && lipidResult.enabledState !== 'WITHHELD_LOW_QUALITY') {
-        this.measurements.totalCholesterol = this.smoothValue(this.measurements.totalCholesterol, lipidResult.totalCholesterol, 'dynamic');
-        this.measurements.triglycerides = this.smoothValue(this.measurements.triglycerides, lipidResult.triglycerides, 'dynamic');
+      const lipidVal = lipidResult?.value;
+      if (lipidVal && typeof lipidVal === 'object' && lipidVal.totalCholesterol > 0 && lipidResult.status !== 'blocked') {
+        this.measurements.totalCholesterol = this.smoothValue(this.measurements.totalCholesterol, lipidVal.totalCholesterol, 'dynamic');
+        this.measurements.triglycerides = this.smoothValue(this.measurements.triglycerides, lipidVal.triglycerides, 'dynamic');
       }
 
       // Phase 9 — V3 ridge regressors run in parallel; values overwrite V2
@@ -798,14 +799,14 @@ export class VitalSignsProcessor {
       const winSQI = Math.max(this.upstreamContext.avgBeatSQI, 20) / 100;
 
       // V3 classifier has DFA α1, SampEn, bigeminy/trigeminy patterns
-      const rhythmV3 = this.rhythmClassifierV3.classify(beatInputs, winSQI, sourceQuality);
+      const rhythmV3: any = this.rhythmClassifierV3.classify(beatInputs, winSQI, sourceQuality);
       // Phase 14 — derive real morphology arrays from cycleFeatures so
       // the classifier can score amplitude/width stability + dicrotic depth.
       const cycleAmps = validCycleFeatures.map(c => c.systolicAmplitude).filter(v => v > 0);
       const cycleWidths = validCycleFeatures.map(c => c.pw50Ms).filter(v => v > 0);
       const cycleNotches = validCycleFeatures.map(c => c.dicroticDepth);
 
-      const rhythmResult = this.rhythmClassifier.classify(
+      const rhythmResult: any = this.rhythmClassifier.classify(
         beatInputs,
         Math.max(this.upstreamContext.avgBeatSQI, 20),
         sourceQuality,
@@ -835,9 +836,9 @@ export class VitalSignsProcessor {
   }
 
   private getFormattedResult(): VitalSignsResult {
-    const spo2State = this.lastSpo2?.enabledState ?? 'WITHHELD_LOW_QUALITY';
-    const glucoseState = this.lastGlucose?.enabledState ?? 'WITHHELD_LOW_QUALITY';
-    const lipidsState = this.lastLipids?.enabledState ?? 'WITHHELD_LOW_QUALITY';
+    const spo2State = (this.lastSpo2 as any)?.enabledState ?? 'WITHHELD_LOW_QUALITY';
+    const glucoseState = (this.lastGlucose as any)?.enabledState ?? 'WITHHELD_LOW_QUALITY';
+    const lipidsState = (this.lastLipids as any)?.enabledState ?? 'WITHHELD_LOW_QUALITY';
 
     const bpGated = MeasurementGate.gateBP(
       this.measurements.systolicPressure, this.measurements.diastolicPressure,
