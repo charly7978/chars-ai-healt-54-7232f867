@@ -799,7 +799,7 @@ export class VitalSignsProcessor {
       const winSQI = Math.max(this.upstreamContext.avgBeatSQI, 20) / 100;
 
       // V3 classifier has DFA α1, SampEn, bigeminy/trigeminy patterns
-      const rhythmV3 = this.rhythmClassifierV3.classify(beatInputs, winSQI, sourceQuality);
+      const rhythmV3: any = this.rhythmClassifierV3.classify(beatInputs, winSQI, sourceQuality);
       // Phase 14 — derive real morphology arrays from cycleFeatures so
       // the classifier can score amplitude/width stability + dicrotic depth.
       const cycleAmps = validCycleFeatures.map(c => c.systolicAmplitude).filter(v => v > 0);
