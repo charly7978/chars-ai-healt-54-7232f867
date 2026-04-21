@@ -662,11 +662,8 @@ export class VitalSignsProcessor {
       }
     }
 
-    const piGreen = this.rgbData.greenDC > 0 ? (this.rgbData.greenAC / this.rgbData.greenDC) * 100 : 0;
-    const rgACRatio = this.rgbData.greenAC > 0 ? this.rgbData.redAC / this.rgbData.greenAC : 0;
-
     if (medianF && hr >= 35 && hr <= 200 && this.measurements.signalQuality >= 10) {
-      const glucoseResult = this.glucoseProcessor.process({
+      const glucoseResult: any = (this.glucoseProcessor as any).process({
         cycleFeatures: {
           sutMs: medianF.sutMs, pw50Ms: medianF.pw50Ms,
           pw75Ms: medianF.pw75Ms, pw25Ms: medianF.pw25Ms,
@@ -679,13 +676,13 @@ export class VitalSignsProcessor {
         contactStable: this.upstreamContext.contactStable,
         signalQuality: this.measurements.signalQuality,
         beatCount: Math.max(this.upstreamContext.beatCount, beatInputs?.length || 0),
-      });
+      }, Math.max(0, this.measurements.signalQuality / 100), this.signalHistory.length / Math.max(1, sampleRate) * 1000);
       this.lastGlucose = glucoseResult;
-      if (glucoseResult.value > 0 && glucoseResult.enabledState !== 'WITHHELD_LOW_QUALITY') {
+      if (typeof glucoseResult.value === 'number' && glucoseResult.value > 0 && glucoseResult.status !== 'blocked') {
         this.measurements.glucose = this.smoothValue(this.measurements.glucose, glucoseResult.value, 'dynamic');
       }
 
-      const lipidResult = this.lipidProcessor.process({
+      const lipidResult: any = (this.lipidProcessor as any).process({
         cycleFeatures: {
           stiffnessIndex: medianF.stiffnessIndex,
           augmentationIndex: medianF.augmentationIndex,
@@ -698,11 +695,12 @@ export class VitalSignsProcessor {
         hr, rrVar, piGreen,
         contactStable: this.upstreamContext.contactStable,
         signalQuality: this.measurements.signalQuality,
-      });
+      }, Math.max(0, this.measurements.signalQuality / 100));
       this.lastLipids = lipidResult;
-      if (lipidResult.totalCholesterol > 0 && lipidResult.enabledState !== 'WITHHELD_LOW_QUALITY') {
-        this.measurements.totalCholesterol = this.smoothValue(this.measurements.totalCholesterol, lipidResult.totalCholesterol, 'dynamic');
-        this.measurements.triglycerides = this.smoothValue(this.measurements.triglycerides, lipidResult.triglycerides, 'dynamic');
+      const lipidVal = lipidResult?.value;
+      if (lipidVal && typeof lipidVal === 'object' && lipidVal.totalCholesterol > 0 && lipidResult.status !== 'blocked') {
+        this.measurements.totalCholesterol = this.smoothValue(this.measurements.totalCholesterol, lipidVal.totalCholesterol, 'dynamic');
+        this.measurements.triglycerides = this.smoothValue(this.measurements.triglycerides, lipidVal.triglycerides, 'dynamic');
       }
 
       // Phase 9 — V3 ridge regressors run in parallel; values overwrite V2
