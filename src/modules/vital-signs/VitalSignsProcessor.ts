@@ -564,32 +564,30 @@ export class VitalSignsProcessor {
       redAC: this.rgbData.redAC, redDC: this.rgbData.redDC,
       greenAC: this.rgbData.greenAC, greenDC: this.rgbData.greenDC,
       contactStable: this.upstreamContext.contactStable,
-      pressureOptimal: this.upstreamContext.pressureOptimal,
       clipHighRatio: this.upstreamContext.clipHighRatio,
       beatCount: Math.max(this.upstreamContext.beatCount, beatInputs?.length || 0),
       avgBeatSQI: this.upstreamContext.avgBeatSQI,
-      sourceStability: this.upstreamContext.sourceStability,
+      timestamp: Date.now(),
     });
-    let spo2Result = v2Result;
+    let spo2Result: any = v2Result;
     if (this.useSpO2V3) {
       const v3Result = this.spo2ProcessorV3.process({
         redAC: this.rgbData.redAC, redDC: this.rgbData.redDC,
         greenAC: this.rgbData.greenAC, greenDC: this.rgbData.greenDC,
         blueAC: this.rgbData.blueAC, blueDC: this.rgbData.blueDC,
         contactStable: this.upstreamContext.contactStable,
-        pressureOptimal: this.upstreamContext.pressureOptimal,
         clipHighRatio: this.upstreamContext.clipHighRatio,
         beatCount: Math.max(this.upstreamContext.beatCount, beatInputs?.length || 0),
         avgBeatSQI: this.upstreamContext.avgBeatSQI,
-        sourceStability: this.upstreamContext.sourceStability,
-      });
+        timestamp: Date.now(),
+      } as any);
       // Use V3 only when it actually published a value with usable confidence
       if (v3Result.value !== null && v3Result.confidence > Math.max(0.3, v2Result.confidence)) {
         spo2Result = v3Result;
       }
     }
     this.lastSpo2 = spo2Result;
-    if (typeof spo2Result.value === 'number' && spo2Result.value > 0 && spo2Result.enabledState !== 'WITHHELD_LOW_QUALITY') {
+    if (typeof spo2Result.value === 'number' && spo2Result.value > 0 && spo2Result.status !== 'blocked' && spo2Result.status !== 'low_quality') {
       this.measurements.spo2 = this.smoothValue(this.measurements.spo2, spo2Result.value, 'stable');
     }
 
