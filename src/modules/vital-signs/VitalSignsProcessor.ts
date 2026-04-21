@@ -836,9 +836,9 @@ export class VitalSignsProcessor {
   }
 
   private getFormattedResult(): VitalSignsResult {
-    const spo2State = this.lastSpo2?.enabledState ?? 'WITHHELD_LOW_QUALITY';
-    const glucoseState = this.lastGlucose?.enabledState ?? 'WITHHELD_LOW_QUALITY';
-    const lipidsState = this.lastLipids?.enabledState ?? 'WITHHELD_LOW_QUALITY';
+    const spo2State = (this.lastSpo2 as any)?.enabledState ?? 'WITHHELD_LOW_QUALITY';
+    const glucoseState = (this.lastGlucose as any)?.enabledState ?? 'WITHHELD_LOW_QUALITY';
+    const lipidsState = (this.lastLipids as any)?.enabledState ?? 'WITHHELD_LOW_QUALITY';
 
     const bpGated = MeasurementGate.gateBP(
       this.measurements.systolicPressure, this.measurements.diastolicPressure,
