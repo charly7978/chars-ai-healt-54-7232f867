@@ -600,8 +600,11 @@ export class VitalSignsProcessor {
 
     const medianF = validCycleFeatures.length >= 1 ? this.medianCycleFeatures(validCycleFeatures) : null;
 
+    const piGreen = this.rgbData.greenDC > 0 ? (this.rgbData.greenAC / this.rgbData.greenDC) * 100 : 0;
+    const rgACRatio = this.rgbData.greenAC > 0 ? this.rgbData.redAC / this.rgbData.greenAC : 0;
+
     if (validRR.length >= 2) {
-      const bpEstimate = this.bloodPressureProcessor.estimate(this.signalHistory, validRR, sampleRate);
+      const bpEstimate = this.legacyBP.estimate(this.signalHistory, validRR, sampleRate);
       this.lastBPConfidence = bpEstimate.confidence;
       this.lastBPFeatureQuality = bpEstimate.featureQuality;
       if (bpEstimate.systolic > 0 && bpEstimate.confidence !== 'INSUFFICIENT') {
