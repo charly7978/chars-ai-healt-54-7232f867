@@ -806,7 +806,7 @@ export class VitalSignsProcessor {
       const cycleWidths = validCycleFeatures.map(c => c.pw50Ms).filter(v => v > 0);
       const cycleNotches = validCycleFeatures.map(c => c.dicroticDepth);
 
-      const rhythmResult = this.rhythmClassifier.classify(
+      const rhythmResult: any = this.rhythmClassifier.classify(
         beatInputs,
         Math.max(this.upstreamContext.avgBeatSQI, 20),
         sourceQuality,
