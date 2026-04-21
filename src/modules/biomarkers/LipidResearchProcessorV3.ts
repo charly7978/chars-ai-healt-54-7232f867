@@ -141,13 +141,14 @@ export class LipidResearchProcessorV3 {
     return {
       value: {
         totalCholesterol: Math.round(tc),
+        triglycerides: Math.round(trig),
         ldl: Math.round(ldl),
         hdl: Math.round(hdl),
-        triglycerides: Math.round(trig),
       },
       unit: 'mg/dL',
       confidence,
       status: OutputStatus.RESEARCH_ONLY,
+      researchMode: true,
       qualityFlags: [{ flag: 'research_only', description: 'Lipids from PPG are research only', severity: 'info' }],
       evidence: { sqi, acceptedWindows: this.history.length, source: `ridge_v3_${this.points.length}pts`, perfusionIndex: features.perfusionGreen },
       debug: {
@@ -179,7 +180,8 @@ export class LipidResearchProcessorV3 {
 
   private blocked(status: OutputStatus): LipidsOutput {
     return {
-      value: null, unit: 'mg/dL', confidence: 0, status,
+      value: { totalCholesterol: 0, triglycerides: 0 },
+      unit: 'mg/dL', confidence: 0, status, researchMode: true,
       qualityFlags: [{ flag: 'device_uncalibrated', description: 'Lipids V3 requires calibration', severity: 'error' }],
       evidence: { sqi: 0, acceptedWindows: 0, source: 'uncalibrated', perfusionIndex: 0 },
       debug: { reason: 'No (or expired) calibration' },

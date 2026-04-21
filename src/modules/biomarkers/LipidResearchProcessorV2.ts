@@ -5,7 +5,7 @@
  * RESEARCH ONLY - Soporta modelos solo con paired labs reales.
  */
 
-import { OutputStatus, type LipidOutput } from '../../types/measurement';
+import { OutputStatus, type LipidsOutput } from '../../types/measurement';
 
 export interface LipidFeatureVector {
   stiffnessIndex: number;
@@ -169,13 +169,14 @@ export class LipidResearchProcessorV2 {
     return {
       value: {
         totalCholesterol: predictions.totalCholesterol,
+        triglycerides: predictions.triglycerides,
         ldl: predictions.ldl,
         hdl: predictions.hdl,
-        triglycerides: predictions.triglycerides,
       },
       unit: 'mg/dL',
       confidence,
       status: OutputStatus.RESEARCH_ONLY,
+      researchMode: true,
       qualityFlags: [{ flag: 'research_only', description: 'Research use only', severity: 'info' }],
       evidence: {
         sqi,
@@ -189,10 +190,11 @@ export class LipidResearchProcessorV2 {
   
   private createBlockedOutput(status: OutputStatus): LipidsOutput {
     return {
-      value: null,
+      value: { totalCholesterol: 0, triglycerides: 0 },
       unit: 'mg/dL',
       confidence: 0,
       status,
+      researchMode: true,
       qualityFlags: [{ flag: 'device_uncalibrated', description: 'Lipids require calibration', severity: 'error' }],
       evidence: {
         sqi: 0,
