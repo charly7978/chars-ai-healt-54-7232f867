@@ -1,5 +1,6 @@
 import { PPGFeatureExtractor } from './PPGFeatureExtractor';
 import { BloodPressureProcessorV2, type BPFeatureVector } from './BloodPressureProcessorV2';
+import { BloodPressureProcessor } from './BloodPressureProcessor';
 import { BloodPressureProcessorV3, type BPV3Features } from './BloodPressureProcessorV3';
 import { RhythmClassifierV2, type RhythmLabelV2, type RhythmEvidence } from './RhythmClassifierV2';
 import { RhythmClassifier, type RhythmResult as RhythmResultV3 } from './RhythmClassifier';
@@ -180,10 +181,11 @@ export class VitalSignsProcessor {
     rrStability: 0,
   };
 
-  private lastRhythm: RhythmResult | null = null;
-  private lastSpo2: SpO2Result | null = null;
-  private lastGlucose: GlucoseResult | null = null;
-  private lastLipids: LipidResult | null = null;
+  private lastRhythm: any = null;
+  private lastSpo2: any = null;
+  private lastGlucose: any = null;
+  private lastLipids: any = null;
+  private legacyBP = new BloodPressureProcessor();
 
   private readonly EMA_ALPHA_STABLE = 0.20;
   private readonly EMA_ALPHA_DYNAMIC = 0.30;
