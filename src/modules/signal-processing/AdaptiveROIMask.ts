@@ -30,6 +30,10 @@ export interface ROIMaskResult {
   rawRed: number;
   rawGreen: number;
   rawBlue: number;
+  // Coarse vs fine ROI separation
+  coarseRed: number;
+  coarseGreen: number;
+  coarseBlue: number;
   // Metrics
   coverageRatio: number;
   fingerScore: number;
@@ -42,12 +46,17 @@ export interface ROIMaskResult {
   validPixelCount: number;
   totalPixelCount: number;
   tileScores: Float64Array;
+  // V3: temporal mask stability (0=violently changing, 1=identical to prev)
+  maskStability: number;
+  // V3: percentile-derived adaptive thresholds for transparency
+  adaptiveRedFloor: number;
+  adaptiveDominanceFloor: number;
 }
 
-const GRID = 7; // 7x7 tile grid
+const GRID = 9; // V3: 9x9 grid for finer adaptive ROI
 const TOTAL_TILES = GRID * GRID;
-const CLIP_HIGH = 250;
-const CLIP_LOW = 5;
+const CLIP_HIGH = 248;   // tighter to exclude near-saturation
+const CLIP_LOW = 8;      // exclude crushed blacks
 
 export class AdaptiveROIMask {
   private tileConfidence: Float64Array = new Float64Array(TOTAL_TILES);
@@ -63,14 +72,21 @@ export class AdaptiveROIMask {
   private tileClipLow = new Int32Array(TOTAL_TILES);
   private tileValid = new Int32Array(TOTAL_TILES);
 
+  // V3: temporal smoothing of per-tile means for flicker-rejected RGB
+  private tileMeanR = new Float64Array(TOTAL_TILES);
+  private tileMeanG = new Float64Array(TOTAL_TILES);
+  private tileMeanB = new Float64Array(TOTAL_TILES);
+  private tileMeanInit = false;
+  private readonly TILE_TEMPORAL_ALPHA = 0.45;
+
   process(imageData: ImageData): ROIMaskResult {
     this.frameCount++;
     const data = imageData.data;
     const w = imageData.width;
     const h = imageData.height;
 
-    // Central ROI: 80% of min dimension
-    const roiSize = Math.min(w, h) * 0.80;
+    // V3: Central ROI: 85% of min dimension (cover more finger area)
+    const roiSize = Math.min(w, h) * 0.85;
     const sx = Math.floor((w - roiSize) / 2);
     const sy = Math.floor((h - roiSize) / 2);
     const ex = sx + Math.floor(roiSize);
@@ -91,8 +107,9 @@ export class AdaptiveROIMask {
     let totalClipHigh = 0;
     let totalClipLow = 0;
 
-    // Sample every 2nd pixel for performance (still denser than 3)
-    const step = 2;
+    // V3: Adaptive subsampling — denser when finger likely present
+    // step=2 for ≤480p, step=3 for higher to maintain ~25k samples
+    const step = roiW * roiH > 200000 ? 3 : 2;
     for (let y = sy; y < ey; y += step) {
       const rowOff = y * w;
       for (let x = sx; x < ex; x += step) {
@@ -107,9 +124,9 @@ export class AdaptiveROIMask {
 
         totalPixels++;
 
-        // Check clipping
+        // V3: stricter clipping — ANY channel near sensor limits is excluded
         const isClipHigh = r >= CLIP_HIGH || g >= CLIP_HIGH || b >= CLIP_HIGH;
-        const isClipLow = r <= CLIP_LOW && g <= CLIP_LOW && b <= CLIP_LOW;
+        const isClipLow = (r + g + b) <= (CLIP_LOW * 3);
 
         if (isClipHigh) {
           this.tileClipHigh[ti]++;
