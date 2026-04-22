@@ -43,9 +43,6 @@ export const useVitalSignsProcessor = () => {
     sourceStability?: number;
     avgBeatSQI?: number;
     beatCount?: number;
-    sampleRate?: number;
-    detectorAgreement?: number;
-    rrStability?: number;
   }) => {
     processorRef.current?.setUpstreamContext(ctx);
   }, []);
@@ -103,19 +100,6 @@ export const useVitalSignsProcessor = () => {
     return processorRef.current?.hasValidPressureEstimate() ?? false;
   }, []);
 
-  // Phase 12 — async cross-tier hydration of calibrations (fire-and-forget on mount)
-  useEffect(() => {
-    processorRef.current?.autoLoadCalibrations?.().catch(() => { /* */ });
-  }, []);
-
-  const autoLoadCalibrations = useCallback(async () => {
-    await processorRef.current?.autoLoadCalibrations?.();
-  }, []);
-
-  const persistCalibrations = useCallback(async () => {
-    await processorRef.current?.persistCalibrations?.();
-  }, []);
-
   return {
     processSignal,
     setRGBData,
@@ -127,8 +111,6 @@ export const useVitalSignsProcessor = () => {
     hasValidPressureEstimate,
     lastValidResults,
     getCalibrationProgress: useCallback(() => processorRef.current?.getCalibrationProgress() ?? 0, []),
-    autoLoadCalibrations,
-    persistCalibrations,
     debugInfo: {
       processedSignals: processedSignals.current,
       sessionId: sessionId.current

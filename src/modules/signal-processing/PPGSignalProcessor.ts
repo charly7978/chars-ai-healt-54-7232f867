@@ -5,11 +5,6 @@ import { AdaptiveROIMask, type ROIMaskResult } from './AdaptiveROIMask';
 import { PressureProxyEstimator, type PressureState, type PressureEstimate } from './PressureProxyEstimator';
 import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
-import { RadiometricProcessor } from './RadiometricProcessor';
-import { TileFusionEngine, type TileData, type FusionResult } from './TileFusionEngine';
-import { FingerContactClassifier, type ContactClassResult } from './FingerContactClassifier';
-import { POSExtractor } from './POSExtractor';
-import { CHROMExtractor } from './CHROMExtractor';
 
 // Extended contact states
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
@@ -33,13 +28,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private roiMask = new AdaptiveROIMask();
   private pressureEstimator = new PressureProxyEstimator();
   private sourceRanker = new SignalSourceRanker();
-  private radiometricProcessor: RadiometricProcessor;
-  private tileFusionEngine = new TileFusionEngine();
-  private contactClassifier = new FingerContactClassifier();
-  // Phase 3 — anti-flicker chrominance extractors
-  private posExtractor = new POSExtractor({ sampleRate: 30 });
-  private chromExtractor = new CHROMExtractor({ sampleRate: 30 });
-  private lastContactClassification?: ContactClassResult;
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
@@ -132,34 +120,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     public onError?: (error: ProcessingError) => void
   ) {
     this.bandpassFilter = new BandpassFilter(this.estimatedSampleRate);
-    this.radiometricProcessor = new RadiometricProcessor('generic', 1280, 720);
-    // Wire the radiometric processor into the ROI mask so each tile is
-    // linearized in Beer-Lambert space and exposes OD downstream.
-    this.roiMask.setRadiometricProcessor(this.radiometricProcessor);
-
-    // Phase 13 — receive dark-frame + drift events from CameraView
-    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-      window.addEventListener('cppg:dark-frame', this.handleDarkFrameEvent as EventListener);
-      window.addEventListener('cppg:camera-drift', this.handleCameraDriftEvent as EventListener);
-    }
   }
-
-  /** Phase 13 — consume dark-frame events from CameraView. */
-  private handleDarkFrameEvent = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    if (detail && (detail as ImageData).data) {
-      try { this.radiometricProcessor.bootstrapDarkFrame(detail as ImageData); } catch { /* */ }
-    }
-  };
-
-  /** Phase 13 — consume camera-drift events; penalize SQI accordingly. */
-  private cameraDriftScore = 0;
-  private handleCameraDriftEvent = (e: Event) => {
-    const detail = (e as CustomEvent).detail;
-    if (detail && typeof detail.score === 'number') {
-      this.cameraDriftScore = Math.max(0, Math.min(1, detail.score));
-    }
-  };
 
   async initialize(): Promise<void> { this.reset(); }
 
@@ -173,10 +134,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   stop(): void {
     this.isProcessing = false;
     this.stopMotionListener();
-    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
-      window.removeEventListener('cppg:dark-frame', this.handleDarkFrameEvent as EventListener);
-      window.removeEventListener('cppg:camera-drift', this.handleCameraDriftEvent as EventListener);
-    }
   }
 
   async calibrate(): Promise<boolean> { return true; }
@@ -190,51 +147,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const timestamp = frameTimestamp ?? performance.now();
     this.updateSampleRate(timestamp);
 
-    // --- ADAPTIVE ROI (Beer-Lambert per-tile inside) ---
-    // The ROI mask now linearizes each tile via RadiometricProcessor.processTileRGB,
-    // so we get linRed/linGreen/linBlue (linear sRGB mapped 0..255) AND OD per
-    // channel, ALL with O(49) work per frame instead of O(W*H).
+    // --- ADAPTIVE ROI ---
     const roi = this.roiMask.process(imageData);
     this.lastROIResult = roi;
     this.clipHighRatio = roi.clipHighRatio;
     this.clipLowRatio = roi.clipLowRatio;
     this.spatialUniformity = roi.spatialUniformity;
     this.centerCoverage = roi.centerCoverage;
-
-    // --- WHITE-POINT DRIFT TRACKING (sparse, very cheap) ---
-    if (this.frameCount % 8 === 0) {
-      this.radiometricProcessor.trackWhitePointDrift(imageData);
-    }
-
-    // --- TILE FUSION ---
-    const fusion = this.tileFusionEngine.fuse(roi.tileData ?? []);
-    const fusedRed = fusion.fusedR;
-    const fusedGreen = fusion.fusedG;
-    const fusedBlue = fusion.fusedB;
-    const fusedQuality = fusion.fusedQuality;
-
-    // --- CONTACT CLASSIFICATION ---
-    const contactResult = this.contactClassifier.classify({
-      colorStatsRaw: {
-        meanR: fusedRed,
-        meanG: fusedGreen,
-        meanB: fusedBlue,
-        stdR: 0,
-        stdG: 0,
-        stdB: 0,
-      },
-      saturationStats: {
-        clipHighRatio: roi.clipHighRatio,
-        clipLowRatio: roi.clipLowRatio,
-      },
-      roiCoverage: roi.coverageRatio,
-      imageWidth: imageData.width,
-      imageHeight: imageData.height,
-      data: imageData.data,
-      acSignal: this.redAC,
-      dcSignal: this.redDC,
-    });
-    this.lastContactClassification = contactResult;
 
     // --- PRESSURE ESTIMATION ---
     const pressure = this.pressureEstimator.estimate({
@@ -278,17 +197,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       return;
     }
 
-    // --- Contact detected: update baselines & buffers (LINEAR space) ---
-    // We feed AC/DC, source ranking and downstream processors with the
-    // linearized RGB. This gives device-independent ratio-of-ratios for SpO2
-    // and a more physically meaningful Beer-Lambert AC/DC for HR/perfusion.
-    const lR = roi.linRed;
-    const lG = roi.linGreen;
-    const lB = roi.linBlue;
-    this.updateBaselines(lR, lG, lB, motionArtifact);
-    this.redBuf.push(lR);
-    this.greenBuf.push(lG);
-    this.blueBuf.push(lB);
+    // --- Contact detected: update baselines & buffers ---
+    this.updateBaselines(roi.rawRed, roi.rawGreen, roi.rawBlue, motionArtifact);
+    this.redBuf.push(roi.rawRed);
+    this.greenBuf.push(roi.rawGreen);
+    this.blueBuf.push(roi.rawBlue);
 
     if (this.redBuf.length >= 36) {
       this.calculateACDC();
@@ -298,19 +211,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const redPI = this.redDC > 0 ? this.redAC / this.redDC : 0;
     const greenPI = this.greenDC > 0 ? this.greenAC / this.greenDC : 0;
 
-    // Phase 3 — push linearized RGB to the chrominance extractors and
-    // forward their output to the SourceRanker as additional candidates.
-    this.posExtractor.setSampleRate(this.estimatedSampleRate);
-    this.chromExtractor.setSampleRate(this.estimatedSampleRate);
-    const posSample = this.posExtractor.push(lR, lG, lB);
-    const chromSample = this.chromExtractor.push(lR, lG, lB);
-
     const source = this.sourceRanker.update(
-      lR, lG, lB,
+      roi.rawRed, roi.rawGreen, roi.rawBlue,
       this.redBaseline, this.greenBaseline, this.blueBaseline,
       redPI, greenPI,
-      roi.clipHighRatio, motionArtifact,
-      posSample, chromSample
+      roi.clipHighRatio, motionArtifact
     );
     this.activeSourceLabel = source.label;
     this.allSourceSQI = source.allSQI;
@@ -363,12 +268,10 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       sourceStability: this.sourceStability,
     });
 
-    // Gate: drift penalty (position) + camera-exposure-drift penalty (Phase 13)
+    // Gate: drift penalty
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
-    // cameraDriftScore: 0 → factor 1.0, 0.5+ → factor ≈ 0.5
-    const cameraDriftFactor = Math.max(0.4, 1 - this.cameraDriftScore * 1.0);
     const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.005
-      ? this.signalQuality * driftPenalty * cameraDriftFactor
+      ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
 
     // --- LOGGING ---
@@ -396,32 +299,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       perfusionIndex,
       rawRed: roi.rawRed,
       rawGreen: roi.rawGreen,
-      rawBlue: roi.rawBlue,
-      // Extended telemetry for downstream processors
-      telemetry: {
-        clipHighRatio: roi.clipHighRatio,
-        clipLowRatio: roi.clipLowRatio,
-        spatialUniformity: roi.spatialUniformity,
-        centerCoverage: roi.centerCoverage,
-        activeSourceLabel: source.label,
-        sourceStability: this.sourceStability,
-        allSourceSQI: source.allSQI || {},
-        pressureState: this.pressureState,
-        pressurePenalty: this.pressurePenalty,
-        motionScore: this.motionScore,
-        fingerConfidenceCount: this.fingerConfidenceCount,
-        stableContactCount: this.stableContactCount,
-        processingTimeMs: this.processingTimeMs,
-        realFps: this.realFps,
-        coverageRatio: roi.coverageRatio,
-        // Beer-Lambert telemetry (Fase 1)
-        odR: roi.odR,
-        odG: roi.odG,
-        odB: roi.odB,
-        linRed: roi.linRed,
-        linGreen: roi.linGreen,
-        linBlue: roi.linBlue,
-      },
       diagnostics: {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
@@ -771,9 +648,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.clipHighRatio = 0; this.clipLowRatio = 0;
     this.resetBaselines();
     this.bandpassFilter.setSampleRate(this.estimatedSampleRate);
-    // Phase 3
-    this.posExtractor.reset();
-    this.chromExtractor.reset();
     // Position lock
     this.positionLocked = false;
     this.lockedRedBase = 0; this.lockedGreenBase = 0; this.lockedCoverage = 0;
@@ -839,16 +713,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     return {
       redAC: this.redAC, redDC: this.redDC,
       greenAC: this.greenAC, greenDC: this.greenDC,
-      blueAC: this.blueAC, blueDC: this.blueDC,
       rgRatio: this.greenDC > 0 ? this.redDC / this.greenDC : 0,
       ratioOfRatios: this.greenDC > 0 && this.greenAC > 0 && this.redDC > 0
         ? (this.redAC / this.redDC) / (this.greenAC / this.greenDC) : 0,
-      // Multi-channel ratios for SpO2 V3 (Phase 7):
-      // R_RG = (Rac/Rdc) / (Gac/Gdc),  R_RB = (Rac/Rdc) / (Bac/Bdc)
-      ratioRG: this.greenDC > 0 && this.greenAC > 0 && this.redDC > 0
-        ? (this.redAC / this.redDC) / (this.greenAC / this.greenDC) : 0,
-      ratioRB: this.blueDC > 0 && this.blueAC > 0 && this.redDC > 0
-        ? (this.redAC / this.redDC) / (this.blueAC / this.blueDC) : 0,
     };
   }
 

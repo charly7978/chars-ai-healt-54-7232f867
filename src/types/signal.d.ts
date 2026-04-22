@@ -19,39 +19,6 @@ export interface ProcessedSignal {
   perfusionIndex?: number;
   rawRed?: number;
   rawGreen?: number;
-  rawBlue?: number;
-  // Extended telemetry for V2 pipeline
-  telemetry?: {
-    // Quality metrics
-    clipHighRatio: number;
-    clipLowRatio: number;
-    spatialUniformity: number;
-    centerCoverage: number;
-    // Source metrics
-    activeSourceLabel: string;
-    sourceStability: number;
-    allSourceSQI: Record<string, number>;
-    // Pressure & Motion
-    pressureState: string;
-    pressurePenalty: number;
-    motionScore: number;
-    // Contact
-    fingerConfidenceCount: number;
-    stableContactCount: number;
-    // Processing
-    processingTimeMs: number;
-    realFps: number;
-    // Coverage
-    coverageRatio: number;
-    // Beer-Lambert (Fase 1) — populated when AdaptiveROIMask is wired with
-    // a RadiometricProcessor (default in PPGSignalProcessor V2+)
-    odR?: number;
-    odG?: number;
-    odB?: number;
-    linRed?: number;
-    linGreen?: number;
-    linBlue?: number;
-  };
   diagnostics?: {
     message: string;
     hasPulsatility: boolean;
