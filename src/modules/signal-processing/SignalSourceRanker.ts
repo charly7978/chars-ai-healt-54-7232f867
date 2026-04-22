@@ -139,15 +139,38 @@ export class SignalSourceRanker {
     const std = Math.sqrt(v);
     const snr = range / (std + 0.1);
 
-    // Periodicity via autocorrelation peak
+    // V3: Periodicity via autocorrelation peak with PARABOLIC INTERPOLATION
+    // Search cardiac range: 0.5–3.5Hz → lags 8–60 at 30fps
     let bestAutoCorr = 0;
-    // Search for peaks in cardiac range: 0.5-3Hz at ~30fps = lags 10-60
+    let bestLag = 0;
+    let prevAc = 0, prevPrevAc = 0;
+    let peakAcPrev = 0, peakAcCurr = 0, peakAcNext = 0;
     for (let lag = 8; lag <= 60; lag++) {
       const ac = buf.autocorrelation(lag, n);
-      if (ac > bestAutoCorr) bestAutoCorr = ac;
+      // Detect local maximum: ac[lag-1] > ac[lag-2] AND ac[lag-1] > ac[lag]
+      if (lag >= 10 && prevAc > prevPrevAc && prevAc > ac) {
+        if (prevAc > bestAutoCorr) {
+          bestAutoCorr = prevAc;
+          bestLag = lag - 1;
+          peakAcPrev = prevPrevAc; peakAcCurr = prevAc; peakAcNext = ac;
+        }
+      }
+      prevPrevAc = prevAc;
+      prevAc = ac;
+    }
+    // Parabolic peak refinement (optional sub-lag precision)
+    if (bestLag > 0) {
+      const denom = peakAcPrev - 2 * peakAcCurr + peakAcNext;
+      if (Math.abs(denom) > 1e-6) {
+        const offset = 0.5 * (peakAcPrev - peakAcNext) / denom;
+        if (Math.abs(offset) < 1) {
+          // Refine peak value via parabolic vertex
+          bestAutoCorr = peakAcCurr - 0.25 * (peakAcPrev - peakAcNext) * offset;
+        }
+      }
     }
 
-    // Zero-crossing count (too many = noise)
+    // Zero-crossing rate around mean (too many = HF noise)
     let zeroCrossings = 0;
     for (let i = 1; i < n; i++) {
       if ((buf.get(buf.length - n + i) - mean) * (buf.get(buf.length - n + i - 1) - mean) < 0) {
@@ -155,19 +178,23 @@ export class SignalSourceRanker {
       }
     }
     const zcRate = zeroCrossings / n;
-    const zcPenalty = zcRate > 0.4 ? (zcRate - 0.4) * 30 : 0;
+    // Healthy PPG zc rate ≈ 0.05–0.20; aggressive penalty above 0.30
+    const zcPenalty = zcRate > 0.30 ? (zcRate - 0.30) * 40 : 0;
 
     // Drift penalty
     const firstHalfMean = buf.mean(Math.floor(n / 2));
     const drift = Math.abs(firstHalfMean - mean) / (range + 0.1);
-    const driftPenalty = drift * 10;
+    const driftPenalty = drift * 12;
 
-    const snrScore = Math.min(30, snr * 10);
-    const periodicityScore = bestAutoCorr * 35;
-    const clipPenalty = clipHigh * 25;
-    const motionPenalty = motion ? 10 : 0;
+    const snrScore = Math.min(28, snr * 9);
+    const periodicityScore = Math.max(0, Math.min(40, bestAutoCorr * 42));
+    const clipPenalty = clipHigh * 28;
+    const motionPenalty = motion ? 12 : 0;
+    // V3: bonus when periodicity is strong AND lag is in physiological range
+    const physiologicalBonus = (bestAutoCorr > 0.45 && bestLag >= 10 && bestLag <= 50) ? 6 : 0;
 
-    return Math.max(0, snrScore + periodicityScore - clipPenalty - motionPenalty - zcPenalty - driftPenalty);
+    return Math.max(0, snrScore + periodicityScore + physiologicalBonus
+      - clipPenalty - motionPenalty - zcPenalty - driftPenalty);
   }
 
   getActiveSource(): string { return this.activeSource; }
