@@ -418,19 +418,28 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const rgRatio = r / Math.max(1, g);
     const totalI = r + g + b;
     const notBlownOut = !(r > 253 && g > 252 && b > 252);
+    // V3: hemoglobin-specific absorption ratio R/(G+B) — higher = more red blood
+    const absorption = (g + b) > 1 ? r / (g + b) : 0;
+    // V3: require temporally-stable mask (no frame-to-frame ROI flipping)
+    const maskStable = roi.maskStability > 0.65;
 
     if (this.fingerDetected) {
-      // MAINTAIN — moderately strict
-      return r > 50 && rgRatio > 1.08 && redDominance > 10 &&
-        this.smoothedCoverage > 0.15 && this.smoothedFingerScore > 0.15 &&
+      // MAINTAIN — moderately strict; tolerate brief mask churn
+      return r > 55 && rgRatio > 1.10 && redDominance > 12 &&
+        absorption > 0.62 &&
+        this.smoothedCoverage > 0.15 && this.smoothedFingerScore > 0.18 &&
         notBlownOut;
     } else {
-      // ACQUIRE — very strict, only optimal placement
-      return r > 90 && rgRatio > 1.25 && redDominance > 25 &&
-        totalI > 150 && totalI < 720 &&
-        this.smoothedCoverage > 0.40 && this.smoothedFingerScore > 0.40 &&
-        roi.clipHighRatio < 0.3 &&
+      // V3 ACQUIRE — strict, hemoglobin signature + spatial + temporal stability
+      return r > 95 && rgRatio > 1.28 && redDominance > 28 &&
+        absorption > 0.78 &&
+        totalI > 160 && totalI < 700 &&
+        this.smoothedCoverage > 0.42 && this.smoothedFingerScore > 0.42 &&
+        roi.spatialUniformity > 0.42 &&
+        roi.centerCoverage > 0.30 &&
+        roi.clipHighRatio < 0.25 &&
         this.motionScore < 1.0 &&
+        maskStable &&
         notBlownOut;
     }
   }

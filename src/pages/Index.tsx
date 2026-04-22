@@ -526,7 +526,7 @@ const Index = () => {
       setUpstreamContext({
         contactStable: stableHumanSignal,
         pressureOptimal,
-        clipHighRatio: 0,
+        clipHighRatio: (lastSignal as any).clipHighRatio ?? 0,
         sourceStability,
         avgBeatSQI: heartBeatResult.beatSQI || heartBeatResult.debug.lastBeatSQI || 0,
         beatCount: heartBeatResult.debug.beatsAccepted || heartBeatResult.rrData?.intervals.length || 0,
