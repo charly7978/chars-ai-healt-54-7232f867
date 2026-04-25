@@ -866,6 +866,8 @@ export class HeartBeatProcessor {
     this.timestampBuf.clear();
     this.rrIntervals = [];
     this.acceptedBeats = [];
+    this.pendingFiducialBeats.length = 0;
+    this.lastFiducials = null;
     this.smoothBPM = 0;
     this.spectralBPM = 0;
     this.autocorrBPM = 0;
