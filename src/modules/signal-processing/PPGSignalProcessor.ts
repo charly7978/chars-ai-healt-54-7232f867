@@ -802,6 +802,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     window.removeEventListener('devicemotion', this.handleMotionEvent);
     this.motionListenerActive = false;
     this.motionScore = 0;
+    this.motionEventCount = 0;
   }
 
   // ══════════════════════════════════════════════════════
@@ -827,6 +828,18 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       positionDrift: this.positionDrift,
       guidance: this.positionGuidance,
       qualityScore: this.positionQualityScore,
+    };
+  }
+
+  /** IMU-derived motion telemetry for upstream gating */
+  getMotionInfo() {
+    return {
+      motionScore: this.motionScore,
+      motionArtifact: this.motionScore > this.MOTION_THRESH,
+      motionHigh: this.motionScore > this.MOTION_HIGH_THRESH,
+      motionGated: this.motionScore > this.MOTION_GATE_THRESH,
+      imuActive: this.motionListenerActive && this.motionEventCount > 5,
+      eventCount: this.motionEventCount,
     };
   }
 
