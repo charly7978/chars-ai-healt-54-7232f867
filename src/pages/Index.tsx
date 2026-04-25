@@ -422,10 +422,12 @@ const Index = () => {
     const signalValue = lastSignal.filteredValue;
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
     const positionQuality = getPositionQuality();
+    const motionInfo = getMotionInfo();
     const stableHumanSignal =
       contactState === 'STABLE_CONTACT' &&
       (lastSignal.quality || 0) >= 12 &&
-      (lastSignal.perfusionIndex || 0) >= 0.005;
+      (lastSignal.perfusionIndex || 0) >= 0.005 &&
+      !motionInfo.motionHigh; // IMU gate: high motion blocks "stable human signal"
 
     const pressureOptimal = positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
@@ -438,7 +440,7 @@ const Index = () => {
       {
         quality: lastSignal.quality,
         contactState,
-        motionArtifact: lastSignal.motionArtifact,
+        motionArtifact: lastSignal.motionArtifact || motionInfo.motionArtifact,
         pressureState: pressureOptimal ? 'OPTIMAL_PRESSURE' : 'LOW_PRESSURE',
         clipHigh: 0,
         clipLow: 0,
@@ -534,6 +536,8 @@ const Index = () => {
         sampleRate,
         detectorAgreement,
         rrStability,
+        motionScore: motionInfo.motionScore,
+        motionArtifact: motionInfo.motionArtifact,
       });
 
       if (rgbStats.redDC > 0 && rgbStats.greenDC > 0) {
