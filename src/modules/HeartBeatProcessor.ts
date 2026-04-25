@@ -6,6 +6,8 @@ import type {
   BeatCandidate, AcceptedBeat, BeatFlags, BPMHypothesis,
   HeartBeatResult, HeartBeatDebug
 } from '../types/beat';
+import type { BeatFiducials } from '../types/fiducials';
+import { FiducialDelineator } from './beats/FiducialDelineator';
 
 export class HeartBeatProcessor {
   private signalBuf = new RingBuffer(360);
@@ -22,6 +24,14 @@ export class HeartBeatProcessor {
   private templateLen = 0;
   private templateValid = false;
   private readonly TEMPLATE_WINDOW = 25;
+
+  // ── Fiducial delineation ──────────────────────────────────────────────
+  private fiducialDelineator = new FiducialDelineator();
+  /** Reusable scratch window (foot search behind peak + decay ahead). 1.2s @ 60 fps = 72 samples; 90 covers up to 50 fps with margin. */
+  private fiducialWindow: Float64Array = new Float64Array(90);
+  private readonly FIDUCIAL_PRE_SAMPLES = 30;   // ~500 ms at 60 fps for foot search
+  private readonly FIDUCIAL_POST_SAMPLES = 60;  // ~1000 ms for notch + diastolic
+  private lastFiducials: BeatFiducials | null = null;
 
   private smoothBPM = 0;
   private spectralBPM = 0;
