@@ -46,6 +46,8 @@ export const useVitalSignsProcessor = () => {
     sampleRate?: number;
     detectorAgreement?: number;
     rrStability?: number;
+    motionScore?: number;
+    motionArtifact?: boolean;
   }) => {
     processorRef.current?.setUpstreamContext(ctx);
   }, []);
