@@ -184,6 +184,15 @@ export class HeartBeatProcessor {
         if (this.acceptedBeats.length > this.MAX_ACCEPTED) this.acceptedBeats.shift();
         this.beatsAccepted++;
 
+        // Queue this beat for deferred fiducial delineation. The post-peak window
+        // (notch + diastolic peak) hasn't arrived yet — drained once enough
+        // samples are buffered in `processPendingFiducials()`.
+        this.pendingFiducialBeats.push({
+          beat: accepted,
+          peakSampleIndex: this.frameCount,
+        });
+        if (this.pendingFiducialBeats.length > 8) this.pendingFiducialBeats.shift();
+
         if (currentBeatSQI > 50) {
           this.updateTemplate();
         }
@@ -231,7 +240,9 @@ export class HeartBeatProcessor {
         detectorAgreement: beat.detectorAgreementScore,
         amplitude: undefined,
         flags: beat.flags,
+        fiducials: beat.fiducials,
       })),
+      lastFiducials: this.lastFiducials ?? undefined,
     };
 
     return {
@@ -877,6 +888,75 @@ export class HeartBeatProcessor {
 
   dispose(): void {
     if (this.audioContext) this.audioContext.close().catch(() => {});
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  FIDUCIAL DELINEATION — deferred per-beat
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Drain pending beats whose post-peak window has fully arrived in `signalBuf`.
+   * For each ready beat, copy a [pre, post] window into `fiducialWindow`,
+   * run the FiducialDelineator, store the result on the AcceptedBeat, and
+   * boost the beat's morphologyScore when validity is high.
+   *
+   * Hot-path safe: bounded pending queue (≤8), no allocations beyond the
+   * already-allocated scratch window.
+   */
+  private processPendingFiducials(): void {
+    const currentSampleIdx = this.frameCount;
+    const pre = this.FIDUCIAL_PRE_SAMPLES;
+    const post = this.FIDUCIAL_POST_SAMPLES;
+    const ringLen = this.signalBuf.length;
+
+    // Process from oldest to newest; remove processed entries in-place.
+    let writeIdx = 0;
+    for (let readIdx = 0; readIdx < this.pendingFiducialBeats.length; readIdx++) {
+      const entry = this.pendingFiducialBeats[readIdx];
+      const samplesSincePeak = currentSampleIdx - entry.peakSampleIndex;
+
+      // Not enough post-peak samples yet → keep waiting.
+      if (samplesSincePeak < post) {
+        this.pendingFiducialBeats[writeIdx++] = entry;
+        continue;
+      }
+
+      // Beat too old to still be in the ring buffer → drop silently.
+      const peakOffsetFromHead = samplesSincePeak; // newest pushed sample is at signalBuf.length-1
+      if (peakOffsetFromHead + pre >= ringLen) {
+        continue; // drop
+      }
+
+      // Copy [peak-pre … peak+post] into the scratch window.
+      const peakPosInRing = ringLen - 1 - samplesSincePeak; // index into ring buffer of the peak sample
+      const startInRing = peakPosInRing - pre;
+      const winLen = pre + post + 1;
+      if (startInRing < 0 || startInRing + winLen > ringLen) {
+        continue; // drop, insufficient pre samples (very early beats)
+      }
+      // Ensure scratch capacity (allocated once at construction).
+      if (this.fiducialWindow.length < winLen) {
+        this.fiducialWindow = new Float64Array(winLen);
+      }
+      for (let i = 0; i < winLen; i++) {
+        this.fiducialWindow[i] = this.signalBuf.get(startInRing + i);
+      }
+
+      // Effective sample rate from recent timestamps.
+      const sr = this.estimateSampleRate();
+      const fid = this.fiducialDelineator.delineate(this.fiducialWindow, pre, sr);
+
+      entry.beat.fiducials = fid;
+      this.lastFiducials = fid;
+
+      // Morphology boost: high-validity fiducials retroactively raise the beat's
+      // morphology score (keeps beatSQI consistent with the richer evidence).
+      if (fid.morphologyValidity > 0.5) {
+        const boost = fid.morphologyValidity * 25; // up to +25 on a 0–100 scale
+        entry.beat.morphologyScore = Math.min(100, entry.beat.morphologyScore + boost);
+      }
+    }
+    this.pendingFiducialBeats.length = writeIdx;
   }
 }
 
