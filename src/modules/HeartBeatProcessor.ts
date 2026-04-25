@@ -111,6 +111,11 @@ export class HeartBeatProcessor {
     const ssf = this.computeSlopeSum();
     this.slopeSum.push(ssf);
 
+    // Drain any pending fiducial computations whose post-peak window is now ready.
+    if (this.pendingFiducialBeats.length > 0) {
+      this.processPendingFiducials();
+    }
+
     if (this.signalBuf.length < 25) {
       return this.makeEmptyResult(0);
     }
