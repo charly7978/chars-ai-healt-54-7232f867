@@ -96,11 +96,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private pressureState: PressureState = 'LOW_PRESSURE';
   private pressurePenalty = 1.0;
 
-  // --- Motion ---
+  // --- Motion (IMU-based gating) ---
+  // motionScore is an EWMA-filtered RMS of accelerometer delta + gyroscope rate.
+  // Levels:
+  //   < MOTION_THRESH       → quiet, no penalty
+  //   ≥ MOTION_THRESH       → motionArtifact flag set (down-weight downstream)
+  //   ≥ MOTION_HIGH_THRESH  → strong down-weight: quality halved, no peak validation
+  //   ≥ MOTION_GATE_THRESH  → SUSPEND: skip baseline/buffer/source updates entirely
   private motionScore = 0;
   private motionListenerActive = false;
   private lastAccel = { x: 0, y: 0, z: 0 };
+  private motionEventCount = 0;
   private readonly MOTION_THRESH = 0.6;
+  private readonly MOTION_HIGH_THRESH = 0.95;
+  private readonly MOTION_GATE_THRESH = 1.6;
 
   // --- Debug / telemetry ---
   private debugEnabled = false;
