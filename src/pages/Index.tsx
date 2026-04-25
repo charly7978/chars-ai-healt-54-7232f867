@@ -116,6 +116,7 @@ const Index = () => {
     framesProcessed,
     getRGBStats,
     getPositionQuality,
+    getMotionInfo,
   } = useSignalProcessor();
   
   const { 
