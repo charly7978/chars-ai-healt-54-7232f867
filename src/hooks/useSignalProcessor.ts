@@ -146,6 +146,13 @@ export const useSignalProcessor = () => {
     return processorRef.current.getPositionQuality();
   }, []);
 
+  const getMotionInfo = useCallback(() => {
+    if (!processorRef.current) {
+      return { motionScore: 0, motionArtifact: false, motionHigh: false, motionGated: false, imuActive: false, eventCount: 0 };
+    }
+    return processorRef.current.getMotionInfo();
+  }, []);
+
   return {
     isProcessing,
     lastSignal,
@@ -157,6 +164,7 @@ export const useSignalProcessor = () => {
     processFrame,
     getRGBStats,
     getPositionQuality,
+    getMotionInfo,
     debugInfo: {
       sessionId: sessionIdRef.current,
       initializationState: initializationState.current,
