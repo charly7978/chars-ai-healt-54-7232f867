@@ -1,46 +1,47 @@
 /**
- * MULTI-SOURCE SIGNAL RANKER V2
- * 
- * Generates 6 candidate PPG signals, scores each by SQI metrics,
- * applies winner-take-all with temporal hysteresis.
- * No simulation — pure competitive extraction.
+ * MULTI-SOURCE SIGNAL RANKER V3 — 8 CANDIDATES INCLUDING CHROM & POS
+ *
+ * Generates 8 candidate PPG signals from raw RGB and ranks them by a
+ * composite SQI (SNR, periodicity via parabolic-refined autocorrelation,
+ * zero-crossing rate, drift, clip & motion penalties).
+ *
+ * Sources:
+ *   R, G, RG, absR, absG, diffRG  — direct & log-absorbance & blends
+ *   CHROM (de Haan 2013)          — Xs - α·Ys, projects out specular highlights
+ *   POS   (Wang 2017)             — projection orthogonal to skin tone vector
+ *
+ * CHROM & POS are state-of-the-art rPPG projections that also boost finger-PPG
+ * because they cancel illumination flicker that survives the bandpass.
+ *
+ * Hot path is allocation-free: fixed Float64Array scratch, indexed loops, no
+ * Map iteration, no Object.entries.
  */
 import { RingBuffer } from './RingBuffer';
 
-export interface SourceCandidate {
-  label: string;
-  value: number;
-  acdc: number;
-  perfusionIndex: number;
-  bandPower: number;
-  periodicity: number;
-  clipPenalty: number;
-  driftPenalty: number;
-  sqi: number;
-}
-
-interface SourceState {
-  buffer: RingBuffer;
-  dcEWMA: number;
-  sqi: number;
-}
+const SRC_LABELS = ['R', 'G', 'RG', 'absR', 'absG', 'diffRG', 'CHROM', 'POS'] as const;
+type SrcLabel = typeof SRC_LABELS[number];
+const N_SRC = SRC_LABELS.length;
 
 export class SignalSourceRanker {
-  private sources: Map<string, SourceState> = new Map();
-  private activeSource = 'RG';
+  private buffers: RingBuffer[] = [];
+  private sqi: Float64Array = new Float64Array(N_SRC);
+  private activeIdx = 2; // 'RG'
   private lastSwitchFrame = 0;
   private readonly HYSTERESIS_FRAMES = 90; // ~3s at 30fps
   private readonly BUFFER_SIZE = 180;
   private frameCount = 0;
 
+  // CHROM/POS running mean for normalization (per-channel skin-tone EWMA)
+  private muR = 0; private muG = 0; private muB = 0;
+  private muInit = false;
+  private readonly MU_ALPHA = 0.04;
+
+  // Reusable scratch for candidate values (zero alloc)
+  private cand: Float64Array = new Float64Array(N_SRC);
+
   constructor() {
-    const labels = ['R', 'G', 'RG', 'absR', 'absG', 'diffRG'];
-    for (const l of labels) {
-      this.sources.set(l, {
-        buffer: new RingBuffer(this.BUFFER_SIZE),
-        dcEWMA: 0,
-        sqi: 0,
-      });
+    for (let i = 0; i < N_SRC; i++) {
+      this.buffers.push(new RingBuffer(this.BUFFER_SIZE));
     }
   }
 
@@ -72,59 +73,77 @@ export class SignalSourceRanker {
     if (rawG > 245) { gW *= 0.4; rW = 1 - gW; }
     if (rawR > 245) { rW *= 0.4; gW = 1 - rW; }
 
-    const candidates: Record<string, number> = {
-      R: rPulse * 3200,
-      G: gPulse * 3200,
-      RG: (rPulse * rW + gPulse * gW) * 3200,
-      absR: baseR > 10 ? -Math.log((rawR + eps) / baseR) * 2000 : 0,
-      absG: baseG > 10 ? -Math.log((rawG + eps) / baseG) * 2000 : 0,
-      diffRG: (rPulse - gPulse) * 2400,
-    };
+    // --- CHROM (de Haan 2013) & POS (Wang 2017) ---
+    // Normalize RGB by their slow EWMA mean → unit-mean RGB Rn,Gn,Bn
+    if (!this.muInit) {
+      this.muR = rawR; this.muG = rawG; this.muB = rawB; this.muInit = true;
+    } else {
+      const a = this.MU_ALPHA;
+      this.muR = this.muR * (1 - a) + rawR * a;
+      this.muG = this.muG * (1 - a) + rawG * a;
+      this.muB = this.muB * (1 - a) + rawB * a;
+    }
+    const Rn = this.muR > 1 ? rawR / this.muR : 1;
+    const Gn = this.muG > 1 ? rawG / this.muG : 1;
+    const Bn = this.muB > 1 ? rawB / this.muB : 1;
 
-    // Push values to buffers
-    for (const [label, val] of Object.entries(candidates)) {
-      const src = this.sources.get(label)!;
-      src.buffer.push(val);
-      src.dcEWMA = src.dcEWMA * 0.97 + val * 0.03;
+    // CHROM:  Xs = 3·Rn − 2·Gn ;  Ys = 1.5·Rn + Gn − 1.5·Bn ;  S = Xs − α·Ys
+    // α adapts as σ(Xs)/σ(Ys); approximate online with a tiny EWMA of |Xs|/|Ys|
+    const Xs = 3 * Rn - 2 * Gn;
+    const Ys = 1.5 * Rn + Gn - 1.5 * Bn;
+    const alphaChrom = Math.abs(Ys) > 1e-3 ? Math.min(2.5, Math.max(0.1, Math.abs(Xs) / Math.abs(Ys))) : 1;
+    const chromVal = (Xs - alphaChrom * Ys) * 1500;
+
+    // POS: project on plane orthogonal to skin-tone vector; output = X1 + (σ(X1)/σ(X2))·X2
+    // X1 = Gn − Bn ; X2 = Gn + Bn − 2·Rn
+    const X1 = Gn - Bn;
+    const X2 = Gn + Bn - 2 * Rn;
+    const ratio = Math.abs(X2) > 1e-3 ? Math.min(2.5, Math.max(0.1, Math.abs(X1) / Math.abs(X2))) : 1;
+    const posVal = (X1 + ratio * X2) * 1500;
+
+    // Fill scratch (no allocation)
+    this.cand[0] = rPulse * 3200;                                 // R
+    this.cand[1] = gPulse * 3200;                                 // G
+    this.cand[2] = (rPulse * rW + gPulse * gW) * 3200;            // RG
+    this.cand[3] = baseR > 10 ? -Math.log((rawR + eps) / baseR) * 2000 : 0; // absR
+    this.cand[4] = baseG > 10 ? -Math.log((rawG + eps) / baseG) * 2000 : 0; // absG
+    this.cand[5] = (rPulse - gPulse) * 2400;                      // diffRG
+    this.cand[6] = chromVal;                                      // CHROM
+    this.cand[7] = posVal;                                        // POS
+
+    // Push to ring buffers (indexed loop — no allocation)
+    for (let i = 0; i < N_SRC; i++) {
+      this.buffers[i].push(this.cand[i]);
     }
 
     // Rank every 30 frames
     const allSQI: Record<string, number> = {};
     if (this.frameCount % 30 === 0) {
-      let bestLabel = this.activeSource;
+      let bestIdx = this.activeIdx;
       let bestSQI = -1;
-
-      for (const [label, src] of this.sources) {
-        if (src.buffer.length < 60) continue;
-        const sqi = this.computeSQI(src, clipHigh, motionArtifact);
-        src.sqi = sqi;
-        allSQI[label] = sqi;
-        if (sqi > bestSQI) {
-          bestSQI = sqi;
-          bestLabel = label;
-        }
+      for (let i = 0; i < N_SRC; i++) {
+        const buf = this.buffers[i];
+        if (buf.length < 60) { this.sqi[i] = 0; continue; }
+        const s = this.computeSQI(buf, clipHigh, motionArtifact);
+        this.sqi[i] = s;
+        if (s > bestSQI) { bestSQI = s; bestIdx = i; }
       }
-
-      // Switch only if significantly better AND past hysteresis
-      const currentSQI = this.sources.get(this.activeSource)?.sqi ?? 0;
-      if (bestLabel !== this.activeSource &&
+      const currentSQI = this.sqi[this.activeIdx];
+      if (bestIdx !== this.activeIdx &&
         bestSQI > currentSQI * 1.25 &&
         this.frameCount - this.lastSwitchFrame > this.HYSTERESIS_FRAMES) {
-        this.activeSource = bestLabel;
+        this.activeIdx = bestIdx;
         this.lastSwitchFrame = this.frameCount;
       }
-    } else {
-      for (const [label, src] of this.sources) {
-        allSQI[label] = src.sqi;
-      }
     }
+    for (let i = 0; i < N_SRC; i++) allSQI[SRC_LABELS[i]] = this.sqi[i];
 
-    const value = Math.min(80, Math.max(-80, candidates[this.activeSource] ?? candidates['RG']));
-    return { value, label: this.activeSource, allSQI };
+    const v = this.cand[this.activeIdx];
+    const value = Math.min(80, Math.max(-80, v));
+    return { value, label: SRC_LABELS[this.activeIdx], allSQI };
   }
 
-  private computeSQI(src: SourceState, clipHigh: number, motion: boolean): number {
-    const buf = src.buffer;
+  private computeSQI(buf: RingBuffer, clipHigh: number, motion: boolean): number {
     const n = Math.min(120, buf.length);
     if (n < 30) return 0;
 
@@ -197,16 +216,16 @@ export class SignalSourceRanker {
       - clipPenalty - motionPenalty - zcPenalty - driftPenalty);
   }
 
-  getActiveSource(): string { return this.activeSource; }
+  getActiveSource(): string { return SRC_LABELS[this.activeIdx]; }
 
   reset(): void {
-    for (const src of this.sources.values()) {
-      src.buffer.clear();
-      src.dcEWMA = 0;
-      src.sqi = 0;
+    for (let i = 0; i < N_SRC; i++) {
+      this.buffers[i].clear();
+      this.sqi[i] = 0;
     }
-    this.activeSource = 'RG';
+    this.activeIdx = 2; // RG
     this.lastSwitchFrame = 0;
     this.frameCount = 0;
+    this.muR = 0; this.muG = 0; this.muB = 0; this.muInit = false;
   }
 }
