@@ -79,6 +79,35 @@ export class AdaptiveROIMask {
   private tileMeanInit = false;
   private readonly TILE_TEMPORAL_ALPHA = 0.45;
 
+  // V4: reusable per-tile metric scratch (zero alloc in hot path)
+  private mScore = new Float64Array(TOTAL_TILES);
+  private mIntensity = new Float64Array(TOTAL_TILES);
+  private mRedDom = new Float64Array(TOTAL_TILES);
+  private mRgRatio = new Float64Array(TOTAL_TILES);
+  private mClipHi = new Float64Array(TOTAL_TILES);
+  private mClipLo = new Float64Array(TOTAL_TILES);
+  private mCenterBias = new Float64Array(TOTAL_TILES);
+  private mValidPx = new Int32Array(TOTAL_TILES);
+  private currentMask = new Uint8Array(TOTAL_TILES);
+  // Reusable scratch for percentile sorts (worst case = TOTAL_TILES)
+  private sortScratch = new Float64Array(TOTAL_TILES);
+  // Reusable output tile scores returned to caller
+  private outTileScores = new Float64Array(TOTAL_TILES);
+
+  // V4: precomputed center-bias table — depends only on geometry
+  private static readonly CENTER_BIAS_TBL = (() => {
+    const t = new Float64Array(TOTAL_TILES);
+    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+      const gx = ti % GRID;
+      const gy = (ti / GRID) | 0;
+      const nx = GRID > 1 ? gx / (GRID - 1) : 0.5;
+      const ny = GRID > 1 ? gy / (GRID - 1) : 0.5;
+      const dist = Math.sqrt((nx - 0.5) ** 2 + (ny - 0.5) ** 2);
+      t[ti] = Math.max(0.15, Math.exp(-dist * 2.4));
+    }
+    return t;
+  })();
+
   process(imageData: ImageData): ROIMaskResult {
     this.frameCount++;
     const data = imageData.data;
@@ -148,20 +177,20 @@ export class AdaptiveROIMask {
       }
     }
 
-    // --- Compute per-tile metrics ---
-    // First pass: collect all tile scores for percentile-based thresholding
-    const tileMetrics: TileMetrics[] = new Array(TOTAL_TILES);
-    const allScores: number[] = [];
-
+    // --- V4: Compute per-tile metrics into pre-allocated Float64Arrays ---
+    let scoreCount = 0;
     for (let ti = 0; ti < TOTAL_TILES; ti++) {
       const cnt = this.tileValid[ti];
       const total = this.tileCount[ti];
       if (cnt === 0 || total === 0) {
-        tileMetrics[ti] = {
-          meanR: 0, meanG: 0, meanB: 0, redDominance: 0,
-          rgRatio: 0, intensity: 0, clipHighPct: 0, clipLowPct: 0,
-          validPixels: 0, centerBias: 0, score: 0, temporalScore: 0
-        };
+        this.mScore[ti] = 0;
+        this.mIntensity[ti] = 0;
+        this.mRedDom[ti] = 0;
+        this.mRgRatio[ti] = 0;
+        this.mClipHi[ti] = 0;
+        this.mClipLo[ti] = 0;
+        this.mCenterBias[ti] = AdaptiveROIMask.CENTER_BIAS_TBL[ti];
+        this.mValidPx[ti] = 0;
         continue;
       }
 
@@ -189,13 +218,8 @@ export class AdaptiveROIMask {
       const clipHighPct = this.tileClipHigh[ti] / total;
       const clipLowPct = this.tileClipLow[ti] / total;
 
-      // V3: Logarithmic center bias (sharper falloff, finger naturally fills center)
-      const gx = ti % GRID;
-      const gy = (ti / GRID) | 0;
-      const nx = GRID > 1 ? gx / (GRID - 1) : 0.5;
-      const ny = GRID > 1 ? gy / (GRID - 1) : 0.5;
-      const dist = Math.sqrt((nx - 0.5) ** 2 + (ny - 0.5) ** 2);
-      const centerBias = Math.max(0.15, Math.exp(-dist * 2.4));
+      // V4: precomputed center bias from static table
+      const centerBias = AdaptiveROIMask.CENTER_BIAS_TBL[ti];
 
       // V3: Hemoglobin signature — multi-factor with R/(G+B) and absorption
       // Real finger has rgRatio ≈ 1.4–2.5, redDominance ≈ 30–80 with flash
@@ -223,81 +247,88 @@ export class AdaptiveROIMask {
       this.tileConfidence[ti] = this.tileConfidence[ti] * 0.72 + frameScore * centerBias * 0.28;
       const combinedScore = this.tileConfidence[ti] * 0.65 + frameScore * 0.35;
 
-      tileMetrics[ti] = {
-        meanR: smR, meanG: smG, meanB: smB, redDominance,
-        rgRatio, intensity, clipHighPct, clipLowPct,
-        validPixels: cnt, centerBias,
-        score: combinedScore, temporalScore: this.tileConfidence[ti]
-      };
-      allScores.push(combinedScore);
+      this.mScore[ti] = combinedScore;
+      this.mIntensity[ti] = intensity;
+      this.mRedDom[ti] = redDominance;
+      this.mRgRatio[ti] = rgRatio;
+      this.mClipHi[ti] = clipHighPct;
+      this.mClipLo[ti] = clipLowPct;
+      this.mCenterBias[ti] = centerBias;
+      this.mValidPx[ti] = cnt;
+      this.sortScratch[scoreCount++] = combinedScore;
     }
     this.tileMeanInit = true;
 
-    // --- V3: Adaptive thresholding from FRAME percentiles (no fixed thresholds) ---
-    allScores.sort((a, b) => a - b);
-    const p60 = allScores.length > 0 ? allScores[Math.floor(allScores.length * 0.6)] : 0;
-    const p80 = allScores.length > 0 ? allScores[Math.floor(allScores.length * 0.8)] : 0;
-    // Finger tile threshold: top 40% of tiles, but at least 0.28
-    const fingerThreshold = Math.max(0.28, p60 * 0.9);
-
-    // Adaptive R floor & dominance floor from valid tiles' percentiles
-    const allR: number[] = [];
-    const allDom: number[] = [];
-    for (let ti = 0; ti < TOTAL_TILES; ti++) {
-      if (tileMetrics[ti].validPixels > 0) {
-        allR.push(tileMetrics[ti].meanR);
-        allDom.push(tileMetrics[ti].redDominance);
-      }
+    // --- V4: Adaptive thresholds from FRAME percentiles (subarray sort, no GC) ---
+    let fingerThreshold = 0.28;
+    if (scoreCount > 0) {
+      const view = this.sortScratch.subarray(0, scoreCount);
+      view.sort();
+      const p60 = view[Math.floor(scoreCount * 0.6)];
+      fingerThreshold = Math.max(0.28, p60 * 0.9);
     }
-    allR.sort((a, b) => a - b);
-    allDom.sort((a, b) => a - b);
-    const adaptiveRedFloor = allR.length > 0 ? Math.max(40, allR[Math.floor(allR.length * 0.4)] * 0.85) : 40;
-    const adaptiveDominanceFloor = allDom.length > 0 ? Math.max(5, allDom[Math.floor(allDom.length * 0.5)] * 0.7) : 5;
+    // Adaptive R-floor & dominance-floor: reuse sortScratch with two passes
+    let validN = 0;
+    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+      if (this.mValidPx[ti] > 0) this.sortScratch[validN++] = this.tileMeanR[ti];
+    }
+    let adaptiveRedFloor = 40;
+    if (validN > 0) {
+      const v = this.sortScratch.subarray(0, validN);
+      v.sort();
+      adaptiveRedFloor = Math.max(40, v[Math.floor(validN * 0.4)] * 0.85);
+    }
+    let validN2 = 0;
+    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+      if (this.mValidPx[ti] > 0) this.sortScratch[validN2++] = this.mRedDom[ti];
+    }
+    let adaptiveDominanceFloor = 5;
+    if (validN2 > 0) {
+      const v = this.sortScratch.subarray(0, validN2);
+      v.sort();
+      adaptiveDominanceFloor = Math.max(5, v[Math.floor(validN2 * 0.5)] * 0.7);
+    }
 
     // --- Identify valid finger tiles ---
-    const currentMask = new Uint8Array(TOTAL_TILES);
+    this.currentMask.fill(0);
     let fingerTileCount = 0;
-    const validTileIndices: number[] = [];
-
+    let scoreSum = 0;
     for (let ti = 0; ti < TOTAL_TILES; ti++) {
-      const m = tileMetrics[ti];
       const isFingerTile =
-        m.score > fingerThreshold &&
-        m.meanR > adaptiveRedFloor &&
-        m.rgRatio > 1.08 &&
-        m.redDominance > adaptiveDominanceFloor &&
-        m.intensity > 90 &&
-        m.clipHighPct < 0.40 &&
-        m.clipLowPct < 0.40 &&
-        m.validPixels > 4;
-
+        this.mScore[ti] > fingerThreshold &&
+        this.tileMeanR[ti] > adaptiveRedFloor &&
+        this.mRgRatio[ti] > 1.08 &&
+        this.mRedDom[ti] > adaptiveDominanceFloor &&
+        this.mIntensity[ti] > 90 &&
+        this.mClipHi[ti] < 0.40 &&
+        this.mClipLo[ti] < 0.40 &&
+        this.mValidPx[ti] > 4;
       if (isFingerTile) {
-        currentMask[ti] = 1;
+        this.currentMask[ti] = 1;
         fingerTileCount++;
-        validTileIndices.push(ti);
+        scoreSum += this.mScore[ti];
       }
     }
 
     // V3: temporal mask stability — fraction of tiles unchanged
     let maskChangeCount = 0;
     for (let ti = 0; ti < TOTAL_TILES; ti++) {
-      if (currentMask[ti] !== this.prevMaskValid[ti]) maskChangeCount++;
+      if (this.currentMask[ti] !== this.prevMaskValid[ti]) maskChangeCount++;
     }
     const maskStability = 1 - maskChangeCount / TOTAL_TILES;
-    this.prevMaskValid.set(currentMask);
+    this.prevMaskValid.set(this.currentMask);
 
     // --- V3: COARSE ROI (all tiles with finger signature, lenient) ---
     // Used for contact detection only.
     let cR = 0, cG = 0, cB = 0, cTotal = 0;
     for (let ti = 0; ti < TOTAL_TILES; ti++) {
-      const m = tileMetrics[ti];
-      if (m.validPixels === 0) continue;
+      if (this.mValidPx[ti] === 0) continue;
       // Coarse: any tile not heavily clipped & with some red dominance
-      if (m.clipHighPct < 0.6 && m.clipLowPct < 0.6 && m.redDominance > 3) {
-        const w = 0.5 + m.score;
-        cR += m.meanR * w;
-        cG += m.meanG * w;
-        cB += m.meanB * w;
+      if (this.mClipHi[ti] < 0.6 && this.mClipLo[ti] < 0.6 && this.mRedDom[ti] > 3) {
+        const w = 0.5 + this.mScore[ti];
+        cR += this.tileMeanR[ti] * w;
+        cG += this.tileMeanG[ti] * w;
+        cB += this.tileMeanB[ti] * w;
         cTotal += w;
       }
     }
@@ -309,18 +340,16 @@ export class AdaptiveROIMask {
     let wR = 0, wG = 0, wB = 0, wTotal = 0;
     let brightSum = 0, brightSqSum = 0;
     let totalValidPx = 0;
-
-    for (const ti of validTileIndices) {
-      const m = tileMetrics[ti];
-      // V3: weight emphasizes high-quality central tiles
-      const w = 0.15 + m.score * 2.4 + m.centerBias * 0.7;
-      wR += m.meanR * w;
-      wG += m.meanG * w;
-      wB += m.meanB * w;
+    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+      if (!this.currentMask[ti]) continue;
+      const w = 0.15 + this.mScore[ti] * 2.4 + this.mCenterBias[ti] * 0.7;
+      wR += this.tileMeanR[ti] * w;
+      wG += this.tileMeanG[ti] * w;
+      wB += this.tileMeanB[ti] * w;
       wTotal += w;
-      brightSum += m.intensity;
-      brightSqSum += m.intensity * m.intensity;
-      totalValidPx += m.validPixels;
+      brightSum += this.mIntensity[ti];
+      brightSqSum += this.mIntensity[ti] * this.mIntensity[ti];
+      totalValidPx += this.mValidPx[ti];
     }
 
     // V3: Fallback to coarse ROI rather than averaging contaminated tiles
@@ -334,16 +363,20 @@ export class AdaptiveROIMask {
     const rawBlue = wTotal > 0 ? wB / wTotal : 0;
 
     const coverageRatio = fingerTileCount / TOTAL_TILES;
-    const avgFingerScore = validTileIndices.length > 0
-      ? validTileIndices.reduce((s, ti) => s + tileMetrics[ti].score, 0) / validTileIndices.length
-      : 0;
+    const avgFingerScore = fingerTileCount > 0 ? scoreSum / fingerTileCount : 0;
 
-    // Spatial uniformity among finger tiles
+    // V4: Spatial uniformity from coefficient of variation — single pass
     let uniformity = 0;
-    if (validTileIndices.length >= 3) {
-      const scores = validTileIndices.map(ti => tileMetrics[ti].score);
-      const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
-      const variance = scores.reduce((a, s) => a + (s - mean) ** 2, 0) / scores.length;
+    if (fingerTileCount >= 3) {
+      const mean = scoreSum / fingerTileCount;
+      let varSum = 0;
+      for (let ti = 0; ti < TOTAL_TILES; ti++) {
+        if (this.currentMask[ti]) {
+          const d = this.mScore[ti] - mean;
+          varSum += d * d;
+        }
+      }
+      const variance = varSum / fingerTileCount;
       const cv = mean > 0 ? Math.sqrt(variance) / mean : 1;
       uniformity = Math.max(0, Math.min(1, 1 - cv));
     }
@@ -351,16 +384,16 @@ export class AdaptiveROIMask {
     // V3: Center coverage — inner 3x3 of 9x9 grid
     // For 9x9, center 3x3 = rows 3-5, cols 3-5 → indices: 30,31,32,39,40,41,48,49,50
     const centerIndices = [30, 31, 32, 39, 40, 41, 48, 49, 50];
-    const centerCount = centerIndices.filter(ti => currentMask[ti] === 1).length;
+    let centerCount = 0;
+    for (let i = 0; i < 9; i++) if (this.currentMask[centerIndices[i]]) centerCount++;
     const centerCov = centerCount / centerIndices.length;
 
-    const brightness = validTileIndices.length > 0
-      ? brightSum / validTileIndices.length : 0;
-    const brightnessVar = validTileIndices.length > 1
-      ? (brightSqSum / validTileIndices.length) - brightness * brightness : 0;
+    const brightness = fingerTileCount > 0 ? brightSum / fingerTileCount : 0;
+    const brightnessVar = fingerTileCount > 1
+      ? (brightSqSum / fingerTileCount) - brightness * brightness : 0;
 
-    const tileScores = new Float64Array(TOTAL_TILES);
-    for (let ti = 0; ti < TOTAL_TILES; ti++) tileScores[ti] = tileMetrics[ti].score;
+    // V4: copy into reusable output buffer (caller treats as read-only)
+    this.outTileScores.set(this.mScore);
 
     return {
       rawRed, rawGreen, rawBlue,
@@ -375,7 +408,7 @@ export class AdaptiveROIMask {
       brightnessVariance: brightnessVar,
       validPixelCount: totalValidPx,
       totalPixelCount: totalPixels,
-      tileScores,
+      tileScores: this.outTileScores,
       maskStability,
       adaptiveRedFloor,
       adaptiveDominanceFloor,

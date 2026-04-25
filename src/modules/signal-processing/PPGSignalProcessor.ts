@@ -549,10 +549,18 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   }
 
   private getBaselineDrift(): number {
+    // V4: True drift = |mean(recent 30) − mean(older 30)| / baseline.
+    // The previous "olderMean = mean(60) − mean(30)" was algebraically wrong
+    // (mean of 60 minus mean of 30 ≠ mean of older 30 unless windows are same size).
     if (this.redBuf.length < 60) return 0;
     const recentMean = this.redBuf.mean(30);
-    const olderMean = this.redBuf.mean(60) - recentMean; // approximate
-    return Math.abs(olderMean) / (this.redBaseline + 1);
+    // Older 30 = first half of last 60 samples
+    const totalLen = this.redBuf.length;
+    let olderSum = 0;
+    const olderStart = totalLen - 60;
+    for (let i = 0; i < 30; i++) olderSum += this.redBuf.get(olderStart + i);
+    const olderMean = olderSum / 30;
+    return Math.abs(recentMean - olderMean) / (this.redBaseline + 1);
   }
 
   private calculateACDC(): void {
@@ -599,13 +607,35 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private estimatePeriodicityFromFiltered(): number {
     if (this.filteredBuf.length < 60) return 0;
     const n = Math.min(120, this.filteredBuf.length);
-    // Search cardiac range lags
-    let best = 0;
+    // V4: parabolic-refined autocorrelation peak in physiological cardiac range.
+    // Detects local maxima then refines via 3-point parabolic vertex; this is the
+    // same trick used in the source ranker → consistent SQI semantics.
+    let bestAc = 0;
+    let prevAc = 0, prevPrevAc = 0;
+    let pPrev = 0, pCurr = 0, pNext = 0;
+    let bestLag = 0;
     for (let lag = 8; lag <= 60; lag++) {
       const ac = this.filteredBuf.autocorrelation(lag, n);
-      if (ac > best) best = ac;
+      if (lag >= 10 && prevAc > prevPrevAc && prevAc > ac) {
+        if (prevAc > bestAc) {
+          bestAc = prevAc;
+          bestLag = lag - 1;
+          pPrev = prevPrevAc; pCurr = prevAc; pNext = ac;
+        }
+      }
+      prevPrevAc = prevAc;
+      prevAc = ac;
     }
-    return Math.max(0, Math.min(1, best));
+    if (bestLag > 0) {
+      const denom = pPrev - 2 * pCurr + pNext;
+      if (Math.abs(denom) > 1e-6) {
+        const offset = 0.5 * (pPrev - pNext) / denom;
+        if (Math.abs(offset) < 1) {
+          bestAc = pCurr - 0.25 * (pPrev - pNext) * offset;
+        }
+      }
+    }
+    return Math.max(0, Math.min(1, bestAc));
   }
 
   // ══════════════════════════════════════════════════════
