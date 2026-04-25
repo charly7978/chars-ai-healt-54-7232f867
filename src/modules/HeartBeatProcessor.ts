@@ -27,10 +27,16 @@ export class HeartBeatProcessor {
 
   // ── Fiducial delineation ──────────────────────────────────────────────
   private fiducialDelineator = new FiducialDelineator();
-  /** Reusable scratch window (foot search behind peak + decay ahead). 1.2s @ 60 fps = 72 samples; 90 covers up to 50 fps with margin. */
-  private fiducialWindow: Float64Array = new Float64Array(90);
-  private readonly FIDUCIAL_PRE_SAMPLES = 30;   // ~500 ms at 60 fps for foot search
+  /** Reusable scratch window for delineation (≥ pre+post samples). */
+  private fiducialWindow: Float64Array = new Float64Array(96);
+  private readonly FIDUCIAL_PRE_SAMPLES = 30;   // ~500 ms @ 60 fps for foot search
   private readonly FIDUCIAL_POST_SAMPLES = 60;  // ~1000 ms for notch + diastolic
+  /**
+   * Beats whose fiducials are not yet computable because their post-peak window
+   * has not fully arrived. Each entry references the AcceptedBeat already pushed
+   * to `acceptedBeats` so we can mutate it in-place once samples are ready.
+   */
+  private pendingFiducialBeats: Array<{ beat: AcceptedBeat; peakSampleIndex: number }> = [];
   private lastFiducials: BeatFiducials | null = null;
 
   private smoothBPM = 0;
