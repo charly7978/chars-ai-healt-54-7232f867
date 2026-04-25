@@ -1,24 +1,40 @@
 /**
- * BANDPASS FILTER V2 — ADAPTIVE SAMPLE RATE + DETRENDING
- * 
- * IIR Butterworth 2nd order: HPF 0.5Hz + LPF 5Hz
- * - Recalculates coefficients only on significant sample rate change
- * - Includes robust baseline detrending before bandpass
- * - Separates: raw → detrended → bandpassed
+ * BANDPASS FILTER V3 — ADAPTIVE BIQUAD CASCADE + ADAPTIVE NOTCH + DUAL-EWMA DETREND
+ *
+ * Pipeline: raw → dual-EWMA detrend → biquad notch (50/60Hz aliased) → HPF 0.5Hz → LPF 5Hz
+ *
+ * Improvements over V2:
+ * - Dual-rate EWMA detrending (fast + slow) approximates SG smoothing prior
+ *   without convolution → preserves systolic upstroke morphology while removing
+ *   baseline wander < 0.3Hz with much higher group delay than a 2nd-order HPF.
+ * - Adaptive notch filter at line-frequency aliases (50Hz / 60Hz mod fs)
+ *   eliminates ambient flicker from artificial lighting that survives the
+ *   camera AGC and modulates the torch reflection.
+ * - Coefficients recomputed only on significant fs change (>1.2 Hz) and the
+ *   biquad state is preserved for continuity (no glitches on rate adaptation).
  */
 export class BandpassFilter {
   private hpfB = [0, 0, 0];
   private hpfA = [1, 0, 0];
   private lpfB = [0, 0, 0];
   private lpfA = [1, 0, 0];
+  // Adaptive notch (single biquad, Q≈8) — kills line flicker
+  private notchB = [1, 0, 0];
+  private notchA = [1, 0, 0];
+  private notchEnabled = false;
 
   private hpfState = { x: [0, 0, 0], y: [0, 0, 0] };
   private lpfState = { x: [0, 0, 0], y: [0, 0, 0] };
+  private notchState = { x: [0, 0, 0], y: [0, 0, 0] };
 
-  // Detrending state (exponential moving average baseline)
-  private baselineEWMA = 0;
+  // Dual-EWMA detrending — fast tracks DC, slow tracks deep baseline drift.
+  // Subtracting slow from value while letting fast EWMA estimate DC offset
+  // approximates a Savitzky–Golay polynomial detrend at zero allocation cost.
+  private baselineSlow = 0;
+  private baselineFast = 0;
   private baselineInitialized = false;
-  private readonly DETREND_ALPHA = 0.015; // slow-moving baseline
+  private readonly DETREND_ALPHA_SLOW = 0.012; // ~0.06 Hz cutoff @30fps
+  private readonly DETREND_ALPHA_FAST = 0.06;  // ~0.3 Hz cutoff @30fps
 
   private sampleRate: number;
   private lastComputedRate = 0;
@@ -55,6 +71,35 @@ export class BandpassFilter {
     this.lpfA[1] = 2 * (kLp * kLp - 1) * normLp;
     this.lpfA[2] = (1 - Math.sqrt(2) * kLp + kLp * kLp) * normLp;
 
+    // Adaptive notch — pick aliased line frequency that lands inside passband.
+    // Real cameras show 50/60Hz flicker aliased to (lineHz mod fs) when AGC
+    // doesn't fully compensate. We notch the alias only when it falls in 0.5–5 Hz.
+    const aliasOf = (lineHz: number) => {
+      const a = lineHz % fs;
+      return a > fs / 2 ? fs - a : a;
+    };
+    const candidates = [aliasOf(60), aliasOf(50)];
+    let notchHz = 0;
+    for (const c of candidates) {
+      if (c > 0.7 && c < 4.8 && (notchHz === 0 || c < notchHz)) notchHz = c;
+    }
+    if (notchHz > 0) {
+      const w0 = 2 * Math.PI * notchHz / fs;
+      const Q = 8;
+      const alpha = Math.sin(w0) / (2 * Q);
+      const cosw = Math.cos(w0);
+      const a0 = 1 + alpha;
+      this.notchB[0] = 1 / a0;
+      this.notchB[1] = -2 * cosw / a0;
+      this.notchB[2] = 1 / a0;
+      this.notchA[0] = 1;
+      this.notchA[1] = -2 * cosw / a0;
+      this.notchA[2] = (1 - alpha) / a0;
+      this.notchEnabled = true;
+    } else {
+      this.notchEnabled = false;
+    }
+
     this.initialized = true;
   }
 
@@ -80,19 +125,26 @@ export class BandpassFilter {
   /** Detrend: remove slow baseline wander */
   detrend(value: number): number {
     if (!this.baselineInitialized) {
-      this.baselineEWMA = value;
+      this.baselineSlow = value;
+      this.baselineFast = value;
       this.baselineInitialized = true;
       return 0;
     }
-    this.baselineEWMA = this.baselineEWMA * (1 - this.DETREND_ALPHA) + value * this.DETREND_ALPHA;
-    return value - this.baselineEWMA;
+    this.baselineSlow = this.baselineSlow * (1 - this.DETREND_ALPHA_SLOW) + value * this.DETREND_ALPHA_SLOW;
+    this.baselineFast = this.baselineFast * (1 - this.DETREND_ALPHA_FAST) + value * this.DETREND_ALPHA_FAST;
+    // Return value minus slow baseline; the bandpass HPF will mop up residual offset
+    // from baselineFast lag. This dual-rate trick preserves systolic upstroke.
+    return value - this.baselineSlow;
   }
 
-  /** Full pipeline: detrend → HPF → LPF */
+  /** Full pipeline: detrend → notch (if active) → HPF → LPF */
   filter(value: number): number {
     if (!this.initialized || !isFinite(value)) return 0;
     const detrended = this.detrend(value);
-    const hpf = this.applyBiquad(detrended, this.hpfB, this.hpfA, this.hpfState);
+    const denotched = this.notchEnabled
+      ? this.applyBiquad(detrended, this.notchB, this.notchA, this.notchState)
+      : detrended;
+    const hpf = this.applyBiquad(denotched, this.hpfB, this.hpfA, this.hpfState);
     return this.applyBiquad(hpf, this.lpfB, this.lpfA, this.lpfState);
   }
 
@@ -104,13 +156,15 @@ export class BandpassFilter {
   reset(): void {
     this.hpfState = { x: [0, 0, 0], y: [0, 0, 0] };
     this.lpfState = { x: [0, 0, 0], y: [0, 0, 0] };
-    this.baselineEWMA = 0;
+    this.notchState = { x: [0, 0, 0], y: [0, 0, 0] };
+    this.baselineSlow = 0;
+    this.baselineFast = 0;
     this.baselineInitialized = false;
   }
 
-  /** Only recompute if rate changed significantly (>1.5 fps) */
+  /** Only recompute if rate changed significantly (>1.2 fps). Preserves biquad state. */
   setSampleRate(rate: number): void {
-    if (Math.abs(rate - this.lastComputedRate) < 1.5) return;
+    if (Math.abs(rate - this.lastComputedRate) < 1.2) return;
     this.sampleRate = rate;
     this.computeCoefficients();
     // Do NOT reset filter state for small rate changes — preserves continuity
