@@ -745,19 +745,36 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // ══════════════════════════════════════════════════════
 
   private handleMotionEvent = (event: DeviceMotionEvent) => {
-    const acc = event.accelerationIncludingGravity;
-    if (!acc || acc.x === null || acc.y === null || acc.z === null) return;
-    const dx = (acc.x ?? 0) - this.lastAccel.x;
-    const dy = (acc.y ?? 0) - this.lastAccel.y;
-    const dz = (acc.z ?? 0) - this.lastAccel.z;
-    this.lastAccel = { x: acc.x ?? 0, y: acc.y ?? 0, z: acc.z ?? 0 };
-    const accelRMS = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    const rot = event.rotationRate;
-    let gyroRMS = 0;
-    if (rot && rot.alpha !== null && rot.beta !== null && rot.gamma !== null) {
-      gyroRMS = Math.sqrt((rot.alpha ?? 0) ** 2 + (rot.beta ?? 0) ** 2 + (rot.gamma ?? 0) ** 2) / 120;
+    // Prefer linear acceleration (gravity removed) when available; fall back to
+    // accelerationIncludingGravity with a discrete-difference high-pass to cancel gravity.
+    const lin = event.acceleration;
+    let accelMag = 0;
+    if (lin && lin.x !== null && lin.y !== null && lin.z !== null) {
+      const ax = lin.x ?? 0, ay = lin.y ?? 0, az = lin.z ?? 0;
+      accelMag = Math.sqrt(ax * ax + ay * ay + az * az);
+    } else {
+      const acc = event.accelerationIncludingGravity;
+      if (!acc || acc.x === null || acc.y === null || acc.z === null) return;
+      const dx = (acc.x ?? 0) - this.lastAccel.x;
+      const dy = (acc.y ?? 0) - this.lastAccel.y;
+      const dz = (acc.z ?? 0) - this.lastAccel.z;
+      this.lastAccel = { x: acc.x ?? 0, y: acc.y ?? 0, z: acc.z ?? 0 };
+      // Δa per event ≈ jerk × dt; magnitudes ~0.05 quiet, >0.6 hand tremor, >2 strong shake
+      accelMag = Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
-    this.motionScore = this.motionScore * 0.85 + (accelRMS * 0.5 + gyroRMS * 0.3) * 0.15;
+
+    const rot = event.rotationRate;
+    let gyroMag = 0;
+    if (rot && (rot.alpha !== null || rot.beta !== null || rot.gamma !== null)) {
+      // deg/s normalised by 120 → ~unit at brisk wrist rotation
+      gyroMag = Math.sqrt((rot.alpha ?? 0) ** 2 + (rot.beta ?? 0) ** 2 + (rot.gamma ?? 0) ** 2) / 120;
+    }
+
+    // Composite motion: weighted RMS of accel + gyro, EWMA-smoothed.
+    // α=0.18 → ~5-event time constant (≈250 ms at 20 Hz devicemotion).
+    const instant = accelMag * 0.6 + gyroMag * 0.4;
+    this.motionScore = this.motionScore * 0.82 + instant * 0.18;
+    this.motionEventCount++;
   };
 
   private startMotionListener(): void {
