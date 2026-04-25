@@ -181,6 +181,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // --- CONTACT STATE ---
     this.updateContactState(roi, pressure);
     const motionArtifact = this.motionScore > this.MOTION_THRESH;
+    const motionHigh = this.motionScore > this.MOTION_HIGH_THRESH;
+    const motionGated = this.motionScore > this.MOTION_GATE_THRESH;
 
     if (this.exportedContactState === 'NO_CONTACT') {
       this.signalQuality = 0;
@@ -197,7 +199,36 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         rawRed: roi.rawRed,
         rawGreen: roi.rawGreen,
         diagnostics: {
-          message: `BUSCANDO DEDO C:${(roi.coverageRatio * 100).toFixed(0)}% P:${pressure.state}`,
+          message: `BUSCANDO DEDO C:${(roi.coverageRatio * 100).toFixed(0)}% P:${pressure.state}${motionArtifact ? ' MOV' : ''}`,
+          hasPulsatility: false,
+          pulsatilityValue: 0,
+        },
+      });
+      this.processingTimeMs = performance.now() - t0;
+      return;
+    }
+
+    // --- MOTION GATE: if device shaking hard, freeze signal extraction ---
+    // Buffers, baselines and source ranking are NOT updated → no contamination.
+    // We still emit a signal frame (so UI / downstream see continuity) but with
+    // quality=0, motionArtifact=true and the last filtered value held.
+    if (motionGated) {
+      const lastFiltered = this.filteredBuf.length > 0 ? this.filteredBuf.get(this.filteredBuf.length - 1) : 0;
+      this.signalQuality = 0;
+      this.onSignalReady({
+        timestamp,
+        rawValue: 0,
+        filteredValue: lastFiltered,
+        quality: 0,
+        fingerDetected: this.fingerDetected,
+        contactState: 'UNSTABLE_CONTACT',
+        motionArtifact: true,
+        roi: { x: 0, y: 0, width: imageData.width, height: imageData.height },
+        perfusionIndex: 0,
+        rawRed: roi.rawRed,
+        rawGreen: roi.rawGreen,
+        diagnostics: {
+          message: `MOV ALTO m=${this.motionScore.toFixed(2)} - SOSTENGA EL TELÉFONO QUIETO`,
           hasPulsatility: false,
           pulsatilityValue: 0,
         },
@@ -279,9 +310,12 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     // Gate: drift penalty
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
+    // Motion penalty applied on top of contact/drift gating
+    const motionQualPenalty = motionHigh ? 0.40 : (motionArtifact ? 0.70 : 1.0);
     const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.005
       ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
+    const finalQuality = gatedQuality * motionQualPenalty;
 
     // --- LOGGING ---
     const now = performance.now();
@@ -300,7 +334,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       timestamp,
       rawValue: source.value,
       filteredValue: filtered,
-      quality: gatedQuality,
+      quality: finalQuality,
       fingerDetected: this.fingerDetected,
       contactState: this.exportedContactState,
       motionArtifact,
@@ -312,9 +346,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
-          `${motionArtifact ? ' MOV' : ''}`,
-        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.05,
-        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' ? perfusionIndex : 0,
+          `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}`,
+        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.05 && !motionHigh,
+        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' && !motionHigh ? perfusionIndex : 0,
       },
     });
   }
