@@ -543,8 +543,11 @@ const Index = () => {
       try {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        console.log('📷 Frame capturado:', canvas.width, 'x', canvas.height, 'timestamp:', frameTimestamp);
         processFrame(imageData, frameTimestamp);
-      } catch {}
+      } catch (e) {
+        console.error('❌ Error procesando frame:', e);
+      }
       scheduleNext(video);
     };
 
@@ -746,6 +749,14 @@ const Index = () => {
   
   useEffect(() => {
     if (!lastSignal || !isMonitoring) return;
+    
+    console.log('📊 lastSignal recibido:', {
+      filteredValue: lastSignal.filteredValue,
+      quality: lastSignal.quality,
+      fingerDetected: lastSignal.fingerDetected,
+      contactState: (lastSignal as any).contactState,
+      timestamp: lastSignal.timestamp
+    });
     
     const signalValue = lastSignal.filteredValue;
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
@@ -998,6 +1009,13 @@ const Index = () => {
     //  independientemente del estado de publicación. Esto rompe el deadlock
     //  donde morphology necesita morphology para abrirse.
     // ════════════════════════════════════════════════════════════════
+    console.log('💓 Procesando heartbeat:', {
+      signalValue,
+      contactState,
+      quality: lastSignal.quality,
+      timestamp: lastSignal.timestamp
+    });
+    
     const heartBeatResult = processHeartBeat(
       signalValue,
       contactState,
@@ -1017,6 +1035,14 @@ const Index = () => {
         publicationGate: true,
       }
     );
+    
+    console.log('💓 HeartBeat result:', {
+      bpm: heartBeatResult.bpm,
+      bpmConfidence: heartBeatResult.bpmConfidence,
+      isPeak: heartBeatResult.isPeak,
+      beatSQI: heartBeatResult.beatSQI,
+      morphologyGatePass: (heartBeatResult as any).morphologyGatePass
+    });
 
     // Cerrar gate3_morphology con la verdad del detector — SIEMPRE que el
     // detector haya corrido. Esto es lo que permite que forensicPass pueda
