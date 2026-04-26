@@ -1314,10 +1314,12 @@ const Index = () => {
         redAC:   rgbStats.redAC,
         greenAC: rgbStats.greenAC,
       });
+      setSignalHealth(cameraQualityRef.current.getSignalHealth());
       if (needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
         cameraReinitInFlightRef.current = true;
-        const verdict = cameraQualityRef.current.getStats().lastVerdict;
-        console.warn('🔁 Camera quality gate → reinit:', verdict.reason);
+        const health = cameraQualityRef.current.getSignalHealth();
+        setSignalHealth(health);
+        console.warn('🔁 Camera quality gate → reinit:', health.message);
         setIsCameraOn(false);
         // Allow CameraView's stopCamera() to run, then re-enable.
         window.setTimeout(() => {
