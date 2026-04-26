@@ -149,6 +149,18 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private gate2Concentration = 0;
   private gate2Reason = 'CALENTANDO';
 
+  // --- Forensic Gate #1 raw telemetry (snapshot of last frame) ---
+  // These mirror the values used to evaluate liveness, so the operator
+  // can see EXACTLY why the gate is open or closed in the overlay.
+  private g1RawR = 0;
+  private g1RawG = 0;
+  private g1RawB = 0;
+  private g1TotalI = 0;
+  private g1Absorption = 0;
+  private g1RedDom = 0;
+  private g1Texture = 0;
+  private g1Coverage = 0;
+
   // --- Forensic Gate #3 telemetry (filled by HeartBeatProcessor via setMorphologyGate) ---
   private gate3Pass = false;
   private gate3Reason = 'BUSCANDO LATIDOS';
