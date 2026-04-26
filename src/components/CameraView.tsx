@@ -80,6 +80,23 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   }), []);
 
   useEffect(() => {
+    return () => {
+      if (stopTimerRef.current !== null) {
+        window.clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = null;
+      }
+      if (fpsWatchdogRef.current.rafId !== null) {
+        cancelAnimationFrame(fpsWatchdogRef.current.rafId);
+        fpsWatchdogRef.current.rafId = null;
+      }
+      streamRef.current?.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      isStartingRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     let mounted = true;
 
     const cancelScheduledStop = () => {
@@ -335,12 +352,15 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     if (isMonitoring) {
       startCamera();
     } else {
-      stopCamera();
+      cancelScheduledStop();
+      stopTimerRef.current = window.setTimeout(() => {
+        stopTimerRef.current = null;
+        stopCamera();
+      }, 2500);
     }
 
     return () => {
       mounted = false;
-      stopCamera();
     };
   // Intentionally depend ONLY on isMonitoring. onStreamReady is read via
   // ref so changing parent callbacks never restarts the camera mid-stream.
