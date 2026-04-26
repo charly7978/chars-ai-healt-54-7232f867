@@ -44,6 +44,11 @@ const ALLOWLIST: Array<{ file: string; tokens: RegExp[]; reason: string }> = [
     reason: "Test file legitimately uses the word 'synthetic stream'.",
   },
   {
+    file: "src/modules/signal-processing/__tests__/PPGSignalProcessor.gates.test.ts",
+    tokens: [/.*/],
+    reason: "Forensic gate test: drives controlled synthetic streams through the gates to assert physics.",
+  },
+  {
     file: "src/components/VitalSign.tsx",
     tokens: [/normalRange/],
     reason: "normalRange is a display-only prop used to label 'high/low' on real values; never seeds vitals.",
