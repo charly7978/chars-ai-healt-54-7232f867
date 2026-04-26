@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { toast } from '@/hooks/use-toast';
+import { ToastAction } from '@/components/ui/toast';
+import React from 'react';
 import type { CalibrationBaseline } from '@/components/CalibrationWizard';
 import type { MotionLevel } from '@/modules/signal-processing/MotionClassifier';
 import { recalibrationLog, type RecalibrationReason } from '@/utils/recalibrationLog';
@@ -38,6 +40,12 @@ export interface UseRecalibrationWatchdogOpts {
    * shared `recalibrationLog` for auditability.
    */
   onPrompt: (entry: { reason: RecalibrationReason }) => void;
+  /**
+   * Optional. If provided, the toast will include an inline action button
+   * ("Recalibrar ahora") that invokes this callback — typically used to open
+   * the calibration wizard directly from the toast.
+   */
+  onOpenWizard?: () => void;
 }
 
 const HOLD_MS = 4000;         // sustained-degradation window
@@ -68,6 +76,8 @@ export function useRecalibrationWatchdog(
   inputsRef.current = inputs;
   const onPromptRef = useRef(opts.onPrompt);
   onPromptRef.current = opts.onPrompt;
+  const onOpenWizardRef = useRef(opts.onOpenWizard);
+  onOpenWizardRef.current = opts.onOpenWizard;
 
   // Per-reason "since" timestamps. Reset to null when the condition clears.
   const sinceRef = useRef<Record<Reason, number | null>>({
@@ -159,6 +169,16 @@ export function useRecalibrationWatchdog(
         title: 'Recalibración recomendada',
         description: `${reasonLabel[fired]}. Toque CAL para recalibrar.`,
         duration: 6000,
+        action: onOpenWizardRef.current
+          ? React.createElement(
+              ToastAction,
+              {
+                altText: 'Abrir asistente de calibración',
+                onClick: () => onOpenWizardRef.current?.(),
+              },
+              'Recalibrar ahora',
+            )
+          : undefined,
       });
       // Light haptic so the operator notices on a noisy scene.
       try { navigator.vibrate?.([60, 40, 60]); } catch {}
