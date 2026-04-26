@@ -55,6 +55,23 @@ const Index = () => {
     normalPercent: number;
   } | null>(null);
 
+  // ── Fiducial tuner (dev/research panel) ──────────────────────────────────
+  // Toggle by triple-tapping the BPM card, or via ?tuner=1 URL flag.
+  const [showFiducialTuner, setShowFiducialTuner] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("tuner") === "1";
+  });
+  const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
+    morphologyScore: 0,
+    morphologyValidity: 0,
+    notchDepth: 0,
+    riseTimeMs: 0,
+    pulseWidth50Ms: 0,
+    reflectionIndex: 0,
+    beatsAnalyzed: 0,
+  });
+  const fiducialBeatsCountRef = useRef(0);
+
   const measurementTimerRef = useRef<number | null>(null);
   const totalBeatsRef = useRef(0);
   const arrhythmiaBeatsRef = useRef(0);
