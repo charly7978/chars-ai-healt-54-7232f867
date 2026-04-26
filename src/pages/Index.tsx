@@ -1164,14 +1164,12 @@ const Index = () => {
                         {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
                       </div>
                       <div className="text-[10px] text-slate-400 mt-0.5">
-                        {noOptical
-                          ? (lastSignal?.diagnostics?.message || 'SIN CONTACTO ÓPTICO')
-                          : (cs === 'OPTICAL_CONTACT_LOW_PERFUSION' ? 'CONTACTO — BAJA PERFUSIÓN' : 'CONTACTO ESTABLE')}
+                        {pulsePresent ? 'TRIPLE GATE VALIDADO' : blockedReason}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
-                        {heartRate > 0 ? Math.round(heartRate) : '--'}
+                        {pulsePresent ? Math.round(heartRate) : '--'}
                       </div>
                       <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
                     </div>
