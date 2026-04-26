@@ -740,7 +740,10 @@ const Index = () => {
       if (sinceLast < STALL_MS) return;
 
       // Is the stream actually dead? Only then re-open the camera.
-      const stream = cameraStream;
+      // Pull the live stream from the video element so we never read a
+      // stale React state captured in closure.
+      const videoEl = cameraRef.current?.getVideoElement();
+      const stream = (videoEl?.srcObject as MediaStream | null) ?? null;
       const tracks = stream?.getVideoTracks() ?? [];
       const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
       if (!stream || !hasLiveTrack) {
