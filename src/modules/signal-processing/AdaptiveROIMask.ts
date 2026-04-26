@@ -72,6 +72,20 @@ export interface ROIMaskResult {
    * 8-connectivity. 1 = un solo dedo cohesionado; <0.55 ≈ parches dispersos.
    */
   coverageContiguity: number;
+  /**
+   * V8: Jaccard real |M_t ∩ M_{t-1}| / |M_t ∪ M_{t-1}| en el grid 9×9 de
+   * finger-tiles. 1 = máscara idéntica al frame previo; 0 = sin solape.
+   * Reemplaza la métrica Hamming usada como `maskStability` (que se mantiene
+   * por compatibilidad pero ahora alias del IoU).
+   */
+  maskIoU: number;
+  /**
+   * V8: σ del tracker EMA del centroide ROI en píxeles del frame, expuesto
+   * como motion-proxy óptico independiente del IMU. Mide cuánto se mueve la
+   * observación del centroide respecto al estado suavizado: ~0 cuando el
+   * dedo está quieto, > 4 px cuando hay temblor / reposicionamiento.
+   */
+  trackerSigma: number;
 }
 
 const GRID = 9; // V3: 9x9 grid for finer adaptive ROI
