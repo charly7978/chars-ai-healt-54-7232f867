@@ -408,6 +408,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           livenessReason: this.lastLivenessReason,
         },
       });
+      // V6: log telemetry on the rejection path so the operator can see
+      // *why* the pipeline never opened the gate.
+      this.roiTelemetry.record({
+        t: timestamp,
+        frame: this.frameCount,
+        cx: roi.roiBox.cx,
+        cy: roi.roiBox.cy,
+        sizePx: roi.roiBox.sizePx,
+        sizeFrac: roi.roiBox.sizeFrac,
+        coverage: roi.coverageRatio,
+        livenessPass: false,
+        livenessReason: this.lastLivenessReason,
+        prepassRedDomMin: roi.prepassThresholds.redDomMin,
+        prepassRedMin: roi.prepassThresholds.redMin,
+        prepassSuccessRate: roi.prepassSuccessRate,
+        prepassMass: roi.roiBox.mass,
+      });
       this.processingTimeMs = performance.now() - t0;
       return;
     }
