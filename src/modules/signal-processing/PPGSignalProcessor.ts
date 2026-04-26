@@ -843,6 +843,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}`,
         hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
         pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
+        textureEntropy: roi.textureEntropy,
+        coverageContiguity: roi.coverageContiguity,
+        maskIoU: roi.maskIoU,
+        trackerSigma: roi.trackerSigma,
+        piR: this.piR,
+        piG: this.piG,
+        piB: this.piB,
+        vitalityCount: this.vitalityCount,
+        bandpassMode: this.bandpassFilter.getMode(),
+        frameJump,
       },
       forensicGate: (() => {
         const fg = this.computeForensicGate(roi.rawRed, timestamp);
