@@ -440,6 +440,13 @@ export class MotionRejection {
   classify(input: MotionRejectionInputs): MotionRejectionResult {
     const { imuScore, trackerSigma, maskIoU, centroidJumpPx } = input;
 
+    // V9.5 — feed the calibration collector BEFORE the validator drops
+    // out-of-band samples. The collector applies the same physical band
+    // internally so a flaky frame still cannot poison the baseline.
+    if (this.calibrating) {
+      this.feedCalibration(imuScore, performance.now());
+    }
+
     // Push the new observations into both circular buffers and recompute the
     // effective tuning BEFORE applying hysteresis this frame.
     // V9.4 — input validation: trackerSigma must be a finite non-negative
