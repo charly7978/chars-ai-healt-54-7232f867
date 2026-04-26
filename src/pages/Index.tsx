@@ -101,6 +101,28 @@ const Index = () => {
   const lastAlertAtRef = useRef<Record<string, number>>({});
   const ALERT_COOLDOWN_MS = 2500;
 
+  // ── Forensic session log (rolling ring buffer of overlay snapshots) ──
+  // Each entry mirrors the overlay payload + a timestamp + a session ID, so
+  // we can export a faithful trace of what the operator saw on screen.
+  type ForensicSessionEntry = {
+    t_iso: string;
+    t_ms: number;
+    g1_optical: boolean;
+    g2_spectral: boolean;
+    g3_morphology: boolean;
+    pass_all: boolean;
+    snr_db: number;
+    peak_hz: number;
+    bpm_estimate: number;
+    concentration: number;
+    reason: string;
+  };
+  const sessionLogRef = useRef<ForensicSessionEntry[]>([]);
+  const sessionStartIsoRef = useRef<string>("");
+  const sessionIdRef = useRef<string>("");
+  const SESSION_LOG_MAX = 4000; // ~10 min @ 1 sample / 150 ms
+  const [sessionLogSize, setSessionLogSize] = useState(0);
+
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {

@@ -14,6 +14,8 @@ export interface ForensicGateSnapshot {
 interface Props {
   gate: ForensicGateSnapshot | null;
   visible: boolean;
+  onExport?: () => void;
+  sampleCount?: number;
 }
 
 const pillBase =
@@ -31,7 +33,7 @@ function snrClass(db: number): string {
   return "text-red-300";
 }
 
-const ForensicGateOverlay: React.FC<Props> = ({ gate, visible }) => {
+const ForensicGateOverlay: React.FC<Props> = ({ gate, visible, onExport, sampleCount }) => {
   if (!visible) return null;
 
   const g1 = gate?.gate1_optical ?? null;
@@ -110,6 +112,19 @@ const ForensicGateOverlay: React.FC<Props> = ({ gate, visible }) => {
       <div className="mt-1.5 pt-1 border-t border-zinc-700/60 text-[9px] text-zinc-500 leading-tight">
         G1 firma hemoglobina · G2 SNR ≥ 6 dB · G3 morfología 4/4
       </div>
+
+      {onExport && (
+        <button
+          type="button"
+          onClick={onExport}
+          className="pointer-events-auto mt-2 w-full rounded-md border border-emerald-500/50 bg-emerald-600/20 hover:bg-emerald-600/35 active:bg-emerald-600/50 text-emerald-100 text-[10px] font-bold tracking-wide py-1.5 transition-colors"
+        >
+          EXPORTAR SESIÓN FORENSE
+          {typeof sampleCount === "number" && sampleCount > 0 && (
+            <span className="ml-1 text-emerald-300/80 font-normal">({sampleCount})</span>
+          )}
+        </button>
+      )}
     </div>
   );
 };
