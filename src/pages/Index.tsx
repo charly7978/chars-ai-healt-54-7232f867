@@ -158,6 +158,30 @@ const Index = () => {
   const [showThresholdPanel, setShowThresholdPanel] = useState(false);
   const acceptedRatioMinRef = useRef(acceptedRatioMin);
   const warmupSamplesRef = useRef(warmupSamples);
+
+  // Auto-relax: after N consecutive accepted frames, soften the thresholds
+  // so the operator doesn't have to fight the safeguard once a stable
+  // signal has been established. Toggle + N persisted in localStorage.
+  const [autoRelaxEnabled, setAutoRelaxEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('forensic.autoRelaxEnabled') === '1';
+  });
+  const [autoRelaxN, setAutoRelaxN] = useState<number>(() => {
+    if (typeof window === 'undefined') return 90;
+    const v = parseInt(localStorage.getItem('forensic.autoRelaxN') || '', 10);
+    return Number.isFinite(v) && v >= 30 && v <= 300 ? v : 90;
+  });
+  const consecutiveAcceptedRef = useRef(0);
+  const autoRelaxAppliedRef = useRef(false);
+  const preRelaxRef = useRef<{ ratio: number; warmup: number } | null>(null);
+  const [autoRelaxActive, setAutoRelaxActive] = useState(false);
+  useEffect(() => {
+    try { localStorage.setItem('forensic.autoRelaxEnabled', autoRelaxEnabled ? '1' : '0'); } catch {}
+  }, [autoRelaxEnabled]);
+  useEffect(() => {
+    try { localStorage.setItem('forensic.autoRelaxN', String(autoRelaxN)); } catch {}
+  }, [autoRelaxN]);
+
   useEffect(() => {
     acceptedRatioMinRef.current = acceptedRatioMin;
     try { localStorage.setItem('forensic.acceptedRatioMin', String(acceptedRatioMin)); } catch {}
