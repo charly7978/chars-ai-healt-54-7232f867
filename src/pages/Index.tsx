@@ -1304,9 +1304,21 @@ const Index = () => {
     else startMonitoring();
   };
 
+  // Auto-hide overlays unless we need the operator's attention.
+  const overlayPinned = !isMonitoring
+    || !lastSignal?.fingerDetected
+    || (lastSignal?.quality ?? 0) < 40
+    || showResults;
+  const { visible: overlaysVisible, reveal: revealOverlays } =
+    useAutoHideOverlays({ idleMs: 4000, initialMs: 4000, pinned: overlayPinned });
+
   return (
     <>
-    <div className="fixed inset-0 flex flex-col bg-black" style={{ 
+    <div
+      data-overlay-visible={overlaysVisible}
+      onPointerDown={revealOverlays}
+      className="fixed inset-0 flex flex-col bg-black"
+      style={{ 
       height: '100svh',
       width: '100vw',
       maxWidth: '100vw',
