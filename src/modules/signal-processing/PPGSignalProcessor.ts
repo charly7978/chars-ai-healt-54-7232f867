@@ -156,6 +156,47 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private frameCount = 0;
   private lastLogTime = 0;
 
+  // ── V8: TIMING REAL ESTRICTO ──────────────────────────────────────
+  // Detección de frames duplicados (rVFC entrega 2 callbacks con el mismo
+  // mediaTime → dt < 5 ms) y de saltos (cámara dropea frame → dt > 80 ms).
+  // Cada caso degrada de forma distinta: duplicado se descarta por completo,
+  // salto preserva estado del filtro pero baja la calidad publicada.
+  private readonly DT_DUPLICATE_MS = 5;
+  private readonly DT_JUMP_MS = 80;
+  private duplicateFrameCount = 0;
+  private jumpFrameCount = 0;
+  private lastFrameJump = false;
+
+  // ── V8: DC MEDIANA 5 s POR CANAL ──────────────────────────────────
+  // Reemplaza al EWMA puro como baseline robusto: la mediana de 150 muestras
+  // (~5 s @30 fps) es inmune a clip-high transitorios (glare) que hoy
+  // contaminan el EWMA y arrastran absR/absG durante segundos.
+  private redDcMedianBuf = new RingBuffer(150);
+  private greenDcMedianBuf = new RingBuffer(150);
+  private blueDcMedianBuf = new RingBuffer(150);
+
+  // ── V8: BANDPASS DUAL AUTO-SWITCH ─────────────────────────────────
+  // CHROM/POS son proyecciones que cancelan glare → cuando el ranker delega
+  // sostenidamente en ellas, conmutamos el bandpass a RESCUE (banda más
+  // estrecha 0.5–8 Hz). El switch O(1) en BandpassFilter preserva el estado
+  // del biquad para evitar transitorios.
+  private chromPosStreak = 0;
+  private normalStreak = 0;
+  private readonly BP_RESCUE_FRAMES = 150; // ~5 s @30 fps
+  private readonly BP_NORMAL_FRAMES = 90;  // ~3 s @30 fps
+
+  // ── V8: PERFUSION INDEX POR CANAL (vitality count) ────────────────
+  // Una pulsación viva debe modular ≥2 canales simultáneamente; cualquier
+  // gate puro de R sucumbe a glare cíclico, y cualquier gate puro de G
+  // sucumbe a flicker de iluminación. El conteo cruzado es la firma física
+  // más simple de pulso real.
+  private piR = 0; private piG = 0; private piB = 0;
+  private vitalityCount = 0;
+
+  // ── V8: BLOQUEO POR CONTIGÜIDAD ───────────────────────────────────
+  private lowContiguityStreak = 0;
+  private readonly CONTIGUITY_BLOCK_FRAMES = 6;
+
   // --- Contact state machine ---
   private contactState: ExtendedContactState = 'NO_CONTACT';
   private exportedContactState: ContactState = 'NO_CONTACT';
