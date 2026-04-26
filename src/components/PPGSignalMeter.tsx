@@ -21,6 +21,15 @@ interface PPGSignalMeterProps {
   bpm?: number;
   spo2?: number;
   rrIntervals?: number[];
+  /**
+   * FORENSIC: AND duro de los 3 gates + OpticalEvidenceGate. Cuando es
+   * false, el monitor NO dibuja la onda recibida — empuja 0 al buffer y
+   * muestra el motivo exacto del rechazo. Garantiza que ninguna onda
+   * "fantasma" se pinte sobre aire / ruido / saturación.
+   */
+  publicationGate?: boolean;
+  /** Texto humano del motivo (livenessReason / opticalReasonText). */
+  rejectionReason?: string;
 }
 
 const CONFIG = {
@@ -91,7 +100,9 @@ const PPGSignalMeter = ({
   isPeak = false,
   bpm = 0,
   spo2 = 0,
-  rrIntervals = []
+  rrIntervals = [],
+  publicationGate = true,
+  rejectionReason,
 }: PPGSignalMeterProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number | null>(null);
