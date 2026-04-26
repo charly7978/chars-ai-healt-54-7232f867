@@ -101,6 +101,28 @@ const Index = () => {
   const lastAlertAtRef = useRef<Record<string, number>>({});
   const ALERT_COOLDOWN_MS = 2500;
 
+  // ── Forensic session log (rolling ring buffer of overlay snapshots) ──
+  // Each entry mirrors the overlay payload + a timestamp + a session ID, so
+  // we can export a faithful trace of what the operator saw on screen.
+  type ForensicSessionEntry = {
+    t_iso: string;
+    t_ms: number;
+    g1_optical: boolean;
+    g2_spectral: boolean;
+    g3_morphology: boolean;
+    pass_all: boolean;
+    snr_db: number;
+    peak_hz: number;
+    bpm_estimate: number;
+    concentration: number;
+    reason: string;
+  };
+  const sessionLogRef = useRef<ForensicSessionEntry[]>([]);
+  const sessionStartIsoRef = useRef<string>("");
+  const sessionIdRef = useRef<string>("");
+  const SESSION_LOG_MAX = 4000; // ~10 min @ 1 sample / 150 ms
+  const [sessionLogSize, setSessionLogSize] = useState(0);
+
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
@@ -121,6 +143,106 @@ const Index = () => {
       vibrate(120);
       toast({ title: '⚠ ' + message, description: 'Mantén el dedo firme y quieto.', variant: 'destructive', duration: 2400 });
     }
+  }, [vibrate]);
+
+  // Build and download both a JSON and a CSV with the forensic session log.
+  const exportForensicSession = useCallback(() => {
+    const log = sessionLogRef.current;
+    if (log.length === 0) {
+      toast({
+        title: 'No hay datos para exportar',
+        description: 'Inicia una medición para registrar la sesión forense.',
+        duration: 2400,
+      });
+      return;
+    }
+
+    const sessionId = sessionIdRef.current || `forensic_${Date.now().toString(36)}`;
+    const startIso = sessionStartIsoRef.current || log[0].t_iso;
+    const endIso = log[log.length - 1].t_iso;
+
+    // Aggregate stats for the export header.
+    const passCount = log.reduce((n, e) => n + (e.pass_all ? 1 : 0), 0);
+    const snrValues = log.filter(e => e.snr_db !== 0).map(e => e.snr_db);
+    const snrAvg = snrValues.length ? snrValues.reduce((a, b) => a + b, 0) / snrValues.length : 0;
+    const snrMax = snrValues.length ? Math.max(...snrValues) : 0;
+    const peakValues = log.filter(e => e.peak_hz > 0).map(e => e.peak_hz);
+    const peakAvg = peakValues.length ? peakValues.reduce((a, b) => a + b, 0) / peakValues.length : 0;
+
+    const summary = {
+      session_id: sessionId,
+      started_at: startIso,
+      ended_at: endIso,
+      sample_count: log.length,
+      pass_all_samples: passCount,
+      pass_all_ratio: +(passCount / log.length).toFixed(3),
+      avg_cardiac_snr_db: +snrAvg.toFixed(2),
+      max_cardiac_snr_db: +snrMax.toFixed(2),
+      avg_peak_hz: +peakAvg.toFixed(3),
+      avg_bpm_estimate: peakAvg > 0 ? Math.round(peakAvg * 60) : 0,
+      schema: 'forensic_overlay_log/v1',
+    };
+
+    // Build JSON
+    const jsonBlob = new Blob(
+      [JSON.stringify({ summary, samples: log }, null, 2)],
+      { type: 'application/json' }
+    );
+
+    // Build CSV
+    const header = [
+      't_iso','t_ms','g1_optical','g2_spectral','g3_morphology','pass_all',
+      'snr_db','peak_hz','bpm_estimate','concentration','reason',
+    ];
+    const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const csvRows = [
+      header.join(','),
+      ...log.map(e => [
+        e.t_iso, e.t_ms,
+        e.g1_optical ? 1 : 0,
+        e.g2_spectral ? 1 : 0,
+        e.g3_morphology ? 1 : 0,
+        e.pass_all ? 1 : 0,
+        e.snr_db, e.peak_hz, e.bpm_estimate, e.concentration,
+        escape(e.reason || ''),
+      ].join(',')),
+    ];
+    const csvBlob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+
+    const stamp = (sessionStartIsoRef.current || endIso).replace(/[:.]/g, '-');
+    const downloadBlob = (blob: Blob, filename: string) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    };
+    downloadBlob(jsonBlob, `forensic-session-${stamp}.json`);
+    downloadBlob(csvBlob,  `forensic-session-${stamp}.csv`);
+
+    // Try the Web Share API too (mobile-first), best-effort.
+    try {
+      const csvFile = new File([csvBlob], `forensic-session-${stamp}.csv`, { type: 'text/csv' });
+      const navAny = navigator as any;
+      if (navAny.canShare && navAny.canShare({ files: [csvFile] })) {
+        navAny.share({
+          files: [csvFile],
+          title: 'Sesión Forense PPG',
+          text: `Sesión ${sessionId} · ${log.length} muestras`,
+        }).catch(() => {});
+      }
+    } catch {}
+
+    vibrate(60);
+    toast({
+      title: '✓ Sesión forense exportada',
+      description: `${log.length} muestras · JSON + CSV descargados`,
+      duration: 2600,
+    });
+    setSessionLogSize(log.length);
   }, [vibrate]);
   const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
     morphologyScore: 0,
@@ -392,6 +514,11 @@ const Index = () => {
     lastAlertAtRef.current = {};
     forensicGateRef.current = null;
     lastOverlayCommitRef.current = 0;
+    // Reset session log for a fresh forensic export.
+    sessionLogRef.current = [];
+    setSessionLogSize(0);
+    sessionStartIsoRef.current = new Date().toISOString();
+    sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -574,6 +701,26 @@ const Index = () => {
       if (transitioned || nowMs - lastOverlayCommitRef.current >= OVERLAY_MIN_INTERVAL_MS) {
         lastOverlayCommitRef.current = nowMs;
         setForensicGate(snap);
+
+        // Append to the session log at the same throttled cadence.
+        const log = sessionLogRef.current;
+        log.push({
+          t_iso: new Date().toISOString(),
+          t_ms: Math.round(nowMs),
+          g1_optical: snap.gate1_optical,
+          g2_spectral: snap.gate2_spectral,
+          g3_morphology: snap.gate3_morphology,
+          pass_all: snap.passAll,
+          snr_db: +snap.cardiacSNRdB.toFixed(2),
+          peak_hz: +snap.spectralPeakHz.toFixed(3),
+          bpm_estimate: snap.spectralPeakHz > 0 ? Math.round(snap.spectralPeakHz * 60) : 0,
+          concentration: +snap.spectralConcentration.toFixed(3),
+          reason: snap.livenessReason,
+        });
+        if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
+        // Cheap state ping (only when buckets of 25 rounds elapse) so the
+        // export button counter updates without spamming React.
+        if (log.length % 25 === 0) setSessionLogSize(log.length);
       }
 
       // ── Gate transition alerts (haptic + toast) ──
@@ -916,7 +1063,12 @@ const Index = () => {
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
 
-        <ForensicGateOverlay gate={forensicGate} visible={showForensicOverlay && isMonitoring} />
+        <ForensicGateOverlay
+          gate={forensicGate}
+          visible={showForensicOverlay && isMonitoring}
+          onExport={exportForensicSession}
+          sampleCount={sessionLogSize}
+        />
 
         {isMonitoring && (() => {
           const pq = getPositionQuality();
