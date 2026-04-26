@@ -61,13 +61,15 @@ function makeReplay() {
     const hiI = Math.max(loI + 1e-3, CFG.autoTuneImuSaturate);
     const tImu = Math.max(0, Math.min(1, (sImu - loI) / (hiI - loI)));
     const t = Math.max(tOpt, tImu);
+    const eps = 1e-6;
+    const dominant = Math.abs(tOpt - tImu) < eps ? 'TIE' : (tOpt > tImu ? 'OPTICAL' : 'IMU');
     const baseF = CFG.upgradeConfirmFrames;
     const highF = Math.max(baseF, CFG.upgradeConfirmFramesHigh);
     effFrames = Math.round(baseF + (highF - baseF) * t);
     const baseA = CFG.weightSmoothingAlpha;
     const lowA = Math.min(baseA, CFG.weightSmoothingAlphaLow);
     effAlpha = baseA + (lowA - baseA) * t;
-    return { sigmaStd: sOpt, imuStd: sImu };
+    return { sigmaStd: sOpt, imuStd: sImu, tOpt, tImu, tBlend: t, tDominant: dominant };
   };
 
   return (sigma, imu = 0) => {
@@ -77,8 +79,8 @@ function makeReplay() {
     iBuf[iIdx] = imu;
     iIdx = (iIdx + 1) % iBuf.length;
     if (iCount < iBuf.length) iCount++;
-    const { sigmaStd, imuStd } = recompute();
-    return { effUpgradeFrames: effFrames, effAlpha, sigmaStd, imuStd };
+    const r = recompute();
+    return { effUpgradeFrames: effFrames, effAlpha, ...r };
   };
 }
 
