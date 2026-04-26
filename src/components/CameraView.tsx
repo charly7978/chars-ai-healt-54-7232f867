@@ -16,6 +16,12 @@ export interface CameraDiagnostics {
   focusLocked: boolean;
   isoValue: number;
   supportedConstraints: string[];
+  /** Profile rung the negotiator finally settled on (e.g. "1280x720@30"). */
+  activeProfile: string;
+  /** Number of rungs we had to descend before the stream stayed within FPS floor. */
+  fallbacksApplied: number;
+  /** True if a measured-FPS downshift happened after the initial open. */
+  downshiftedForFps: boolean;
 }
 
 interface CameraViewProps {
