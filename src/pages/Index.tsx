@@ -1033,7 +1033,11 @@ const Index = () => {
             setArrhythmiaState(isArrhythmiaDetected);
 
             if (isArrhythmiaDetected) {
-              if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+              // FORENSIC: vibración de arritmia SOLO si triple-gate + evidencia
+              // óptica autorizan publicación. Evita falsas alarmas en aire/ruido.
+              if (forensicPass && (fg as any)?.opticalEvidence && navigator.vibrate) {
+                navigator.vibrate([200, 100, 200]);
+              }
               toast({
                 title: `⚠️ ${rhythmLabel.split('_').join(' ')}`,
                 description: count > 0 ? `Eventos detectados: ${count}` : 'Ritmo irregular detectado',
