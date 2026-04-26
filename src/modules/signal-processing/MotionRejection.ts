@@ -423,6 +423,11 @@ export class MotionRejection {
     const tImu = Math.max(0, Math.min(1, (sImu - loI) / (hiI - loI)));
 
     const t = Math.max(tOpt, tImu);
+    // V9.5 — cache the per-frame blend factors so getTuning() can surface
+    // them and external loggers can correlate switches with artefacts.
+    this.lastTOpt = tOpt;
+    this.lastTImu = tImu;
+    this.lastTBlend = t;
     // Higher variability → MORE confirm frames, SMALLER alpha (slower EMA).
     const baseFrames = this.cfg.upgradeConfirmFrames;
     const highFrames = Math.max(baseFrames, this.cfg.upgradeConfirmFramesHigh);
