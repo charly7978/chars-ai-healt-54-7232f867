@@ -753,6 +753,12 @@ const Index = () => {
       const stream = (videoEl?.srcObject as MediaStream | null) ?? null;
       const tracks = stream?.getVideoTracks() ?? [];
       const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
+      const cameraStatus = cameraRef.current?.getStreamStatus();
+      const inCameraWarmup = now - monitoringStartedAtRef.current < 10000;
+      if (!hasLiveTrack && (inCameraWarmup || cameraStatus?.starting || cameraStatus?.stoppingPending)) {
+        lastFrameAtRef.current = now;
+        return;
+      }
       if (!stream || !hasLiveTrack) {
         console.warn('🎥 Watchdog: stream dead — bouncing camera (last frame', sinceLast.toFixed(0), 'ms ago)');
         setIsCameraOn(false);
