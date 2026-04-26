@@ -589,6 +589,16 @@ const Index = () => {
     noiseSamplesRef.current = 0;
     setValidSamples(0);
     setNoiseSamples(0);
+    // Reset auto-relax tracking each new session.
+    consecutiveAcceptedRef.current = 0;
+    if (autoRelaxAppliedRef.current && preRelaxRef.current) {
+      // Restore user-set thresholds before next session.
+      setAcceptedRatioMin(preRelaxRef.current.ratio);
+      setWarmupSamples(preRelaxRef.current.warmup);
+    }
+    autoRelaxAppliedRef.current = false;
+    preRelaxRef.current = null;
+    setAutoRelaxActive(false);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
