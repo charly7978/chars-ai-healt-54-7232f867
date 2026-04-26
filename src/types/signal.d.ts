@@ -1,6 +1,21 @@
 import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
 
-export type ContactState = 'NO_CONTACT' | 'UNSTABLE_CONTACT' | 'STABLE_CONTACT';
+/**
+ * Forensic-aware contact states.
+ *
+ * Legacy names ('NO_CONTACT' | 'UNSTABLE_CONTACT' | 'STABLE_CONTACT') are kept
+ * so existing modules keep compiling. The new states give the forensic mode
+ * granularity to distinguish "no optical contact at all" (camera looking at
+ * air / objects / ambient light) from "finger present but very low perfusion"
+ * (cold / shock / hypothermia) — the latter MUST NOT be silently rejected.
+ */
+export type ContactState =
+  | 'NO_CONTACT'
+  | 'UNSTABLE_CONTACT'
+  | 'STABLE_CONTACT'
+  | 'NO_OPTICAL_CONTACT'
+  | 'OPTICAL_CONTACT_LOW_PERFUSION'
+  | 'OPTICAL_CONTACT_GOOD_PERFUSION';
 
 export interface ProcessedSignal {
   timestamp: number;
