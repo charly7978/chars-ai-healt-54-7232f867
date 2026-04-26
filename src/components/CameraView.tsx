@@ -374,6 +374,30 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
 
         onStreamReady?.(stream);
         isStartingRef.current = false;
+
+        // Live FPS watchdog: count rVFC ticks over rolling 2 s windows and
+        // store the rate in diagnostics.realFrameRate. Read-only — never
+        // re-negotiates constraints mid-stream (too risky for the torch).
+        const v = videoRef.current;
+        if (v && 'requestVideoFrameCallback' in v) {
+          fpsWatchdogRef.current = { frames: 0, t0: performance.now(), rafId: 0 };
+          const tick = () => {
+            if (!streamRef.current || !videoRef.current) return;
+            fpsWatchdogRef.current.frames++;
+            const elapsed = performance.now() - fpsWatchdogRef.current.t0;
+            if (elapsed >= 2000) {
+              const fps = (fpsWatchdogRef.current.frames * 1000) / elapsed;
+              diagnosticsRef.current.realFrameRate = fps;
+              fpsWatchdogRef.current.frames = 0;
+              fpsWatchdogRef.current.t0 = performance.now();
+            }
+            (videoRef.current as any).requestVideoFrameCallback(tick);
+          };
+          (v as any).requestVideoFrameCallback(tick);
+          // Stash a sentinel so stopCamera() knows to clear it; rAF id is
+          // unused but kept for symmetry.
+          fpsWatchdogRef.current.rafId = 1 as any;
+        }
       } catch (err) {
         console.error('❌ Camera error:', err);
         isStartingRef.current = false;
