@@ -173,13 +173,16 @@ describe("SR diagnostics – integration over a synthetic stream", () => {
   it("walks LOCKED → STALLED → RECOVERING → LOCKED across a realistic sequence", () => {
     let s = createInitialState();
     let t = 1000;
+    let lastStatus = deriveStatus(s, snap({ valid: false, sampleRate: 0 }));
     const transitions: string[] = [];
     function step(sn: SampleRateEstimate) {
-      const before = deriveStatus(s, sn);
       s = applySnapshot(s, sn, t);
       t += 200;
-      const after = deriveStatus(s, sn);
-      if (before !== after) transitions.push(after);
+      const status = deriveStatus(s, sn);
+      if (status !== lastStatus) {
+        transitions.push(status);
+        lastStatus = status;
+      }
     }
     // Warm up
     step(snap({ valid: false, sampleRate: 0 }));
