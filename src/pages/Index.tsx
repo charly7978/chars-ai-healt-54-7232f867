@@ -380,16 +380,20 @@ const Index = () => {
   // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
   const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
   const cameraReinitInFlightRef = useRef<boolean>(false);
-  // Frame-loop watchdog: tracks last successful captureOneFrame tick so
-  // we can soft-restart the loop (NOT the camera) if the page tab was
-  // backgrounded, the rVFC chain stalled, or motion gating somehow held
-  // the loop. We only touch the camera if the underlying MediaStreamTrack
-  // is actually dead (readyState === 'ended' or no live video track).
+  // Frame-loop watchdog: driven entirely by requestVideoFrameCallback.
+  // No setInterval / no requestAnimationFrame polling. Each rVFC tick
+  // updates `lastFrameAtRef` and inspects the inter-frame gap to decide
+  // whether the previous frame was "late" (loop stalled and self-recovered).
+  // Truly dead streams are caught event-driven via MediaStreamTrack
+  // listeners (`onended`, `onmute`) attached when the stream becomes ready,
+  // not by polling.
   const lastFrameAtRef = useRef<number>(0);
-  const watchdogTimerRef = useRef<number | null>(null);
   const softRestartCountRef = useRef<number>(0);
   const lastSoftRestartAtRef = useRef<number>(0);
   const lastSignalHealthCommitAtRef = useRef<number>(0);
+  // Listeners attached to the live video track so we can react to a dead
+  // stream the moment the platform tells us, instead of polling.
+  const trackListenersCleanupRef = useRef<(() => void) | null>(null);
   // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
   useEffect(() => {
     if (typeof window === 'undefined') return;
