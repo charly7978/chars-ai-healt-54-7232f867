@@ -111,56 +111,30 @@ const Index = () => {
 
   const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
     // Fallback: if no valid timestamp, use performance.now() so we still feed
-    // a real monotonic clock instead of cold-starting at 30 fps.
+    // a real monotonic clock instead of cold-starting at the default SR.
     const ts = (typeof timestamp === 'number' && isFinite(timestamp))
       ? timestamp
       : performance.now();
 
-    const history = frameTimestampHistoryRef.current;
-    if (history.length === 0 || ts > history[history.length - 1]) {
-      history.push(ts);
-      // Wider window (~1.5–2 s @ 30 fps) for robust median under jitter.
-      if (history.length > 60) history.shift();
+    const est = srEstimatorRef.current.push(ts, performance.now());
+
+    // Auto-calibration: after ~4s of timestamps, derive a window/MAD that
+    // matches the device's actual jitter and freeze the recommendation.
+    if (!srCalibrationDoneRef.current) {
+      if (srCalibrationStartRef.current === 0) {
+        srCalibrationStartRef.current = performance.now();
+      } else if (performance.now() - srCalibrationStartRef.current >= SR_CALIBRATION_DURATION_MS) {
+        const cal = srEstimatorRef.current.applyCalibration();
+        if (cal.acceptedSamples >= 8) {
+          srCalibrationDoneRef.current = true;
+        }
+      }
     }
 
-    if (history.length < 6) {
-      return cachedSampleRateValidRef.current ? cachedSampleRateRef.current : 30;
-    }
-
-    // Collect inter-frame deltas in the plausible camera range.
-    const deltas: number[] = [];
-    for (let i = 1; i < history.length; i++) {
-      const d = history[i] - history[i - 1];
-      if (d >= 8 && d <= 120 && isFinite(d)) deltas.push(d);
-    }
-    if (deltas.length < 4) {
-      return cachedSampleRateValidRef.current ? cachedSampleRateRef.current : 30;
-    }
-
-    // Median + MAD outlier rejection (survives dropped frames / bursts).
-    const sorted = deltas.slice().sort((a, b) => a - b);
-    const median = sorted[sorted.length >> 1];
-    const devs = sorted.map(v => Math.abs(v - median)).sort((a, b) => a - b);
-    const mad = devs[devs.length >> 1] || 1;
-    const lo = median - 3 * mad;
-    const hi = median + 3 * mad;
-
-    let sum = 0, count = 0;
-    for (let i = 0; i < deltas.length; i++) {
-      const v = deltas[i];
-      if (v >= lo && v <= hi) { sum += v; count++; }
-    }
-    const robustMs = count >= 4 ? sum / count : median;
-    const instantSR = Math.max(15, Math.min(60, 1000 / Math.max(1, robustMs)));
-
-    // EMA smoothing against cached value -> stable SR under variable FPS.
-    const next = cachedSampleRateValidRef.current
-      ? cachedSampleRateRef.current * 0.7 + instantSR * 0.3
-      : instantSR;
-
-    cachedSampleRateRef.current = next;
-    cachedSampleRateValidRef.current = true;
-    return next;
+    // Mirror state into the legacy refs (other parts of Index still read them).
+    cachedSampleRateRef.current = est.sampleRate;
+    cachedSampleRateValidRef.current = est.valid;
+    return est.sampleRate;
   }, []);
 
   const computeRRStability = useCallback((intervals: number[]): number => {
