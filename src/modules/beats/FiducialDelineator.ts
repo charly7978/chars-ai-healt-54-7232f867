@@ -1,36 +1,60 @@
 /**
  * BEAT-TO-BEAT FIDUCIAL DELINEATOR
  *
- * Given the most recent samples of the filtered PPG signal that contain ONE beat,
- * locate four canonical landmarks and derive morphology metrics:
+ * Locates foot, systolic peak, dicrotic notch and diastolic peak inside a
+ * windowed PPG beat, plus morphology metrics (rise time, pulse width @ 50%,
+ * notch depth, reflection index, validity).
  *
- *   1. FOOT       — minimum on the upstroke side of the systolic peak.
- *                   Found by scanning backwards from peakIdx until the signal
- *                   stops decreasing (1st-derivative sign change −→+).
- *
- *   2. SYSTOLIC   — supplied peakIdx, refined by parabolic interpolation over
- *                   the 3-sample neighbourhood for sub-sample accuracy.
- *
- *   3. DICROTIC   — local minimum on the downstroke between systolic peak and
- *      NOTCH       end-of-window. Detected via second-derivative sign change
- *                  (concave-down → concave-up), with a fallback to the first
- *                  point where the 1st derivative changes from negative to
- *                  near-zero. Only kept if depth ≥ 3% of pulse amplitude.
- *
- *   4. DIASTOLIC  — local maximum AFTER the dicrotic notch, before the next
- *      PEAK        foot. Reflection wave from the periphery.
- *
- * Output also includes morphology metrics:
- *   • riseTimeMs       (foot → systolic)
- *   • decayTimeMs      (systolic → end of window)
- *   • pulseWidth50Ms   (width at 50% of pulse amplitude)
- *   • notchDepth       (relative depth of notch in [0,1])
- *   • reflectionIndex  (diastolic / systolic amplitude)
- *   • morphologyValidity in [0,1] from physiological plausibility checks.
- *
- * Hot-path conscious: indexed loops, no allocations beyond the returned object.
+ * All search ranges and plausibility thresholds are runtime-tunable via
+ * `setParams()` — a UI panel can mutate them and morphologyScore updates
+ * will be visible on the very next processed beat.
  */
 import type { BeatFiducials } from '../../types/fiducials';
+
+export interface FiducialParams {
+  // Search-range bounds (ms)
+  footMaxLookbackMs: number;
+  notchSearchEndMs: number;
+  notchTimeWindowMinMs: number;
+  notchTimeWindowMaxMs: number;
+  diastolicSearchEndMs: number;
+  // Plausibility thresholds (fractions of pulse amplitude)
+  notchDepthMin: number;
+  notchDepthMax: number;
+  notchBelowPeakFrac: number;
+  diastolicMinRiseFrac: number;
+  // Validity scoring — rise time bands (ms)
+  riseTimeIdealMinMs: number;
+  riseTimeIdealMaxMs: number;
+  riseTimeWideMinMs: number;
+  riseTimeWideMaxMs: number;
+  // Pulse width @50% bounds (ms)
+  pulseWidth50MinMs: number;
+  pulseWidth50MaxMs: number;
+  // Reflection index bounds
+  reflectionIdxMin: number;
+  reflectionIdxMax: number;
+}
+
+export const DEFAULT_FIDUCIAL_PARAMS: FiducialParams = {
+  footMaxLookbackMs: 800,
+  notchSearchEndMs: 450,
+  notchTimeWindowMinMs: 120,
+  notchTimeWindowMaxMs: 400,
+  diastolicSearchEndMs: 350,
+  notchDepthMin: 0.03,
+  notchDepthMax: 0.60,
+  notchBelowPeakFrac: 0.03,
+  diastolicMinRiseFrac: 0.01,
+  riseTimeIdealMinMs: 70,
+  riseTimeIdealMaxMs: 280,
+  riseTimeWideMinMs: 50,
+  riseTimeWideMaxMs: 350,
+  pulseWidth50MinMs: 130,
+  pulseWidth50MaxMs: 520,
+  reflectionIdxMin: 0.25,
+  reflectionIdxMax: 0.95,
+};
 
 const EMPTY: BeatFiducials = {
   footIdx: -1, systolicIdx: -1, notchIdx: -1, diastolicIdx: -1,
@@ -40,38 +64,40 @@ const EMPTY: BeatFiducials = {
 };
 
 export class FiducialDelineator {
-  /**
-   * @param samples       Float64Array containing the analysis window. Must contain
-   *                      ≥10 samples before peakIdx and ≥6 samples after.
-   * @param peakIdx       Index of the detected systolic peak inside `samples`.
-   * @param sampleRateHz  Effective sample rate (used to convert sample indices → ms).
-   */
+  private params: FiducialParams = { ...DEFAULT_FIDUCIAL_PARAMS };
+
+  /** Replace any subset of the tunable params at runtime. */
+  setParams(patch: Partial<FiducialParams>): void {
+    this.params = { ...this.params, ...patch };
+  }
+
+  getParams(): FiducialParams {
+    return { ...this.params };
+  }
+
   delineate(samples: Float64Array, peakIdx: number, sampleRateHz: number): BeatFiducials {
     const n = samples.length;
     if (n < 16 || peakIdx < 6 || peakIdx >= n - 4 || sampleRateHz < 5) {
       return { ...EMPTY };
     }
     const msPerSample = 1000 / sampleRateHz;
+    const P = this.params;
 
-    // ─── 1. FOOT (search back from peak for last local minimum) ───────────
-    // Walk backwards while the signal keeps decreasing; the first index whose
-    // neighbour is higher (or equal) is the foot.
+    // 1. FOOT — walk back until upstroke ends or hard cap reached
     let footIdx = peakIdx;
     for (let i = peakIdx - 1; i >= 1; i--) {
       if (samples[i] <= samples[i - 1] && samples[i] <= samples[i + 1]) {
         footIdx = i;
         break;
       }
-      // Hard cap: don't search more than 800 ms into the past.
-      if ((peakIdx - i) * msPerSample > 800) {
+      if ((peakIdx - i) * msPerSample > P.footMaxLookbackMs) {
         footIdx = i;
         break;
       }
     }
     if (footIdx >= peakIdx) return { ...EMPTY };
 
-    // ─── 2. SYSTOLIC PEAK refinement (parabolic interpolation) ────────────
-    // Sub-sample peak position improves rise-time precision.
+    // 2. SYSTOLIC peak refinement (parabolic interp)
     let systolicAmp = samples[peakIdx];
     {
       const yL = samples[peakIdx - 1], yC = samples[peakIdx], yR = samples[peakIdx + 1];
@@ -86,28 +112,23 @@ export class FiducialDelineator {
     const pulseAmp = systolicAmp - samples[footIdx];
     if (pulseAmp <= 0) return { ...EMPTY };
 
-    // ─── 3. DICROTIC NOTCH (local minimum on downstroke) ──────────────────
-    // Search after peak. Use 2nd derivative: notch is where concavity flips
-    // from negative (downward curvature, falling) to positive (upward, recovery).
+    // 3. DICROTIC NOTCH — local min on downstroke, scored by depth + time
     let notchIdx = -1;
     let notchDepth = 0;
-    const searchEnd = Math.min(n - 2, peakIdx + Math.round(450 / msPerSample));
+    const searchEnd = Math.min(n - 2, peakIdx + Math.round(P.notchSearchEndMs / msPerSample));
     let prevD2Sign = 0;
     let bestNotchScore = 0;
     for (let i = peakIdx + 2; i < searchEnd; i++) {
       const d2 = samples[i + 1] - 2 * samples[i] + samples[i - 1];
       const sign = d2 > 0 ? 1 : (d2 < 0 ? -1 : 0);
-      // Local minimum test: sample lower than both neighbours
       const isLocalMin = samples[i] < samples[i - 1] && samples[i] <= samples[i + 1];
       if (isLocalMin || (prevD2Sign < 0 && sign > 0)) {
-        const depth = (systolicAmp - samples[i]) / pulseAmp; // 0 = at peak, 1 = back to foot level
-        // Notch must be on the downstroke (below peak, above foot), and a local dip.
+        const depth = (systolicAmp - samples[i]) / pulseAmp;
         const aboveFoot = samples[i] > samples[footIdx];
-        const belowPeak = samples[i] < systolicAmp - 0.03 * pulseAmp;
+        const belowPeak = samples[i] < systolicAmp - P.notchBelowPeakFrac * pulseAmp;
         if (aboveFoot && belowPeak) {
-          // Score prefers: clear depth, earlier in physiological window (150–350 ms post-peak).
           const tMs = (i - peakIdx) * msPerSample;
-          const timeScore = tMs >= 120 && tMs <= 400 ? 1 : 0.4;
+          const timeScore = tMs >= P.notchTimeWindowMinMs && tMs <= P.notchTimeWindowMaxMs ? 1 : 0.4;
           const score = depth * timeScore;
           if (score > bestNotchScore) {
             bestNotchScore = score;
@@ -118,21 +139,20 @@ export class FiducialDelineator {
       }
       prevD2Sign = sign;
     }
-    if (notchDepth < 0.03) {
+    if (notchDepth < P.notchDepthMin) {
       notchIdx = -1;
       notchDepth = 0;
     }
 
-    // ─── 4. DIASTOLIC PEAK (local max after notch) ────────────────────────
+    // 4. DIASTOLIC peak (local max after notch)
     let diastolicIdx = -1;
     let reflectionIndex = 0;
     if (notchIdx > 0) {
-      const dEnd = Math.min(n - 2, notchIdx + Math.round(350 / msPerSample));
+      const dEnd = Math.min(n - 2, notchIdx + Math.round(P.diastolicSearchEndMs / msPerSample));
       let bestAmp = samples[notchIdx];
       for (let i = notchIdx + 1; i < dEnd; i++) {
         if (samples[i] > samples[i - 1] && samples[i] >= samples[i + 1] && samples[i] > bestAmp) {
-          // Must be lower than systolic but higher than notch by ≥ 1% of amplitude.
-          if (samples[i] < systolicAmp && (samples[i] - samples[notchIdx]) / pulseAmp > 0.01) {
+          if (samples[i] < systolicAmp && (samples[i] - samples[notchIdx]) / pulseAmp > P.diastolicMinRiseFrac) {
             diastolicIdx = i;
             bestAmp = samples[i];
           }
@@ -144,7 +164,7 @@ export class FiducialDelineator {
       }
     }
 
-    // ─── 5. PULSE WIDTH at 50% of pulse amplitude ─────────────────────────
+    // 5. PULSE WIDTH @ 50%
     const halfLevel = samples[footIdx] + 0.5 * pulseAmp;
     let leftCross = footIdx, rightCross = peakIdx;
     for (let i = footIdx; i <= peakIdx; i++) {
@@ -159,18 +179,13 @@ export class FiducialDelineator {
     const riseTimeMs = (peakIdx - footIdx) * msPerSample;
     const decayTimeMs = (n - 1 - peakIdx) * msPerSample;
 
-    // ─── 6. MORPHOLOGY VALIDITY (physiological plausibility) ──────────────
+    // 6. MORPHOLOGY VALIDITY
     let validity = 0;
-    // Rise time: human PPG systolic upstroke ~80–250 ms.
-    if (riseTimeMs >= 70 && riseTimeMs <= 280) validity += 0.30;
-    else if (riseTimeMs >= 50 && riseTimeMs <= 350) validity += 0.15;
-    // Pulse width 50: ~150–500 ms.
-    if (pulseWidth50Ms >= 130 && pulseWidth50Ms <= 520) validity += 0.20;
-    // Notch present is a strong sign of a clean beat.
-    if (notchIdx > 0 && notchDepth >= 0.05 && notchDepth <= 0.6) validity += 0.25;
-    // Reflection index in physiological range.
-    if (reflectionIndex >= 0.25 && reflectionIndex <= 0.95) validity += 0.15;
-    // Decay > rise (asymmetry of a real PPG pulse).
+    if (riseTimeMs >= P.riseTimeIdealMinMs && riseTimeMs <= P.riseTimeIdealMaxMs) validity += 0.30;
+    else if (riseTimeMs >= P.riseTimeWideMinMs && riseTimeMs <= P.riseTimeWideMaxMs) validity += 0.15;
+    if (pulseWidth50Ms >= P.pulseWidth50MinMs && pulseWidth50Ms <= P.pulseWidth50MaxMs) validity += 0.20;
+    if (notchIdx > 0 && notchDepth >= Math.max(0.05, P.notchDepthMin) && notchDepth <= P.notchDepthMax) validity += 0.25;
+    if (reflectionIndex >= P.reflectionIdxMin && reflectionIndex <= P.reflectionIdxMax) validity += 0.15;
     if (decayTimeMs > riseTimeMs * 1.1) validity += 0.10;
 
     const complete = footIdx >= 0 && peakIdx > footIdx && notchIdx > peakIdx && diastolicIdx > notchIdx;

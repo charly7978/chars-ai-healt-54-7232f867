@@ -7,7 +7,7 @@ import type {
   HeartBeatResult, HeartBeatDebug
 } from '../types/beat';
 import type { BeatFiducials } from '../types/fiducials';
-import { FiducialDelineator } from './beats/FiducialDelineator';
+import { FiducialDelineator, type FiducialParams, DEFAULT_FIDUCIAL_PARAMS } from './beats/FiducialDelineator';
 
 export class HeartBeatProcessor {
   private signalBuf = new RingBuffer(360);
@@ -27,6 +27,15 @@ export class HeartBeatProcessor {
 
   // ── Fiducial delineation ──────────────────────────────────────────────
   private fiducialDelineator = new FiducialDelineator();
+
+  /** Live-update the delineator's tunable parameters. Effective on the next beat. */
+  setFiducialParams(patch: Partial<FiducialParams>): void {
+    this.fiducialDelineator.setParams(patch);
+  }
+
+  getFiducialParams(): FiducialParams {
+    return this.fiducialDelineator.getParams();
+  }
   /** Reusable scratch window for delineation (≥ pre+post samples). */
   private fiducialWindow: Float64Array = new Float64Array(96);
   private readonly FIDUCIAL_PRE_SAMPLES = 30;   // ~500 ms @ 60 fps for foot search
