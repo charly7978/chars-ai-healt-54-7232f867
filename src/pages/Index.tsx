@@ -15,7 +15,7 @@ import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRa
 import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
-import ForensicGateOverlay, { type ForensicGateSnapshot } from "@/components/ForensicGateOverlay";
+import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -91,7 +91,19 @@ const Index = () => {
   // copied as-is (they are tiny numbers — no allocations in hot path).
   const forensicGateRef = useRef<ForensicGateSnapshot | null>(null);
   const lastOverlayCommitRef = useRef<number>(0);
-  const OVERLAY_MIN_INTERVAL_MS = 150;
+  // User-tunable cadence (overlay + session-log sampling). 150 ms keeps the
+  // camera preview smooth; 100 ms gives denser logs; 300/500/1000 ms shrink
+  // the export file. Persisted in localStorage so it survives reloads.
+  const [overlayCadenceMs, setOverlayCadenceMs] = useState<ForensicCadenceMs>(() => {
+    if (typeof window === 'undefined') return 150;
+    const stored = parseInt(window.localStorage.getItem('forensicCadenceMs') || '', 10);
+    return ([100, 150, 300, 500, 1000] as const).includes(stored as any) ? (stored as ForensicCadenceMs) : 150;
+  });
+  const overlayCadenceRef = useRef<number>(overlayCadenceMs);
+  useEffect(() => {
+    overlayCadenceRef.current = overlayCadenceMs;
+    try { window.localStorage.setItem('forensicCadenceMs', String(overlayCadenceMs)); } catch {}
+  }, [overlayCadenceMs]);
   // Gate-transition tracking for alerts (toast + haptic). We only fire on
   // RISING edge (false→true) for "open" alerts and FALLING edge (true→false)
   // for "closed" alerts, with a per-gate cooldown so we don't spam.
@@ -698,7 +710,7 @@ const Index = () => {
         prev.all !== snap.passAll;
       // Commit on transitions immediately (so users see the pill flip), or
       // throttle steady-state updates.
-      if (transitioned || nowMs - lastOverlayCommitRef.current >= OVERLAY_MIN_INTERVAL_MS) {
+      if (transitioned || nowMs - lastOverlayCommitRef.current >= overlayCadenceRef.current) {
         lastOverlayCommitRef.current = nowMs;
         setForensicGate(snap);
 
@@ -1068,6 +1080,8 @@ const Index = () => {
           visible={showForensicOverlay && isMonitoring}
           onExport={exportForensicSession}
           sampleCount={sessionLogSize}
+          cadenceMs={overlayCadenceMs}
+          onCadenceChange={setOverlayCadenceMs}
         />
 
         {isMonitoring && (() => {

@@ -11,11 +11,16 @@ export interface ForensicGateSnapshot {
   livenessReason: string;
 }
 
+export const FORENSIC_CADENCE_OPTIONS = [100, 150, 300, 500, 1000] as const;
+export type ForensicCadenceMs = typeof FORENSIC_CADENCE_OPTIONS[number];
+
 interface Props {
   gate: ForensicGateSnapshot | null;
   visible: boolean;
   onExport?: () => void;
   sampleCount?: number;
+  cadenceMs?: ForensicCadenceMs;
+  onCadenceChange?: (ms: ForensicCadenceMs) => void;
 }
 
 const pillBase =
@@ -33,7 +38,9 @@ function snrClass(db: number): string {
   return "text-red-300";
 }
 
-const ForensicGateOverlay: React.FC<Props> = ({ gate, visible, onExport, sampleCount }) => {
+const ForensicGateOverlay: React.FC<Props> = ({
+  gate, visible, onExport, sampleCount, cadenceMs, onCadenceChange,
+}) => {
   if (!visible) return null;
 
   const g1 = gate?.gate1_optical ?? null;
@@ -112,6 +119,33 @@ const ForensicGateOverlay: React.FC<Props> = ({ gate, visible, onExport, sampleC
       <div className="mt-1.5 pt-1 border-t border-zinc-700/60 text-[9px] text-zinc-500 leading-tight">
         G1 firma hemoglobina · G2 SNR ≥ 6 dB · G3 morfología 4/4
       </div>
+
+      {onCadenceChange && (
+        <div className="pointer-events-auto mt-2 flex items-center justify-between gap-1">
+          <span className="text-[9px] text-zinc-400 tracking-wide">CADENCIA</span>
+          <div className="flex gap-0.5">
+            {FORENSIC_CADENCE_OPTIONS.map(ms => {
+              const active = cadenceMs === ms;
+              return (
+                <button
+                  key={ms}
+                  type="button"
+                  onClick={() => onCadenceChange(ms)}
+                  className={
+                    "px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors " +
+                    (active
+                      ? "bg-emerald-600/40 border-emerald-400/70 text-emerald-100"
+                      : "bg-zinc-700/30 border-zinc-600/40 text-zinc-300 hover:bg-zinc-600/40")
+                  }
+                  title={`Una muestra cada ${ms} ms`}
+                >
+                  {ms < 1000 ? `${ms}ms` : `${ms / 1000}s`}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {onExport && (
         <button
