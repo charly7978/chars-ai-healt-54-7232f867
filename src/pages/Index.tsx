@@ -142,6 +142,49 @@ const Index = () => {
   const noiseSamplesRef = useRef(0);
   const [validSamples, setValidSamples] = useState(0);
   const [noiseSamples, setNoiseSamples] = useState(0);
+  // ── Rolling noise alert ──
+  // Keep a sliding window of the last N samples (1 = pass, 0 = noise) and
+  // raise an alert when the rolling triple-gate pass rate drops below
+  // NOISE_ALERT_THRESHOLD for at least NOISE_ALERT_MIN_SAMPLES consecutive
+  // checks. This tells the operator: "the camera is staring at noise".
+  const NOISE_WINDOW = 40;              // ~6 s @ 150 ms cadence
+  const NOISE_ALERT_THRESHOLD = 0.25;   // <25% pass rate
+  const NOISE_ALERT_MIN_SAMPLES = 20;   // need this many filled slots first
+  const NOISE_ALERT_REPEAT_MS = 6000;   // re-beep every 6 s while in alert
+  const noiseWindowRef = useRef<Uint8Array>(new Uint8Array(NOISE_WINDOW));
+  const noiseWindowFillRef = useRef(0);
+  const noiseWindowIdxRef = useRef(0);
+  const noiseAlertActiveRef = useRef(false);
+  const lastNoiseBeepAtRef = useRef(0);
+  const [noiseAlertActive, setNoiseAlertActive] = useState(false);
+  const [noiseAlertPct, setNoiseAlertPct] = useState(0);
+  // Lazy AudioContext for the noise alert beep.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const playNoiseBeep = useCallback(() => {
+    try {
+      if (typeof window === 'undefined') return;
+      const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+      if (!Ctx) return;
+      if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+      const now = ctx.currentTime;
+      // Two-tone descending alert (880 → 440 Hz) — clearly distinct from the
+      // success ping. Total length ~360 ms.
+      [{ f: 880, t: 0 }, { f: 440, t: 0.18 }].forEach(({ f, t }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = f;
+        gain.gain.setValueAtTime(0.0001, now + t);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + t + 0.16);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + t);
+        osc.stop(now + t + 0.18);
+      });
+    } catch {}
+  }, []);
 
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
@@ -541,6 +584,14 @@ const Index = () => {
     noiseSamplesRef.current = 0;
     setValidSamples(0);
     setNoiseSamples(0);
+    // Reset noise-alert sliding window for the new session.
+    noiseWindowRef.current.fill(0);
+    noiseWindowFillRef.current = 0;
+    noiseWindowIdxRef.current = 0;
+    noiseAlertActiveRef.current = false;
+    lastNoiseBeepAtRef.current = 0;
+    setNoiseAlertActive(false);
+    setNoiseAlertPct(0);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
@@ -749,6 +800,37 @@ const Index = () => {
         // display in the forensic overlay.
         if (snap.passAll) validSamplesRef.current += 1;
         else noiseSamplesRef.current += 1;
+        // Sliding-window noise tracker.
+        const win = noiseWindowRef.current;
+        win[noiseWindowIdxRef.current] = snap.passAll ? 1 : 0;
+        noiseWindowIdxRef.current = (noiseWindowIdxRef.current + 1) % NOISE_WINDOW;
+        if (noiseWindowFillRef.current < NOISE_WINDOW) noiseWindowFillRef.current += 1;
+        if (noiseWindowFillRef.current >= NOISE_ALERT_MIN_SAMPLES) {
+          let s = 0;
+          for (let i = 0; i < noiseWindowFillRef.current; i++) s += win[i];
+          const pct = s / noiseWindowFillRef.current;
+          const shouldAlert = pct < NOISE_ALERT_THRESHOLD;
+          if (shouldAlert && !noiseAlertActiveRef.current) {
+            noiseAlertActiveRef.current = true;
+            setNoiseAlertActive(true);
+            setNoiseAlertPct(pct);
+            lastNoiseBeepAtRef.current = nowMs;
+            playNoiseBeep();
+            vibrate([200, 80, 200]);
+          } else if (shouldAlert && noiseAlertActiveRef.current) {
+            // Re-beep periodically while still in alert.
+            if (nowMs - lastNoiseBeepAtRef.current >= NOISE_ALERT_REPEAT_MS) {
+              lastNoiseBeepAtRef.current = nowMs;
+              playNoiseBeep();
+              vibrate([200, 80, 200]);
+            }
+            setNoiseAlertPct(pct);
+          } else if (!shouldAlert && noiseAlertActiveRef.current) {
+            noiseAlertActiveRef.current = false;
+            setNoiseAlertActive(false);
+            setNoiseAlertPct(pct);
+          }
+        }
         // Cheap state ping (only when buckets of 25 rounds elapse) so the
         // overlay counters update without spamming React.
         if (log.length % 25 === 0) {
@@ -1108,6 +1190,21 @@ const Index = () => {
           validSamples={validSamples}
           noiseSamples={noiseSamples}
         />
+
+        {showForensicOverlay && isMonitoring && noiseAlertActive && (
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="absolute top-16 left-1/2 -translate-x-1/2 z-40 pointer-events-none select-none"
+          >
+            <div className="px-4 py-2 rounded-md bg-red-600/90 border-2 border-red-300 text-white font-mono text-[12px] font-bold tracking-wider shadow-2xl animate-pulse">
+              ⚠ MIDIENDO RUIDO — TRIPLE-GATE {(noiseAlertPct * 100).toFixed(0)}% (&lt;25%)
+              <div className="text-[10px] font-normal text-red-100 mt-0.5 tracking-normal">
+                La cámara no detecta señal PPG válida. No publicar valores.
+              </div>
+            </div>
+          </div>
+        )}
 
         {isMonitoring && (() => {
           const pq = getPositionQuality();
