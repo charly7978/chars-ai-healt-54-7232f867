@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-push hook — mirrors the CI forensic gate.
+# Enable locally with: git config core.hooksPath .githooks
+
+set -e
+
+echo "🔬 Running forensic audit before push..."
+npm run audit:forensic
+
+echo "🧪 Running forensic Vitest suite before push..."
+npm run test:forensic
+
+echo "✅ Forensic gate passed — push allowed."
