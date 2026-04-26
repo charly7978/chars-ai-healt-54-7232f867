@@ -574,6 +574,7 @@ const Index = () => {
   const startFrameLoop = useCallback(() => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
+    const generation = ++frameLoopGenerationRef.current;
     
     const canvas = canvasRef.current;
     const ctx = ctxRef.current;
@@ -613,7 +614,7 @@ const Index = () => {
     };
 
     const captureOneFrame = (frameTimestamp: number) => {
-      if (!isProcessingRef.current) return;
+      if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
       const video = cameraRef.current?.getVideoElement();
       if (!video || video.readyState < 2 || video.videoWidth === 0) {
         frameLoopRef.current = requestAnimationFrame(() =>
@@ -648,9 +649,10 @@ const Index = () => {
     };
 
     const scheduleNext = (video: HTMLVideoElement) => {
-      if (!isProcessingRef.current) return;
+      if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
       if ('requestVideoFrameCallback' in video) {
         (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+          if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
           // mediaTime is in seconds (camera capture clock); presentationTime
           // is in DOMHighResTimeStamp ms; performance.now() is fallback.
           const ts =
@@ -671,6 +673,7 @@ const Index = () => {
 
   const stopFrameLoop = useCallback(() => {
     isProcessingRef.current = false;
+    frameLoopGenerationRef.current++;
     if (frameLoopRef.current) {
       cancelAnimationFrame(frameLoopRef.current);
       frameLoopRef.current = null;
