@@ -120,6 +120,11 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
   const [phase, setPhase] = useState<CalibrationPhase>('PLACEMENT');
   const [progress, setProgress] = useState(0); // 0..1 within current phase
   const [statusMsg, setStatusMsg] = useState<string>('Coloque el dedo sobre la cámara y el flash.');
+  // Mirrors of the ref-stored sample counts so they appear in the HUD.
+  // Updated only when they change (every ~30 ms tick → ≤ ~33 setStates/sec
+  // for ~10 s, well within React's budget).
+  const [bpmCount, setBpmCount] = useState(0);
+  const [spo2Count, setSpo2Count] = useState(0);
 
   // Refs that survive re-renders inside the requestAnimationFrame loop.
   const phaseStartRef = useRef<number>(performance.now());
@@ -136,12 +141,14 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
     setStatusMsg(msg);
     setProgress(0);
     phaseStartRef.current = performance.now();
-    if (p === 'BPM_BASELINE') bpmSamplesRef.current = [];
-    if (p === 'SPO2_BASELINE') spo2SamplesRef.current = [];
+    if (p === 'BPM_BASELINE') { bpmSamplesRef.current = []; setBpmCount(0); }
+    if (p === 'SPO2_BASELINE') { spo2SamplesRef.current = []; setSpo2Count(0); }
     if (p === 'PLACEMENT' || p === 'STABILITY') {
       bpmSamplesRef.current = [];
       spo2SamplesRef.current = [];
       qualitySamplesRef.current = [];
+      setBpmCount(0);
+      setSpo2Count(0);
     }
   }, []);
 
