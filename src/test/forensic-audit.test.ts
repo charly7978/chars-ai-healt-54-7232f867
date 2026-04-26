@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * FORENSIC AUDIT TEST — fails the build if the codebase contains any
  * synthetic / demo / fallback vital paths, or default normal-range
