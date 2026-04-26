@@ -925,6 +925,10 @@ export class HeartBeatProcessor {
     this.acceptedBeats = [];
     this.pendingFiducialBeats.length = 0;
     this.lastFiducials = null;
+    // Keep cached SR across short stalls (variable FPS) but invalidate on full reset.
+    this.cachedSampleRateValid = false;
+    this.cachedSampleRate = 30;
+    this.lastSampleRateUpdateFrame = -1;
     this.smoothBPM = 0;
     this.spectralBPM = 0;
     this.autocorrBPM = 0;
