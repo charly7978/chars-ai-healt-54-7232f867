@@ -480,19 +480,16 @@ const Index = () => {
   const { analysis, isAnalyzing, analyzeVitals, clearAnalysis } = useHealthAnalysis();
   const [showAIAnalysis, setShowAIAnalysis] = useState(false);
 
-  useEffect(() => {
-    if (!canvasRef.current) {
-      canvasRef.current = document.createElement('canvas');
-      // Initial size; adapted to native video size at first frame.
-      canvasRef.current.width = 480;
-      canvasRef.current.height = 360;
-      ctxRef.current = canvasRef.current.getContext('2d', {
-        willReadFrequently: true,
-        alpha: false,
-        desynchronized: true,
-      });
-    }
-  }, []);
+  // Single source of truth for camera + torch + frame loop. Owns the
+  // capture canvas, the rVFC chain with stall detection, the event-driven
+  // dead-stream watchdog and the cameraOn React state bound to <CameraView/>.
+  const ppgCamera = usePpgCamera({
+    cameraRef,
+    onFrame: (imageData, frameTimestamp) => processFrame(imageData, frameTimestamp),
+    shouldDropFrame: (nowMs) => motionClassifierRef.current.shouldDropFrame(nowMs),
+    onFrameDecision: (nowMs, dropped) => motionClassifierRef.current.markFrame(nowMs, dropped),
+  });
+  const isCameraOn = ppgCamera.cameraOn;
 
   const enterFullScreen = async () => {
     if (isFullscreen) return;
