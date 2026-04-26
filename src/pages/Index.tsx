@@ -1321,7 +1321,13 @@ const Index = () => {
         greenAC: rgbStats.greenAC,
       });
       setSignalHealth(cameraQualityRef.current.getSignalHealth());
-      if (needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
+      // V9.6 — HARD STOP: do not automatically bounce the camera from the
+      // quality gate. On several mobile browsers, tearing down/reopening the
+      // stream destroys torch/exposure stability and causes the visible
+      // "abre y cierra" loop. We keep the full decision log + SIGNAL HEALTH
+      // overlay, but recovery must not interrupt capture while diagnosing
+      // G1/G2/G3 extraction.
+      if (false && needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
         cameraReinitInFlightRef.current = true;
         const health = cameraQualityRef.current.getSignalHealth();
         setSignalHealth(health);
