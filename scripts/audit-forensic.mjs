@@ -23,6 +23,13 @@ const FORBIDDEN = [
   { re: /\|\|\s*60\b(?![0-9])/g, where: /modules\/(vital-signs|biomarkers)|HeartBeatProcessor/, msg: 'Default BPM=60 sospechoso' },
   { re: /\|\|\s*90\b(?![0-9])/g, where: /modules\/(vital-signs|biomarkers)/, msg: 'Default 90 (SpO2/dia) sospechoso' },
   { re: /\b(mock|fake|dummy|synthetic|placeholder)\b/gi, where: /modules\/(signal-processing|vital-signs|biomarkers)|HeartBeatProcessor/, msg: 'Palabra prohibida (mock/fake/synthetic)' },
+  // Physiological clamps: forcing a vital sign back into a "normal" range
+  // silently fabricates readings when the model is out of distribution.
+  // Detect Math.max(<low>, Math.min(<high>, x)) patterns where the bounds
+  // match common physiological ranges (BP, SpO2, glucose, lipids, HR).
+  { re: /Math\.max\s*\(\s*(?:8[05]|7[02]|9[05]|6[05]|5[05])\s*,\s*Math\.min\s*\(\s*(?:1[0-9]{2}|2[0-2]0|600|500)/g,
+    where: /modules\/(vital-signs|biomarkers)|HeartBeatProcessor/,
+    msg: 'Clamp fisiológico Math.max(low, Math.min(high, x)) — usar rechazo, no clamp' },
 ];
 
 function walk(dir) {
