@@ -45,6 +45,11 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isStartingRef = useRef(false);
+  // Continuous FPS watchdog — updates diagnostics.realFrameRate every ~2 s
+  // so the diagnostics overlay reflects what the camera is actually delivering.
+  const fpsWatchdogRef = useRef<{ frames: number; t0: number; rafId: number | null }>({
+    frames: 0, t0: 0, rafId: null,
+  });
   const diagnosticsRef = useRef<CameraDiagnostics>({
     deviceLabel: '',
     hasTorch: false,
