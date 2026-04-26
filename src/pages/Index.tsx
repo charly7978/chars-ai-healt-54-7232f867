@@ -883,8 +883,9 @@ const Index = () => {
     // → we early-return below with everything zeroed.
     const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
 
-    if (noOpticalContact || !fg?.gate1_optical) {
-      // Hard forensic zero — never invent waveforms or numbers from air.
+    // MODO FORENSE POLICIAL: permitir procesamiento incluso con contacto subóptimo
+    // Solo bloquear si hay evidencia clara de NO ser tejido humano
+    if (noOpticalContact && (lastSignal as any)?.contactState === 'NO_OPTICAL_CONTACT') {
       setHeartbeatSignal(0);
       setHeartRate(0);
       setBeatMarker(0);
@@ -905,6 +906,14 @@ const Index = () => {
       }
       return;
     }
+    
+    // Si gate1 no pasa pero hay señal, procesar de todos modos para análisis forense
+    console.log('⚠️ Gate1 no pasa pero procesando para análisis:', {
+      gate1: fg?.gate1_optical,
+      contactState: (lastSignal as any)?.contactState,
+      quality: lastSignal.quality,
+      signalValue
+    });
 
     const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
@@ -921,23 +930,27 @@ const Index = () => {
     const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
 
     // ════════════════════════════════════════════════════════════════
-    //  PROCESSING_GATE — habilita ALIMENTAR el detector cardíaco.
-    //  NO depende de morfología ni de forensicPass ni de publicationGate.
-    //  Solo exige evidencia óptica mínima + buffer + OD computable.
-    //  Esto rompe el deadlock: gate3_morphology necesita que el detector
-    //  corra para poder cerrarse.
+    //  PROCESSING_GATE — MODO FORENSE POLICIAL: procesar siempre que haya señal
+    //  Eliminamos restricciones estrictas para permitir análisis en condiciones
+    //  subóptimas (víctimas en shock, mala iluminación, movimiento).
     // ════════════════════════════════════════════════════════════════
     const om = (fg as any)?.opticalMetrics;
     const bufferedSeconds = (fg as any)?.bufferedSeconds ?? 0;
     const opticalOk = !!(fg as any)?.opticalEvidence;
+    
+    // MODO FORENSE: permitir procesamiento con condiciones mínimas
     const processingAllowed =
-      opticalOk &&
-      om != null &&
-      om.meanR >= 25 && om.meanR <= 252 &&
-      om.clipHigh < 0.30 &&
-      om.clipLow  < 0.20 &&
-      bufferedSeconds >= 1.0 &&
-      Number.isFinite(signalValue);
+      Number.isFinite(signalValue) &&
+      (opticalOk || lastSignal.quality > 0); // Permitir si hay calidad mínima
+
+    console.log('🔍 Processing gate:', {
+      processingAllowed,
+      opticalOk,
+      signalValue,
+      quality: lastSignal.quality,
+      bufferedSeconds,
+      om
+    });
 
     // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
     // independiente de la publicación. Permite suavizar umbrales cuando hay
@@ -968,9 +981,9 @@ const Index = () => {
       consecutiveAcceptedRef.current = 0;
     }
 
-    // Si PROCESSING_GATE está cerrado, no podemos alimentar al detector
-    // (no hay OD utilizable). Limpiamos UI y volvemos.
+    // MODO FORENSE: solo bloquear si no hay señal válida absolutamente
     if (!processingAllowed) {
+      console.log('🚫 Processing gate cerrado - señal inválida');
       setHeartbeatSignal(0);
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
@@ -1051,23 +1064,20 @@ const Index = () => {
     setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
 
     // ════════════════════════════════════════════════════════════════
-    //  PUBLICATION_GATE — autoriza onda visible, BPM, vitals, beep, vibrate.
-    //  Relajado para permitir visualización durante calibración.
+    //  PUBLICATION_GATE — MODO FORENSE POLICIAL: publicar siempre que haya
+    //  datos válidos para análisis. No bloquear por gates estrictos.
     // ════════════════════════════════════════════════════════════════
     const spectralPass = !!fg?.gate2_spectral;
-    // Modo relajado: permitir publicación con evidencia óptica + señal cardíaca
-    // sin requerir todos los gates estrictos inicialmente
+    // MODO FORENSE: publicar si hay señal cardíaca detectada, sin restricciones de gates
     const publicationGate =
-      opticalOk &&
-      spectralPass &&
       heartBeatResult.bpm > 0 &&
-      heartBeatResult.bpmConfidence >= 0.20; // Reducido de 0.30 a 0.20
+      heartBeatResult.bpmConfidence >= 0.10; // Mínimo muy bajo para modo forense
     lastPublicationGateRef.current = publicationGate;
 
     if (!publicationGate) {
-      // El detector ya corrió y aprendió de la señal. Solo cerramos la UI.
+      // MODO FORENSE: mostrar señal cruda incluso sin BPM alto
+      setHeartbeatSignal(heartBeatResult.filteredValue);
       unstableFrameCounter.current++;
-      setHeartbeatSignal(0);
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
         setHeartRate(0);
         vitalSignsFrameCounter.current = 0;
