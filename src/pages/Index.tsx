@@ -1287,6 +1287,41 @@ const Index = () => {
                 >
                   RESET (15% / 60)
                 </button>
+                {/* ── Auto-relax block ─────────────────────────────── */}
+                <div className="border-t border-zinc-700/60 pt-2 space-y-1.5">
+                  <label className="flex items-center justify-between cursor-pointer">
+                    <span className="text-zinc-400">Auto-relax tras N frames</span>
+                    <input
+                      type="checkbox"
+                      checked={autoRelaxEnabled}
+                      onChange={(e) => setAutoRelaxEnabled(e.target.checked)}
+                      className="accent-emerald-500"
+                    />
+                  </label>
+                  <div>
+                    <div className="flex justify-between mb-0.5">
+                      <span className="text-zinc-400">N consecutivos</span>
+                      <span className="text-emerald-300 font-bold">{autoRelaxN}</span>
+                    </div>
+                    <input
+                      type="range" min={30} max={300} step={10}
+                      value={autoRelaxN}
+                      onChange={(e) => setAutoRelaxN(parseInt(e.target.value, 10))}
+                      disabled={!autoRelaxEnabled}
+                      className="w-full accent-emerald-500 disabled:opacity-40"
+                    />
+                    <div className="flex justify-between text-[9px] text-zinc-500">
+                      <span>30</span><span>300</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between text-[9px]">
+                    <span className="text-zinc-500">Racha actual</span>
+                    <span className="text-zinc-200 font-bold">{consecutiveAcceptedRef.current}</span>
+                  </div>
+                  {autoRelaxActive && (
+                    <div className="text-[9px] text-emerald-300 font-bold">⚡ Umbrales relajados activos</div>
+                  )}
+                </div>
                 <div className="text-[9px] text-zinc-500 leading-tight">
                   Bloquea cómputo de latidos si la ratio de muestras válidas en sesión cae bajo el umbral, tras superar el warm-up.
                 </div>
