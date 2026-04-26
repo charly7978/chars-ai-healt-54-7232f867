@@ -17,6 +17,7 @@ import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
+import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
