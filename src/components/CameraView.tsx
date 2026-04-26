@@ -142,18 +142,21 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         // PHASE 1
         const cameraId = await findMainBackCamera();
 
-        // PHASE 2: Open stream with stable base
+        // PHASE 2: Open stream — request the highest forensically useful
+        // resolution we can sustain at 30 fps. Larger frames give the
+        // adaptive ROI more pixels to average → better SNR. We downscale
+        // for processing in Index.tsx while keeping native pixels.
         const baseConstraints: MediaTrackConstraints = cameraId
           ? {
               deviceId: { exact: cameraId },
-              width: { ideal: 640, max: 960 },
-              height: { ideal: 480, max: 720 },
+              width:  { ideal: 1280, min: 640,  max: 1920 },
+              height: { ideal: 720,  min: 480,  max: 1080 },
               frameRate: { ideal: 30, min: 24, max: 30 }
             }
           : {
               facingMode: { ideal: 'environment' },
-              width: { ideal: 640, max: 960 },
-              height: { ideal: 480, max: 720 },
+              width:  { ideal: 1280, min: 640,  max: 1920 },
+              height: { ideal: 720,  min: 480,  max: 1080 },
               frameRate: { ideal: 30, min: 24, max: 30 }
             };
 
@@ -161,7 +164,7 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         try {
           stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: baseConstraints });
         } catch {
-          console.warn('Fallback to simple constraints');
+          console.warn('Fallback to simple constraints (720p denied)');
           stream = await navigator.mediaDevices.getUserMedia({
             audio: false,
             video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } }
