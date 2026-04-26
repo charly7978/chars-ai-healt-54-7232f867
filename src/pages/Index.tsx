@@ -19,6 +19,7 @@ import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs 
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
+import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -89,6 +90,14 @@ const Index = () => {
       return raw ? (JSON.parse(raw) as CalibrationBaseline) : null;
     } catch { return null; }
   });
+  // Highlight the CAL button briefly when the watchdog fires a prompt.
+  const [calPromptHighlight, setCalPromptHighlight] = useState(false);
+  const calPromptTimerRef = useRef<number | null>(null);
+  const triggerCalPromptHighlight = useCallback(() => {
+    setCalPromptHighlight(true);
+    if (calPromptTimerRef.current) window.clearTimeout(calPromptTimerRef.current);
+    calPromptTimerRef.current = window.setTimeout(() => setCalPromptHighlight(false), 6000);
+  }, []);
   // Independent toggle for the SR diagnostics panel: ?srDiag=1
   const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -1380,6 +1389,21 @@ const Index = () => {
   const { visible: overlaysVisible, reveal: revealOverlays } =
     useAutoHideOverlays({ idleMs: 4000, initialMs: 4000, pinned: overlayPinned });
 
+  // Confidence watchdog — fires a recalibration toast (and flashes the CAL
+  // chip) when quality, motion, or BPM/SpO₂ drift sustain past hold windows.
+  // Suppressed while the wizard is open or when not actively monitoring.
+  useRecalibrationWatchdog(
+    {
+      enabled: isMonitoring && !showCalibration,
+      quality: lastSignal?.quality ?? 0,
+      bpm: heartRate,
+      spo2: vitalSigns.spo2,
+      motionLevel: motionClassifierRef.current.classify(),
+      baseline: calibrationBaseline,
+    },
+    { onPrompt: triggerCalPromptHighlight },
+  );
+
   return (
     <>
     <div
@@ -1792,8 +1816,13 @@ const Index = () => {
       {isMonitoring && (
         <button
           type="button"
-          onClick={() => setShowCalibration(true)}
-          className="fixed bottom-1 left-9 z-40 h-6 px-2 rounded-full bg-primary/15 hover:bg-primary/25 text-[10px] font-medium text-primary border border-primary/30"
+          onClick={() => { setShowCalibration(true); setCalPromptHighlight(false); }}
+          className={
+            "fixed bottom-1 left-9 z-40 h-6 px-2 rounded-full text-[10px] font-medium text-primary border " +
+            (calPromptHighlight
+              ? "bg-primary/30 border-primary animate-pulse ring-2 ring-primary/50"
+              : "bg-primary/15 hover:bg-primary/25 border-primary/30")
+          }
           aria-label="Calibración clínica"
         >
           CAL
