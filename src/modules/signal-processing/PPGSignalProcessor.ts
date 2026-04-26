@@ -1278,6 +1278,32 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     }
   }
 
+  private calculateDiagnosticACDC() {
+    const n = Math.min(180, this.diagnosticGreenBuf.length);
+    if (n < 8) {
+      return {
+        redDC: this.g1RawR, redAC: 0,
+        greenDC: this.g1RawG, greenAC: 0,
+        blueDC: this.g1RawB, blueAC: 0,
+      };
+    }
+    const compute = (buf: RingBuffer) => {
+      const dc = buf.mean(n);
+      const p5 = buf.percentile(0.05, n);
+      const p95 = buf.percentile(0.95, n);
+      const rms = Math.sqrt(buf.variance(n)) * Math.sqrt(2);
+      return { dc, ac: (rms + (p95 - p5) * 0.5) / 2 };
+    };
+    const r = compute(this.diagnosticRedBuf);
+    const g = compute(this.diagnosticGreenBuf);
+    const b = compute(this.diagnosticBlueBuf);
+    return {
+      redDC: r.dc || this.g1RawR, redAC: r.ac,
+      greenDC: g.dc || this.g1RawG, greenAC: g.ac,
+      blueDC: b.dc || this.g1RawB, blueAC: b.ac,
+    };
+  }
+
   private calculatePerfusionIndex(): number {
     if (this.greenDC > 0) return (this.greenAC / this.greenDC) * 100;
     if (this.redDC > 0) return (this.redAC / this.redDC) * 100;
@@ -1463,16 +1489,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // ══════════════════════════════════════════════════════
 
   getRGBStats() {
-    const redDC = this.redDC || this.g1RawR;
-    const greenDC = this.greenDC || this.g1RawG;
-    const blueDC = this.blueDC || this.g1RawB;
+    const diagnostic = this.calculateDiagnosticACDC();
+    const redDC = this.redDC || diagnostic.redDC || this.g1RawR;
+    const greenDC = this.greenDC || diagnostic.greenDC || this.g1RawG;
+    const blueDC = this.blueDC || diagnostic.blueDC || this.g1RawB;
+    const redAC = this.redAC || diagnostic.redAC;
+    const greenAC = this.greenAC || diagnostic.greenAC;
+    const blueAC = this.blueAC || diagnostic.blueAC;
     return {
-      redAC: this.redAC, redDC,
-      greenAC: this.greenAC, greenDC,
-      blueAC: this.blueAC, blueDC,
+      redAC, redDC,
+      greenAC, greenDC,
+      blueAC, blueDC,
       rgRatio: greenDC > 0 ? redDC / greenDC : 0,
-      ratioOfRatios: greenDC > 0 && this.greenAC > 0 && redDC > 0
-        ? (this.redAC / redDC) / (this.greenAC / greenDC) : 0,
+      ratioOfRatios: greenDC > 0 && greenAC > 0 && redDC > 0
+        ? (redAC / redDC) / (greenAC / greenDC) : 0,
     };
   }
 
