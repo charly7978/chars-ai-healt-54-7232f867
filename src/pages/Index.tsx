@@ -821,6 +821,7 @@ const Index = () => {
     console.log('🛑 Finalizando medición...');
     playCompletionSound();
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
+    monitoringIntentRef.current = false;
     stopFrameLoop();
     if (watchdogTimerRef.current !== null) {
       window.clearInterval(watchdogTimerRef.current);
@@ -844,10 +845,7 @@ const Index = () => {
       });
     }
     setIsCameraOn(false);
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
+    setCameraStream(null);
     setIsMonitoring(false);
     setIsCalibrating(false);
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
@@ -863,10 +861,11 @@ const Index = () => {
     setElapsedTime(0);
     setCalibrationProgress(0);
     console.log('✅ Medición finalizada y guardada');
-  }, [isMonitoring, isCalibrating, cameraStream, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
+  }, [isMonitoring, isCalibrating, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
 
   const handleReset = useCallback(() => {
     console.log('🔄 Reset completo...');
+    monitoringIntentRef.current = false;
     stopFrameLoop();
     if (watchdogTimerRef.current !== null) {
       window.clearInterval(watchdogTimerRef.current);
@@ -882,10 +881,7 @@ const Index = () => {
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
     setIsCameraOn(false);
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
+    setCameraStream(null);
     setIsMonitoring(false);
     setShowResults(false);
     setMeasurementSummary(null);
@@ -917,7 +913,7 @@ const Index = () => {
     setCalibrationProgress(0);
     arrhythmiaDetectedRef.current = false;
     console.log('✅ Reset completado');
-  }, [cameraStream, stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
+  }, [stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
 
   const vitalSignsFrameCounter = useRef<number>(0);
   const unstableFrameCounter = useRef<number>(0);
