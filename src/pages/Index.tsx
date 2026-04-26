@@ -1105,6 +1105,8 @@ const Index = () => {
           sampleCount={sessionLogSize}
           cadenceMs={overlayCadenceMs}
           onCadenceChange={setOverlayCadenceMs}
+          validSamples={validSamples}
+          noiseSamples={noiseSamples}
         />
 
         {isMonitoring && (() => {
