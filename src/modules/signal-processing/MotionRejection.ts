@@ -409,6 +409,7 @@ export class MotionRejection {
     this.sigmaCount = 0;
     this.imuIdx = 0;
     this.imuCount = 0;
+    this.rejectedImuCount = 0;
     this.effUpgradeFrames = this.cfg.upgradeConfirmFrames;
     this.effAlpha = this.cfg.weightSmoothingAlpha;
   }
