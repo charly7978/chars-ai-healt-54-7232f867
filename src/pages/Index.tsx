@@ -903,6 +903,36 @@ const Index = () => {
     const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
     const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
     const odAccepted = forensicPass && !!(fg as any)?.opticalEvidence;
+
+    // ── AUTO-RELAX: count consecutive accepted (OD) frames. Once the
+    // configured streak is reached, soften the safeguard thresholds so the
+    // operator can keep measuring on a stable signal without manual tuning.
+    if (odAccepted) {
+      consecutiveAcceptedRef.current += 1;
+      if (
+        autoRelaxEnabled &&
+        !autoRelaxAppliedRef.current &&
+        consecutiveAcceptedRef.current >= autoRelaxN
+      ) {
+        preRelaxRef.current = {
+          ratio: acceptedRatioMinRef.current,
+          warmup: warmupSamplesRef.current,
+        };
+        const relaxedRatio = Math.max(0.10, acceptedRatioMinRef.current * 0.5);
+        const relaxedWarmup = Math.max(30, Math.round(warmupSamplesRef.current * 0.5));
+        setAcceptedRatioMin(relaxedRatio);
+        setWarmupSamples(relaxedWarmup);
+        autoRelaxAppliedRef.current = true;
+        setAutoRelaxActive(true);
+        toast({
+          title: 'Umbrales auto-relajados',
+          description: `Señal estable (${autoRelaxN} frames). Ratio ${Math.round(relaxedRatio*100)}% · warm-up ${relaxedWarmup}.`,
+        });
+      }
+    } else {
+      consecutiveAcceptedRef.current = 0;
+    }
+
     if (ratioGuardActive || !odAccepted) {
       // Do NOT feed the beat detector with non-OD / rejected samples.
       setHeartbeatSignal(0);
