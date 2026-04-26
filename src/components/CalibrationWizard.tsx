@@ -228,7 +228,10 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
           }
           // Only record physiologically plausible BPM (40–200) so a
           // momentarily glitched 0 or 300 doesn't poison the baseline.
-          if (l.bpm >= 40 && l.bpm <= 200) bpmSamplesRef.current.push(l.bpm);
+          if (l.bpm >= 40 && l.bpm <= 200) {
+            bpmSamplesRef.current.push(l.bpm);
+            setBpmCount(bpmSamplesRef.current.length);
+          }
           if (l.quality > 0) qualitySamplesRef.current.push(l.quality);
           const p = Math.min(1, elapsed / BASELINE_COLLECT_MS);
           setProgress(p);
@@ -250,7 +253,10 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
             resetPhase('PLACEMENT', 'Contacto perdido durante la línea base.');
             break;
           }
-          if (l.spo2 >= 70 && l.spo2 <= 100) spo2SamplesRef.current.push(l.spo2);
+          if (l.spo2 >= 70 && l.spo2 <= 100) {
+            spo2SamplesRef.current.push(l.spo2);
+            setSpo2Count(spo2SamplesRef.current.length);
+          }
           if (l.quality > 0) qualitySamplesRef.current.push(l.quality);
           const p = Math.min(1, elapsed / BASELINE_COLLECT_MS);
           setProgress(p);
