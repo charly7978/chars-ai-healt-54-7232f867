@@ -400,7 +400,7 @@ const PPGSignalMeter = ({
     
     ctx.textAlign = 'center';
     ctx.fillText(`BEATS: ${beatHistoryRef.current.length}`, W / 2, morphY + 28);
-    ctx.fillText(`RANGO: ${stats.range.toFixed(1)}`, W / 2, morphY + 40);
+    ctx.fillText(`RANGO: ${amplitudeStatsRef.current.range.toFixed(1)}`, W / 2, morphY + 40);
     
     ctx.textAlign = 'right';
     const avgRR = rrIntervals && rrIntervals.length > 0 
