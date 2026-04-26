@@ -1401,7 +1401,7 @@ const Index = () => {
       motionLevel: motionClassifierRef.current.classify(),
       baseline: calibrationBaseline,
     },
-    { onPrompt: triggerCalPromptHighlight },
+    { onPrompt: () => triggerCalPromptHighlight() },
   );
 
   return (
