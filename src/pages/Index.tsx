@@ -15,6 +15,7 @@ import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRa
 import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import ForensicGateOverlay, { type ForensicGateSnapshot } from "@/components/ForensicGateOverlay";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -75,6 +76,16 @@ const Index = () => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("srDiag") === "1";
   });
+  // Forensic gate overlay: visible by default in FORENSIC_MODE; can be forced
+  // via ?forensic=1 or hidden via ?forensic=0 regardless of mode.
+  const [showForensicOverlay] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const v = new URLSearchParams(window.location.search).get("forensic");
+    if (v === "1") return true;
+    if (v === "0") return false;
+    return FORENSIC_MODE;
+  });
+  const [forensicGate, setForensicGate] = useState<ForensicGateSnapshot | null>(null);
   const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
     morphologyScore: 0,
     morphologyValidity: 0,
@@ -169,6 +180,7 @@ const Index = () => {
     getRGBStats,
     getPositionQuality,
     getMotionInfo,
+    setMorphologyGate,
   } = useSignalProcessor();
   
   const { 
@@ -493,6 +505,21 @@ const Index = () => {
       | undefined;
     const forensicPass = !!fg?.passAll;
 
+    // Mirror the gate snapshot into state so the overlay re-renders in sync
+    // with each emitted signal frame (no extra timers, no hot-path cost).
+    if (fg) {
+      setForensicGate({
+        gate1_optical: fg.gate1_optical,
+        gate2_spectral: fg.gate2_spectral,
+        gate3_morphology: fg.gate3_morphology,
+        passAll: fg.passAll,
+        cardiacSNRdB: fg.cardiacSNRdB,
+        spectralPeakHz: fg.spectralPeakHz,
+        spectralConcentration: (fg as any).spectralConcentration ?? 0,
+        livenessReason: fg.livenessReason,
+      });
+    }
+
     // FORENSIC: a "stable human signal" is just optical contact + minimal
     // perfusion. We do NOT require GOOD perfusion (a victim in shock won't
     // have it) and we do NOT block on motion (operator may be moving).
@@ -550,12 +577,8 @@ const Index = () => {
     // Push Gate #3 (morphology) verdict back into the processor so the next
     // emitted signal frame carries the truthful triple-gate state.
     const morphPass = !!(heartBeatResult as any).morphologyGatePass;
-    try {
-      // best-effort: the underlying processor exposes setMorphologyGate
-      // through the signal-processor singleton; if missing this is a no-op.
-      (window as any).__ppgProcessor?.setMorphologyGate?.(morphPass,
-        morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
-    } catch {}
+    // Typed feedback path through the signal-processor hook — no globals.
+    setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
 
     if (!forensicPass) {
       unstableFrameCounter.current++;
@@ -802,6 +825,8 @@ const Index = () => {
         <div className="absolute inset-0">
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
+
+        <ForensicGateOverlay gate={forensicGate} visible={showForensicOverlay && isMonitoring} />
 
         {isMonitoring && (() => {
           const pq = getPositionQuality();
