@@ -1849,6 +1849,9 @@ const Index = () => {
         }}
       />
 
+      {/* Operator-visible recalibration event log — only during monitoring. */}
+      <RecalibrationLogPanel visible={isMonitoring} />
+
       <FiducialTuner
         open={showFiducialTuner}
         onClose={() => setShowFiducialTuner(false)}
