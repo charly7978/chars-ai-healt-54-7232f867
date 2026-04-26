@@ -86,6 +86,42 @@ const Index = () => {
     return FORENSIC_MODE;
   });
   const [forensicGate, setForensicGate] = useState<ForensicGateSnapshot | null>(null);
+  // Throttling refs for the overlay: we keep the latest snapshot in a ref and
+  // only commit it to React state every ~150 ms. Heavy spectral fields are
+  // copied as-is (they are tiny numbers — no allocations in hot path).
+  const forensicGateRef = useRef<ForensicGateSnapshot | null>(null);
+  const lastOverlayCommitRef = useRef<number>(0);
+  const OVERLAY_MIN_INTERVAL_MS = 150;
+  // Gate-transition tracking for alerts (toast + haptic). We only fire on
+  // RISING edge (false→true) for "open" alerts and FALLING edge (true→false)
+  // for "closed" alerts, with a per-gate cooldown so we don't spam.
+  const prevGatesRef = useRef<{ g1: boolean; g2: boolean; g3: boolean; all: boolean }>({
+    g1: false, g2: false, g3: false, all: false,
+  });
+  const lastAlertAtRef = useRef<Record<string, number>>({});
+  const ALERT_COOLDOWN_MS = 2500;
+
+  const vibrate = useCallback((pattern: number | number[]) => {
+    try {
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        (navigator as any).vibrate(pattern);
+      }
+    } catch {}
+  }, []);
+
+  const fireGateAlert = useCallback((key: string, kind: 'success' | 'fail', message: string) => {
+    const now = performance.now();
+    const last = lastAlertAtRef.current[key] || 0;
+    if (now - last < ALERT_COOLDOWN_MS) return;
+    lastAlertAtRef.current[key] = now;
+    if (kind === 'success') {
+      vibrate([40, 30, 80]);
+      toast({ title: '✓ ' + message, duration: 2200 });
+    } else {
+      vibrate(120);
+      toast({ title: '⚠ ' + message, description: 'Mantén el dedo firme y quieto.', variant: 'destructive', duration: 2400 });
+    }
+  }, [vibrate]);
   const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
     morphologyScore: 0,
     morphologyValidity: 0,
@@ -351,6 +387,11 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    // Reset gate-alert state so users get fresh transitions in the new session.
+    prevGatesRef.current = { g1: false, g2: false, g3: false, all: false };
+    lastAlertAtRef.current = {};
+    forensicGateRef.current = null;
+    lastOverlayCommitRef.current = 0;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -505,10 +546,12 @@ const Index = () => {
       | undefined;
     const forensicPass = !!fg?.passAll;
 
-    // Mirror the gate snapshot into state so the overlay re-renders in sync
-    // with each emitted signal frame (no extra timers, no hot-path cost).
+    // Mirror the gate snapshot into a ref every frame (cheap), but only
+    // commit it to React state at most every OVERLAY_MIN_INTERVAL_MS so the
+    // overlay re-render rate is decoupled from the camera frame rate. This
+    // keeps the camera preview perfectly smooth.
     if (fg) {
-      setForensicGate({
+      const snap: ForensicGateSnapshot = {
         gate1_optical: fg.gate1_optical,
         gate2_spectral: fg.gate2_spectral,
         gate3_morphology: fg.gate3_morphology,
@@ -517,7 +560,54 @@ const Index = () => {
         spectralPeakHz: fg.spectralPeakHz,
         spectralConcentration: (fg as any).spectralConcentration ?? 0,
         livenessReason: fg.livenessReason,
-      });
+      };
+      forensicGateRef.current = snap;
+      const nowMs = performance.now();
+      const prev = prevGatesRef.current;
+      const transitioned =
+        prev.g1 !== snap.gate1_optical ||
+        prev.g2 !== snap.gate2_spectral ||
+        prev.g3 !== snap.gate3_morphology ||
+        prev.all !== snap.passAll;
+      // Commit on transitions immediately (so users see the pill flip), or
+      // throttle steady-state updates.
+      if (transitioned || nowMs - lastOverlayCommitRef.current >= OVERLAY_MIN_INTERVAL_MS) {
+        lastOverlayCommitRef.current = nowMs;
+        setForensicGate(snap);
+      }
+
+      // ── Gate transition alerts (haptic + toast) ──
+      // Rising edge → success alerts (each gate that just opened).
+      if (!prev.g1 && snap.gate1_optical) {
+        fireGateAlert('g1_open', 'success', 'Contacto óptico válido (G1)');
+      }
+      if (!prev.g2 && snap.gate2_spectral) {
+        fireGateAlert('g2_open', 'success', 'Señal cardíaca confirmada (G2)');
+      }
+      if (!prev.g3 && snap.gate3_morphology) {
+        fireGateAlert('g3_open', 'success', 'Morfología de pulso válida (G3)');
+      }
+      if (!prev.all && snap.passAll) {
+        // Strong celebratory haptic for the full triple-gate.
+        vibrate([60, 50, 60, 50, 120]);
+        fireGateAlert('all_open', 'success', 'PULSO REAL DETECTADO');
+      }
+      // Falling edge → per-gate failure alerts (only when we previously had it).
+      if (prev.g1 && !snap.gate1_optical) {
+        fireGateAlert('g1_fail', 'fail', 'Sin contacto óptico (G1)');
+      }
+      if (prev.g2 && !snap.gate2_spectral) {
+        fireGateAlert('g2_fail', 'fail', 'Señal cardíaca perdida (G2)');
+      }
+      if (prev.g3 && !snap.gate3_morphology) {
+        fireGateAlert('g3_fail', 'fail', 'Morfología inválida (G3)');
+      }
+      prevGatesRef.current = {
+        g1: snap.gate1_optical,
+        g2: snap.gate2_spectral,
+        g3: snap.gate3_morphology,
+        all: snap.passAll,
+      };
     }
 
     // FORENSIC: a "stable human signal" is just optical contact + minimal
