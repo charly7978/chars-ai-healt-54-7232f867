@@ -324,6 +324,8 @@ export class MotionRejection {
     this.smoothedWeight = this.cfg.weightStill;
     this.sigmaIdx = 0;
     this.sigmaCount = 0;
+    this.imuIdx = 0;
+    this.imuCount = 0;
     this.effUpgradeFrames = this.cfg.upgradeConfirmFrames;
     this.effAlpha = this.cfg.weightSmoothingAlpha;
   }
