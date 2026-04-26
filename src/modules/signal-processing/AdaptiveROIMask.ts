@@ -565,6 +565,18 @@ export class AdaptiveROIMask {
       maskStability,
       adaptiveRedFloor,
       adaptiveDominanceFloor,
+      roiBox: {
+        cx: cxC,
+        cy: cyC,
+        sizePx: roiSize,
+        sizeFrac: this.roiSizeFrac,
+        mass: this.lastBox.mass,
+      },
+      prepassThresholds: {
+        redDomMin: this.prepassRedDomMin,
+        redMin: this.prepassRedMin,
+      },
+      prepassSuccessRate: this.prepassSuccessRate,
     };
   }
 
@@ -580,5 +592,13 @@ export class AdaptiveROIMask {
     this.roiCenterX = -1;
     this.roiCenterY = -1;
     this.roiSizeFrac = 0.85;
+    // V6: reset auto-tuner so a new session starts from neutral defaults.
+    this.prepassRedDomMin = 12;
+    this.prepassRedMin = 70;
+    this.prepassRecent.fill(0);
+    this.prepassRecentIdx = 0;
+    this.prepassRecentFilled = 0;
+    this.prepassSuccessRate = 0;
+    this.lastBox = { cx: 0, cy: 0, sizePx: 0, mass: 0 };
   }
 }
