@@ -387,6 +387,11 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    // Reset gate-alert state so users get fresh transitions in the new session.
+    prevGatesRef.current = { g1: false, g2: false, g3: false, all: false };
+    lastAlertAtRef.current = {};
+    forensicGateRef.current = null;
+    lastOverlayCommitRef.current = 0;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
