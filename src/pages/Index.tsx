@@ -969,6 +969,21 @@ const Index = () => {
           )}
         </div>
       </div>
+
+      {/* Hidden long-press toggle in the corner — opens the fiducial tuner. */}
+      <button
+        aria-label="Open fiducial tuner"
+        onClick={() => setShowFiducialTuner(v => !v)}
+        className="fixed bottom-1 left-1 z-40 w-6 h-6 rounded-full bg-muted/40 hover:bg-muted text-[10px] text-muted-foreground"
+      >·</button>
+
+      <FiducialTuner
+        open={showFiducialTuner}
+        onClose={() => setShowFiducialTuner(false)}
+        getParams={getFiducialParams}
+        setParams={setFiducialParams}
+        liveStats={fiducialLive}
+      />
     </div>
   );
 };
