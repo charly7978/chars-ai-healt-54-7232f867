@@ -1276,6 +1276,22 @@ const Index = () => {
 
     vitalSignsFrameCounter.current++;
 
+    // Camera/extraction health must run for every processed frame, not only
+    // in CIVIL_MODE vitals. It records the full ring buffer but commits the
+    // overlay at 1 Hz to avoid React re-render pressure on mobile capture.
+    const rgbStatsForHealth = getRGBStats();
+    cameraQualityRef.current.inspect({
+      redDC: rgbStatsForHealth.redDC,
+      greenDC: rgbStatsForHealth.greenDC,
+      redAC: rgbStatsForHealth.redAC,
+      greenAC: rgbStatsForHealth.greenAC,
+    });
+    const healthNow = performance.now();
+    if (healthNow - lastSignalHealthCommitAtRef.current >= 1000) {
+      lastSignalHealthCommitAtRef.current = healthNow;
+      setSignalHealth(cameraQualityRef.current.getSignalHealth(healthNow));
+    }
+
     // FORENSIC: only run civil vitals (SpO2/BP/glucose/lipids) when explicitly
     // enabled via ?civil=1. By default the forensic operator only sees pulse.
     if (CIVIL_MODE && vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
@@ -1345,41 +1361,6 @@ const Index = () => {
           greenAC: rgbStats.greenAC,
           greenDC: rgbStats.greenDC
         });
-      }
-
-      // V9.4 — Camera quality gate. Runs at the same cadence as the rest
-      // of the CIVIL_MODE block (every N frames). If the gate has been
-      // unhappy for ≥ badFrameStreak consecutive samples it returns true
-      // → we bounce isCameraOn off → on, which forces CameraView's start
-      // effect to renegotiate the MediaStream from scratch.
-      const needReinit = cameraQualityRef.current.inspect({
-        redDC:   rgbStats.redDC,
-        greenDC: rgbStats.greenDC,
-        redAC:   rgbStats.redAC,
-        greenAC: rgbStats.greenAC,
-      });
-      setSignalHealth(cameraQualityRef.current.getSignalHealth());
-      // V9.6 — HARD STOP: do not automatically bounce the camera from the
-      // quality gate. On several mobile browsers, tearing down/reopening the
-      // stream destroys torch/exposure stability and causes the visible
-      // "abre y cierra" loop. We keep the full decision log + SIGNAL HEALTH
-      // overlay, but recovery must not interrupt capture while diagnosing
-      // G1/G2/G3 extraction.
-      if (false && needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
-        cameraReinitInFlightRef.current = true;
-        const health = cameraQualityRef.current.getSignalHealth();
-        setSignalHealth(health);
-        console.warn('🔁 Camera quality gate → reinit:', health.message);
-        setIsCameraOn(false);
-        // Allow CameraView's stopCamera() to run, then re-enable.
-        window.setTimeout(() => {
-          if (isProcessingRef.current) {
-            cameraQualityRef.current.reset(); // restart warm-up window
-            setIsCameraOn(true);
-          }
-          // Cooldown: clear in-flight a bit later so we don't loop.
-          window.setTimeout(() => { cameraReinitInFlightRef.current = false; }, 2000);
-        }, 400);
       }
 
       const usableRRData = heartBeatResult.rrData && heartBeatResult.rrData.intervals.length >= 2 && heartBeatResult.bpmConfidence > 0.18
