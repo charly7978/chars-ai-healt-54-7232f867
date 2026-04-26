@@ -269,59 +269,145 @@ const PPGSignalMeter = ({
     const { CANVAS_WIDTH: W, COLORS } = CONFIG;
     const { bpm, spo2, arrhythmiaStatus, quality, rrIntervals, rawArrhythmiaData } = propsRef.current;
     const rhythm = parseRhythmStatus(arrhythmiaStatus);
+    const plot = getPlotArea();
     
-    // Información minimalista en esquinas - no bloquea la vista
+    // Información forense completa - panel superior
+    const panelY = 5;
+    const panelH = 85;
     const fontSize = {
-      value: 'bold 24px "SF Mono", Consolas, monospace',
-      label: '10px "SF Mono", Consolas, monospace',
+      label: 'bold 11px "SF Mono", Consolas, monospace',
+      value: 'bold 28px "SF Mono", Consolas, monospace',
+      unit: '12px "SF Mono", Consolas, monospace',
+      small: '9px "SF Mono", Consolas, monospace',
     };
     
-    // BPM - esquina superior izquierda
+    // Panel izquierdo - BPM
+    ctx.fillStyle = 'rgba(0, 20, 40, 0.85)';
+    ctx.fillRect(5, panelY, 140, panelH);
+    ctx.strokeStyle = COLORS.TEXT_PRIMARY;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(5, panelY, 140, panelH);
     ctx.font = fontSize.label;
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
     ctx.textAlign = 'left';
-    ctx.fillText('BPM', 10, 20);
+    ctx.fillText('FRECUENCIA', 12, panelY + 18);
     ctx.font = fontSize.value;
     ctx.fillStyle = bpm > 0 ? COLORS.TEXT_PRIMARY : COLORS.TEXT_SECONDARY;
-    ctx.fillText(bpm > 0 ? bpm.toString() : '--', 10, 50);
+    ctx.fillText(bpm > 0 ? bpm.toFixed(0) : '--', 12, panelY + 52);
+    ctx.font = fontSize.unit;
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText('BPM', 12, panelY + 72);
     
-    // SpO2 - esquina superior derecha
-    ctx.textAlign = 'right';
+    // Panel central - Calidad y HRV
+    const centerX = W / 2;
+    const centerW = 220;
+    ctx.fillStyle = 'rgba(20, 20, 30, 0.85)';
+    ctx.fillRect(centerX - centerW / 2, panelY, centerW, panelH);
+    ctx.strokeStyle = quality > 60 ? COLORS.TEXT_PRIMARY : quality > 30 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(centerX - centerW / 2, panelY, centerW, panelH);
     ctx.font = fontSize.label;
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText('SpO2', W - 10, 20);
+    ctx.textAlign = 'center';
+    ctx.fillText('CALIDAD SEÑAL', centerX, panelY + 18);
+    const barWidth = 180;
+    const barHeight = 8;
+    const barX = centerX - barWidth / 2;
+    const barY = panelY + 24;
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fillRect(barX, barY, barWidth, barHeight);
+    const qGrad = ctx.createLinearGradient(barX, 0, barX + (quality / 100) * barWidth, 0);
+    if (quality > 60) { qGrad.addColorStop(0, '#166534'); qGrad.addColorStop(1, '#22c55e'); }
+    else if (quality > 30) { qGrad.addColorStop(0, '#854d0e'); qGrad.addColorStop(1, '#f59e0b'); }
+    else { qGrad.addColorStop(0, '#991b1b'); qGrad.addColorStop(1, '#ef4444'); }
+    ctx.fillStyle = qGrad;
+    ctx.fillRect(barX, barY, (quality / 100) * barWidth, barHeight);
+    ctx.font = 'bold 12px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = quality > 60 ? COLORS.TEXT_PRIMARY : quality > 30 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
+    ctx.fillText(`${quality.toFixed(0)}%`, centerX, panelY + 42);
+    
+    // HRV metrics
+    const hrv = hrvDisplayRef.current;
+    ctx.font = fontSize.small;
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    ctx.fillText(`SDNN: ${hrv.sdnn > 0 ? hrv.sdnn.toFixed(0) + 'ms' : '--'}`, centerX - centerW / 2 + 10, panelY + 58);
+    ctx.textAlign = 'right';
+    ctx.fillText(`RMSSD: ${hrv.rmssd > 0 ? hrv.rmssd.toFixed(0) + 'ms' : '--'}`, centerX + centerW / 2 - 10, panelY + 58);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = rhythm.color;
+    ctx.fillText(rhythm.display, centerX, panelY + 78);
+    
+    // Panel derecho - SpO2
+    ctx.fillStyle = 'rgba(0, 15, 30, 0.85)';
+    ctx.fillRect(W - 145, panelY, 140, panelH);
+    const spo2Border = spo2 >= 95 ? COLORS.TEXT_PRIMARY : spo2 >= 90 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
+    ctx.strokeStyle = spo2Border;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(W - 145, panelY, 140, panelH);
+    ctx.font = fontSize.label;
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    ctx.fillText('SATURACIÓN', W - 137, panelY + 18);
     ctx.font = fontSize.value;
     const spo2Color = spo2 >= 95 ? COLORS.TEXT_PRIMARY : spo2 >= 90 ? COLORS.TEXT_WARNING : spo2 > 0 ? COLORS.TEXT_DANGER : COLORS.TEXT_SECONDARY;
     ctx.fillStyle = spo2Color;
-    ctx.fillText(spo2 > 0 ? spo2.toFixed(0) + '%' : '--', W - 10, 50);
+    ctx.fillText(spo2 > 0 ? spo2.toFixed(0) : '--', W - 137, panelY + 52);
+    ctx.font = fontSize.unit;
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText('%', W - 25, panelY + 72);
     
-    // Calidad - centro superior
-    ctx.textAlign = 'center';
-    ctx.font = fontSize.label;
-    ctx.fillStyle = quality > 60 ? COLORS.TEXT_PRIMARY : quality > 30 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
-    ctx.fillText(`CALIDAD: ${quality.toFixed(0)}%`, W / 2, 25);
-    
-    // Ritmo - centro inferior del área de gráfica
-    const plot = getPlotArea();
-    ctx.textAlign = 'center';
-    ctx.font = fontSize.label;
-    ctx.fillStyle = rhythm.color;
-    ctx.fillText(rhythm.display, W / 2, plot.y + plot.height + 20);
-    
-    // Alerta de arritmia - pequeña, no intrusiva
+    // Alerta de arritmia - bajo la gráfica
     if (rhythm.isAlert) {
       const pulse = (Math.sin(now / 100) + 1) / 2;
-      ctx.fillStyle = `rgba(239, 68, 68, ${0.4 + pulse * 0.3})`;
-      ctx.fillRect(W / 2 - 80, plot.y + plot.height + 30, 160, 25);
+      ctx.fillStyle = `rgba(239, 68, 68, ${0.3 + pulse * 0.4})`;
+      ctx.fillRect(W / 2 - 100, plot.y + plot.height + 15, 200, 28);
       ctx.strokeStyle = COLORS.TEXT_DANGER;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(W / 2 - 80, plot.y + plot.height + 30, 160, 25);
-      ctx.font = 'bold 11px "SF Mono", Consolas, monospace';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(W / 2 - 100, plot.y + plot.height + 15, 200, 28);
+      ctx.font = 'bold 12px "SF Mono", Consolas, monospace';
       ctx.fillStyle = COLORS.TEXT_DANGER;
       ctx.textAlign = 'center';
       const label = rhythm.count > 0 ? `${rhythm.display} x${rhythm.count}` : rhythm.display;
-      ctx.fillText(`⚠ ${label}`, W / 2, plot.y + plot.height + 47);
+      ctx.fillText(`⚠ ${label}`, W / 2, plot.y + plot.height + 34);
+      if (rawArrhythmiaData && rawArrhythmiaData.rmssd > 0) {
+        ctx.font = '10px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.9)';
+        ctx.fillText(`RMSSD: ${rawArrhythmiaData.rmssd.toFixed(0)}ms`, W / 2, plot.y + plot.height + 50);
+      }
     }
+    
+    // Panel de morfología PPG - información forense avanzada
+    const morphY = plot.y + plot.height + 60;
+    ctx.fillStyle = 'rgba(10, 25, 40, 0.9)';
+    ctx.fillRect(5, morphY, W - 10, 45);
+    ctx.strokeStyle = 'rgba(59, 130, 246, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(5, morphY, W - 10, 45);
+    
+    ctx.font = 'bold 10px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = '#60a5fa';
+    ctx.textAlign = 'left';
+    ctx.fillText('MORFOLOGÍA PPG', 12, morphY + 14);
+    
+    // Métricas morfológicas
+    const ibi = ibiDisplayRef.current;
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    ctx.fillText(`IBI: ${ibi > 0 ? ibi + 'ms' : '--'}`, 12, morphY + 28);
+    ctx.fillText(`RR: ${rrIntervals && rrIntervals.length > 0 ? rrIntervals[rrIntervals.length - 1].toFixed(0) + 'ms' : '--'}`, 12, morphY + 40);
+    
+    ctx.textAlign = 'center';
+    ctx.fillText(`BEATS: ${beatHistoryRef.current.length}`, W / 2, morphY + 28);
+    ctx.fillText(`RANGO: ${stats.range.toFixed(1)}`, W / 2, morphY + 40);
+    
+    ctx.textAlign = 'right';
+    const avgRR = rrIntervals && rrIntervals.length > 0 
+      ? (rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length).toFixed(0) 
+      : '--';
+    ctx.fillText(`RR PROM: ${avgRR}ms`, W - 12, morphY + 28);
+    ctx.fillText(`HRV: ${hrv.sdnn > 0 ? hrv.sdnn.toFixed(1) + 'ms' : '--'}`, W - 12, morphY + 40);
   }, [getPlotArea]);
 
   useEffect(() => {
@@ -389,7 +475,7 @@ const PPGSignalMeter = ({
         animationRef.current = requestAnimationFrame(render);
         return;
       }
-      const scaledValue = signalValue * 2;
+      const scaledValue = signalValue * 3; // Amplificar para mejor visualización morfológica
       
       if (peak) {
         const currentCount = rhythm.count;

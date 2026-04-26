@@ -1,17 +1,26 @@
 /**
- * BANDPASS FILTER V3 — ADAPTIVE BIQUAD CASCADE + ADAPTIVE NOTCH + DUAL-EWMA DETREND
+ * BANDPASS FILTER V4 — FORENSIC MORPHOLOGY-PRESERVING
  *
- * Pipeline: raw → dual-EWMA detrend → biquad notch (50/60Hz aliased) → HPF 0.5Hz → LPF 5Hz
+ * Pipeline: raw → dual-EWMA detrend → biquad notch (50/60Hz aliased) → HPF 0.4Hz → LPF 10Hz
  *
- * Improvements over V2:
- * - Dual-rate EWMA detrending (fast + slow) approximates SG smoothing prior
- *   without convolution → preserves systolic upstroke morphology while removing
- *   baseline wander < 0.3Hz with much higher group delay than a 2nd-order HPF.
- * - Adaptive notch filter at line-frequency aliases (50Hz / 60Hz mod fs)
- *   eliminates ambient flicker from artificial lighting that survives the
- *   camera AGC and modulates the torch reflection.
- * - Coefficients recomputed only on significant fs change (>1.2 Hz) and the
- *   biquad state is preserved for continuity (no glitches on rate adaptation).
+ * FORENSIC POLICIAL MODE:
+ * - HPF lowered to 0.4Hz (from 0.5Hz) to preserve very low-frequency cardiac activity
+ * - LPF raised to 10Hz (from 5Hz) to preserve PPG morphology features:
+ *   * Systolic upstroke (steep rising edge)
+ *   * Systolic peak
+ *   * Dicrotic notch
+ *   * Diastolic peak
+ *   * Diastolic decay
+ * - This wider band allows detection of:
+ *   * Tachycardia up to 300 BPM (5Hz fundamental)
+ *   * Morphological features up to 8-10Hz (harmonics)
+ *   * Subtle cardiac abnormalities
+ *
+ * Improvements over V3:
+ * - Wider passband preserves forensic morphological information
+ * - Still removes baseline wander and high-frequency noise
+ * - Maintains dual-EWMA detrending for systolic upstroke preservation
+ * - Adaptive notch for line-frequency flicker removal
  */
 export class BandpassFilter {
   private hpfB = [0, 0, 0];
@@ -49,8 +58,8 @@ export class BandpassFilter {
     const fs = this.sampleRate;
     this.lastComputedRate = fs;
 
-    // HPF at 0.5Hz — removes DC + slow drift
-    const fcHp = 0.5;
+    // HPF at 0.4Hz — removes DC + slow drift, preserves very low cardiac frequencies
+    const fcHp = 0.4;
     const kHp = Math.tan(Math.PI * fcHp / fs);
     const normHp = 1 / (1 + Math.sqrt(2) * kHp + kHp * kHp);
     this.hpfB[0] = normHp;
@@ -60,8 +69,8 @@ export class BandpassFilter {
     this.hpfA[1] = 2 * (kHp * kHp - 1) * normHp;
     this.hpfA[2] = (1 - Math.sqrt(2) * kHp + kHp * kHp) * normHp;
 
-    // LPF at 5Hz — removes HF noise, keeps up to 300 BPM
-    const fcLp = 5.0;
+    // LPF at 10Hz — removes HF noise, preserves morphology up to 300 BPM + harmonics
+    const fcLp = 10.0;
     const kLp = Math.tan(Math.PI * fcLp / fs);
     const normLp = 1 / (1 + Math.sqrt(2) * kLp + kLp * kLp);
     this.lpfB[0] = kLp * kLp * normLp;
@@ -73,7 +82,7 @@ export class BandpassFilter {
 
     // Adaptive notch — pick aliased line frequency that lands inside passband.
     // Real cameras show 50/60Hz flicker aliased to (lineHz mod fs) when AGC
-    // doesn't fully compensate. We notch the alias only when it falls in 0.5–5 Hz.
+    // doesn't fully compensate. We notch the alias only when it falls in 0.4–10 Hz.
     const aliasOf = (lineHz: number) => {
       const a = lineHz % fs;
       return a > fs / 2 ? fs - a : a;
@@ -81,7 +90,7 @@ export class BandpassFilter {
     const candidates = [aliasOf(60), aliasOf(50)];
     let notchHz = 0;
     for (const c of candidates) {
-      if (c > 0.7 && c < 4.8 && (notchHz === 0 || c < notchHz)) notchHz = c;
+      if (c > 0.5 && c < 9.5 && (notchHz === 0 || c < notchHz)) notchHz = c;
     }
     if (notchHz > 0) {
       const w0 = 2 * Math.PI * notchHz / fs;
