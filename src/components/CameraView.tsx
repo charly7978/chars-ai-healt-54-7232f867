@@ -56,6 +56,9 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     focusLocked: false,
     isoValue: 0,
     supportedConstraints: [],
+    activeProfile: '',
+    fallbacksApplied: 0,
+    downshiftedForFps: false,
   });
 
   useImperativeHandle(ref, () => ({
