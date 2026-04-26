@@ -740,9 +740,18 @@ const Index = () => {
           reason: snap.livenessReason,
         });
         if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
+        // Increment session-wide valid/noise counters at the same throttled
+        // cadence. These drive the "Válidas / Ruido" + "Triple-gate %"
+        // display in the forensic overlay.
+        if (snap.passAll) validSamplesRef.current += 1;
+        else noiseSamplesRef.current += 1;
         // Cheap state ping (only when buckets of 25 rounds elapse) so the
-        // export button counter updates without spamming React.
-        if (log.length % 25 === 0) setSessionLogSize(log.length);
+        // overlay counters update without spamming React.
+        if (log.length % 25 === 0) {
+          setSessionLogSize(log.length);
+          setValidSamples(validSamplesRef.current);
+          setNoiseSamples(noiseSamplesRef.current);
+        }
       }
 
       // ── Gate transition alerts (haptic + toast) ──
