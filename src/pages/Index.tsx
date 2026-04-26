@@ -40,7 +40,6 @@ const FORENSIC_MODE = !CIVIL_MODE;
 
 const Index = () => {
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const [isCameraOn, setIsCameraOn] = useState(false);
   const [vitalSigns, setVitalSigns] = useState<VitalSignsResult>({
     spo2: 0,
     glucose: 0,
