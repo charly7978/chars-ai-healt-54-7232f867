@@ -808,9 +808,9 @@ const Index = () => {
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
     monitoringIntentRef.current = false;
     stopFrameLoop();
-    if (watchdogTimerRef.current !== null) {
-      window.clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
     }
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
@@ -852,9 +852,9 @@ const Index = () => {
     console.log('🔄 Reset completo...');
     monitoringIntentRef.current = false;
     stopFrameLoop();
-    if (watchdogTimerRef.current !== null) {
-      window.clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
     }
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
