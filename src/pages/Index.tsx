@@ -368,6 +368,8 @@ const Index = () => {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
+  const frameLoopGenerationRef = useRef(0);
+  const monitoringIntentRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
   // Motion classifier: drops frames during sustained SEVERE motion with a
   // hard 50% drop-rate cap so the operator never loses the live trace.
@@ -387,6 +389,7 @@ const Index = () => {
   const watchdogTimerRef = useRef<number | null>(null);
   const softRestartCountRef = useRef<number>(0);
   const lastSoftRestartAtRef = useRef<number>(0);
+  const lastSignalHealthCommitAtRef = useRef<number>(0);
   // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
   useEffect(() => {
     if (typeof window === 'undefined') return;
