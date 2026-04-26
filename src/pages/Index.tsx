@@ -792,6 +792,37 @@ const Index = () => {
         // display in the forensic overlay.
         if (snap.passAll) validSamplesRef.current += 1;
         else noiseSamplesRef.current += 1;
+        // Sliding-window noise tracker.
+        const win = noiseWindowRef.current;
+        win[noiseWindowIdxRef.current] = snap.passAll ? 1 : 0;
+        noiseWindowIdxRef.current = (noiseWindowIdxRef.current + 1) % NOISE_WINDOW;
+        if (noiseWindowFillRef.current < NOISE_WINDOW) noiseWindowFillRef.current += 1;
+        if (noiseWindowFillRef.current >= NOISE_ALERT_MIN_SAMPLES) {
+          let s = 0;
+          for (let i = 0; i < noiseWindowFillRef.current; i++) s += win[i];
+          const pct = s / noiseWindowFillRef.current;
+          const shouldAlert = pct < NOISE_ALERT_THRESHOLD;
+          if (shouldAlert && !noiseAlertActiveRef.current) {
+            noiseAlertActiveRef.current = true;
+            setNoiseAlertActive(true);
+            setNoiseAlertPct(pct);
+            lastNoiseBeepAtRef.current = nowMs;
+            playNoiseBeep();
+            vibrate([200, 80, 200]);
+          } else if (shouldAlert && noiseAlertActiveRef.current) {
+            // Re-beep periodically while still in alert.
+            if (nowMs - lastNoiseBeepAtRef.current >= NOISE_ALERT_REPEAT_MS) {
+              lastNoiseBeepAtRef.current = nowMs;
+              playNoiseBeep();
+              vibrate([200, 80, 200]);
+            }
+            setNoiseAlertPct(pct);
+          } else if (!shouldAlert && noiseAlertActiveRef.current) {
+            noiseAlertActiveRef.current = false;
+            setNoiseAlertActive(false);
+            setNoiseAlertPct(pct);
+          }
+        }
         // Cheap state ping (only when buckets of 25 rounds elapse) so the
         // overlay counters update without spamming React.
         if (log.length % 25 === 0) {
