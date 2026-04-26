@@ -17,6 +17,7 @@ import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
+import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -343,6 +344,9 @@ const Index = () => {
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
+  // Motion classifier: drops frames during sustained SEVERE motion with a
+  // hard 50% drop-rate cap so the operator never loses the live trace.
+  const motionClassifierRef = useRef<MotionClassifier>(new MotionClassifier());
   // Cached/last-trusted sample rate, used to keep delineation stable when
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
@@ -571,9 +575,18 @@ const Index = () => {
       if (!canvasSized) sizeCanvasToVideo(video);
 
       try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        processFrame(imageData, frameTimestamp);
+        // Motion gate: under sustained SEVERE motion, skip the heavy
+        // drawImage + getImageData + processFrame work, but log the drop
+        // so the rolling 50% drop-rate cap can hold us back when needed.
+        const mc = motionClassifierRef.current;
+        const nowMs = performance.now();
+        const drop = mc.shouldDropFrame(nowMs);
+        mc.markFrame(nowMs, drop);
+        if (!drop) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          processFrame(imageData, frameTimestamp);
+        }
       } catch (e) {
         const now = performance.now();
         if (now - lastErrorLogAt > 2000) {
@@ -612,6 +625,8 @@ const Index = () => {
       cancelAnimationFrame(frameLoopRef.current);
       frameLoopRef.current = null;
     }
+    // Release the devicemotion listener so the IMU sleeps between sessions.
+    motionClassifierRef.current.stop();
   }, []);
 
   const startMonitoring = useCallback(() => {
@@ -653,6 +668,8 @@ const Index = () => {
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     // Iniciar procesamiento de señal primero
     startProcessing();
+    // Start the IMU motion classifier (no-op on platforms without devicemotion).
+    motionClassifierRef.current.start().catch(() => {});
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
