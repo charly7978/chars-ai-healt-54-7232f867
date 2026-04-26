@@ -950,15 +950,12 @@ export class AdaptiveROIMask {
 
     // ── V7: COVERAGE CONTIGUITY (mayor componente conexa 8-conn / total) ─
     let coverageContiguity = 0;
+    let largestLab = -1;
     if (fingerTileCount > 0) {
       connectedComponents8(
         this.currentMask, GRID, GRID,
         this.ccLabels9, this.ccParent9, this.ccRank9,
       );
-      // Encontrar el label con más píxeles "1".
-      // #labels máx = TOTAL_TILES, usamos sortScratch como acumulador.
-      // No reutilizamos sortScratch para no chocar con su uso previo;
-      // este conteo es O(81) → un Int32Array temporal pequeño.
       const counts = new Int32Array(TOTAL_TILES);
       for (let ti = 0; ti < TOTAL_TILES; ti++) {
         if (!this.currentMask[ti]) continue;
@@ -967,13 +964,124 @@ export class AdaptiveROIMask {
       }
       let largest = 0;
       for (let k = 0; k < TOTAL_TILES; k++) {
-        if (counts[k] > largest) largest = counts[k];
+        if (counts[k] > largest) { largest = counts[k]; largestLab = k; }
       }
       coverageContiguity = largest / fingerTileCount;
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // V9 — SELECCIÓN DE MÁSCARA POR SNR ESTIMADO (top-K por canal)
+    //
+    // Por canal R y G computamos un score por tile:
+    //   score = tilePI_canal · centerBias · (∈ mayor CC ? 1.0 : 0.4)
+    // Tomamos los top-K=25 tiles, normalizamos vía softmax(score/τ) y
+    // exportamos los pesos. Las medias rgb por tile (`tileMeanR/G/B`) van
+    // expuestas como Float64Array para que el SignalSourceRanker proyecte
+    // CHROM/POS sobre la media ponderada del top-K en lugar del promedio
+    // uniforme de la ROI fine.
+    // ─────────────────────────────────────────────────────────────────
+    this.outTopKWeightsR.fill(0);
+    this.outTopKWeightsG.fill(0);
+    let topKMedianR = 0;
+    let topKMedianG = 0;
+    {
+      // Construir scores
+      let nValidPI = 0;
+      for (let ti = 0; ti < TOTAL_TILES; ti++) {
+        if (this.mValidPx[ti] === 0) {
+          this.topKScoreR[ti] = -1;
+          this.topKScoreG[ti] = -1;
+          continue;
+        }
+        const cb = this.mCenterBias[ti];
+        const inCC = (largestLab >= 0 && this.ccLabels9[ti] === largestLab) ? 1.0 : 0.4;
+        const sR = this.tilePI_R[ti] * cb * inCC;
+        const sG = this.tilePI_G[ti] * cb * inCC;
+        this.topKScoreR[ti] = sR;
+        this.topKScoreG[ti] = sG;
+        if (sR > 0 || sG > 0) nValidPI++;
+      }
+
+      if (nValidPI > 0) {
+        // Selección top-K vía índices ordenados por score (R y G separados).
+        // Reutilizamos topKIdx como scratch (TOTAL_TILES = 81 → barato).
+        for (let k = 0; k < TOTAL_TILES; k++) this.topKIdx[k] = k;
+        // Ordenar descendente por R
+        const idxR = Array.from(this.topKIdx);
+        idxR.sort((a, b) => this.topKScoreR[b] - this.topKScoreR[a]);
+        const idxG = Array.from(this.topKIdx);
+        idxG.sort((a, b) => this.topKScoreG[b] - this.topKScoreG[a]);
+
+        const Keff = Math.min(this.TOPK, nValidPI);
+
+        // Softmax sobre R top-K
+        let maxR = -Infinity;
+        for (let i = 0; i < Keff; i++) {
+          const s = this.topKScoreR[idxR[i]];
+          if (s > maxR) maxR = s;
+        }
+        let sumR = 0;
+        for (let i = 0; i < Keff; i++) {
+          const ti = idxR[i];
+          const e = Math.exp((this.topKScoreR[ti] - maxR) / this.SOFTMAX_TAU);
+          this.outTopKWeightsR[ti] = e;
+          sumR += e;
+        }
+        if (sumR > 0) {
+          for (let i = 0; i < Keff; i++) {
+            const ti = idxR[i];
+            this.outTopKWeightsR[ti] /= sumR;
+          }
+        }
+
+        // Softmax sobre G top-K
+        let maxG = -Infinity;
+        for (let i = 0; i < Keff; i++) {
+          const s = this.topKScoreG[idxG[i]];
+          if (s > maxG) maxG = s;
+        }
+        let sumG = 0;
+        for (let i = 0; i < Keff; i++) {
+          const ti = idxG[i];
+          const e = Math.exp((this.topKScoreG[ti] - maxG) / this.SOFTMAX_TAU);
+          this.outTopKWeightsG[ti] = e;
+          sumG += e;
+        }
+        if (sumG > 0) {
+          for (let i = 0; i < Keff; i++) {
+            const ti = idxG[i];
+            this.outTopKWeightsG[ti] /= sumG;
+          }
+        }
+
+        // Mediana topK PI (telemetría) — copia compacta y ordenamos.
+        const tmpR = new Float64Array(Keff);
+        const tmpG = new Float64Array(Keff);
+        for (let i = 0; i < Keff; i++) {
+          tmpR[i] = this.tilePI_R[idxR[i]];
+          tmpG[i] = this.tilePI_G[idxG[i]];
+        }
+        tmpR.sort(); tmpG.sort();
+        topKMedianR = tmpR[Keff >> 1];
+        topKMedianG = tmpG[Keff >> 1];
+      }
+    }
+
+    // V9 — Recompute rawRed/rawGreen con la máscara dinámica top-K cuando
+    // hay pesos válidos. Esto MAXIMIZA el SNR seleccionado por canal.
+    // rawBlue mantiene el promedio uniforme (B no es dominante en PPG).
+    let weightedR = 0, weightedG = 0, sumWR = 0, sumWG = 0;
+    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+      const wR_ = this.outTopKWeightsR[ti];
+      const wG_ = this.outTopKWeightsG[ti];
+      if (wR_ > 0) { weightedR += this.tileMeanR[ti] * wR_; sumWR += wR_; }
+      if (wG_ > 0) { weightedG += this.tileMeanG[ti] * wG_; sumWG += wG_; }
+    }
+    const rawRed_v9 = sumWR > 0 ? weightedR / sumWR : rawRed;
+    const rawGreen_v9 = sumWG > 0 ? weightedG / sumWG : rawGreen;
+
     return {
-      rawRed, rawGreen, rawBlue,
+      rawRed: rawRed_v9, rawGreen: rawGreen_v9, rawBlue,
       coarseRed, coarseGreen, coarseBlue,
       coverageRatio,
       fingerScore: avgFingerScore,
@@ -1005,6 +1113,15 @@ export class AdaptiveROIMask {
       coverageContiguity,
       maskIoU,
       trackerSigma: this.trackerSigmaPx,
+      topKTilePI_R: topKMedianR,
+      topKTilePI_G: topKMedianG,
+      topKWeightsR: this.outTopKWeightsR,
+      topKWeightsG: this.outTopKWeightsG,
+      tileMeanRArr: this.tileMeanR,
+      tileMeanGArr: this.tileMeanG,
+      tileMeanBArr: this.tileMeanB,
+      kalmanCovariance: this.kalmanCovariancePx2,
+      centroidJumpPx: this.lastCentroidJumpPx,
     };
   }
 
@@ -1028,7 +1145,16 @@ export class AdaptiveROIMask {
     this.prepassRecentFilled = 0;
     this.prepassSuccessRate = 0;
     this.lastBox = { cx: 0, cy: 0, sizePx: 0, mass: 0 };
-    this.trackerResidualEMA = 0;
     this.trackerSigmaPx = 0;
+    this.kalmanCovariancePx2 = 0;
+    this.lastCentroidJumpPx = 0;
+    this.kfCx = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+    this.kfCy = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+    this.kfSz = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+    this.tileNObs.fill(0);
+    this.tileMeanR_W.fill(0); this.tileM2R_W.fill(0);
+    this.tileMeanG_W.fill(0); this.tileM2G_W.fill(0);
+    this.tilePI_R.fill(0); this.tilePI_G.fill(0);
+    this.outTopKWeightsR.fill(0); this.outTopKWeightsG.fill(0);
   }
 }
