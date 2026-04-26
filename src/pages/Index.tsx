@@ -863,8 +863,8 @@ const Index = () => {
     // by noise and any IBI/BPM extracted would be artefactual. Requires a
     // minimum number of samples before activating to avoid blocking the
     // initial acquisition window.
-    const ACCEPTED_RATIO_MIN = 0.15;          // 15% of samples must be triple-gate valid
-    const ACCEPTED_RATIO_WARMUP_SAMPLES = 60; // ~2s @ 30fps before enforcement
+    const ACCEPTED_RATIO_MIN = acceptedRatioMinRef.current;
+    const ACCEPTED_RATIO_WARMUP_SAMPLES = warmupSamplesRef.current;
     const totalSeen = validSamplesRef.current + noiseSamplesRef.current;
     const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
     const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
