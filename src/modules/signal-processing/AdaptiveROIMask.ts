@@ -491,6 +491,48 @@ export class AdaptiveROIMask {
     }
   }
 
+  /**
+   * V9 — Kalman 1D step. Constant-velocity model, outlier-gated to 3σ.
+   * Returns the absolute residual (or rejection magnitude) so callers can
+   * publish `centroidJumpPx` for the motion-rejection module.
+   */
+  private kfStep(
+    kf: { x: number; v: number; P00: number; P01: number; P10: number; P11: number },
+    z: number, q: number, r: number,
+  ): { accepted: boolean; residual: number } {
+    const xPred = kf.x + kf.v;
+    const vPred = kf.v;
+    const P00p = kf.P00 + kf.P01 + kf.P10 + kf.P11 + q;
+    const P01p = kf.P01 + kf.P11;
+    const P10p = kf.P10 + kf.P11;
+    const P11p = kf.P11 + q * 0.25;
+    const y = z - xPred;
+    const S = P00p + r;
+    const gate = 3 * Math.sqrt(S);
+    if (Math.abs(y) > gate) {
+      kf.x = xPred; kf.v = vPred;
+      kf.P00 = P00p; kf.P01 = P01p; kf.P10 = P10p; kf.P11 = P11p;
+      return { accepted: false, residual: Math.abs(y) };
+    }
+    const K0 = P00p / S;
+    const K1 = P10p / S;
+    kf.x = xPred + K0 * y;
+    kf.v = vPred + K1 * y;
+    kf.P00 = (1 - K0) * P00p;
+    kf.P01 = (1 - K0) * P01p;
+    kf.P10 = P10p - K1 * P00p;
+    kf.P11 = P11p - K1 * P01p;
+    return { accepted: true, residual: Math.abs(y) };
+  }
+
+  private kfSeed(
+    kf: { x: number; v: number; P00: number; P01: number; P10: number; P11: number },
+    z: number,
+  ): void {
+    kf.x = z; kf.v = 0;
+    kf.P00 = 4; kf.P01 = 0; kf.P10 = 0; kf.P11 = 4;
+  }
+
   process(imageData: ImageData): ROIMaskResult {
     this.frameCount++;
     const data = imageData.data;
