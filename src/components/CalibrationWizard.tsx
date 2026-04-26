@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { CheckCircle2, Hand, Activity, Heart, Droplets, X, Loader2 } from "lucide-react";
+import { CheckCircle2, Circle, Hand, Activity, Heart, Droplets, X, Loader2 } from "lucide-react";
 
 /**
  * CalibrationWizard
@@ -58,6 +58,56 @@ const PLACEMENT_HOLD_MS = 2000;
 const STABILITY_HOLD_MS = 5000;
 const BASELINE_COLLECT_MS = 10000;
 const MIN_SAMPLES = 30;
+
+/**
+ * Pass-criteria checklist driver: returns the live boolean state of each
+ * criterion the current phase is gating on. Used by the HUD section so
+ * the operator can see exactly which condition is still pending.
+ */
+function buildCriteria(
+  phase: CalibrationPhase,
+  l: CalibrationLiveInputs,
+  bpmCount: number,
+  spo2Count: number,
+): Array<{ label: string; ok: boolean; detail?: string }> {
+  switch (phase) {
+    case 'PLACEMENT':
+      return [
+        { label: 'Dedo detectado', ok: l.fingerDetected },
+        { label: 'Calidad ≥ 50',   ok: l.quality >= 50, detail: `${Math.round(l.quality)}/50` },
+      ];
+    case 'STABILITY':
+      return [
+        { label: 'Dedo detectado', ok: l.fingerDetected },
+        { label: 'Calidad ≥ 60',   ok: l.quality >= 60, detail: `${Math.round(l.quality)}/60` },
+        { label: 'Movimiento ≤ MICRO',
+          ok: l.motionLevel === 'STILL' || l.motionLevel === 'MICRO_MOTION',
+          detail: l.motionLevel.replace('_MOTION', '').toLowerCase() },
+      ];
+    case 'BPM_BASELINE':
+      return [
+        { label: 'Dedo detectado',  ok: l.fingerDetected },
+        { label: `Muestras ≥ ${MIN_SAMPLES}`,
+          ok: bpmCount >= MIN_SAMPLES,
+          detail: `${bpmCount}/${MIN_SAMPLES}` },
+        { label: 'BPM en rango (40–200)',
+          ok: l.bpm >= 40 && l.bpm <= 200,
+          detail: l.bpm > 0 ? `${Math.round(l.bpm)}` : '—' },
+      ];
+    case 'SPO2_BASELINE':
+      return [
+        { label: 'Dedo detectado', ok: l.fingerDetected },
+        { label: 'Recolectando SpO₂',
+          ok: spo2Count > 0,
+          detail: `${spo2Count} muestras` },
+        { label: 'SpO₂ en rango (70–100)',
+          ok: l.spo2 >= 70 && l.spo2 <= 100,
+          detail: l.spo2 > 0 ? `${Math.round(l.spo2)}` : '—' },
+      ];
+    case 'DONE':
+      return [{ label: 'Calibración guardada', ok: true }];
+  }
+}
 
 const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
 const sd = (xs: number[]) => {
