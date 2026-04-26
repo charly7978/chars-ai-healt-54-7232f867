@@ -1328,6 +1328,58 @@ const Index = () => {
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
 
+        {/* ════════════════════════════════════════════════════════════
+            PPGSignalMeter - FULL SCREEN 100% - MONITOR CARDÍACO FORENSE
+            ════════════════════════════════════════════════════════════ */}
+        <div className="absolute inset-0 z-10">
+          <PPGSignalMeter 
+            value={heartbeatSignal}
+            quality={lastSignal?.quality || 0}
+            isFingerDetected={lastSignal?.fingerDetected || false}
+            onStartMeasurement={handleToggleMonitoring}
+            onReset={handleReset}
+            isMonitoring={isMonitoring}
+            arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
+            rawArrhythmiaData={lastArrhythmiaData.current}
+            preserveResults={showResults}
+            diagnosticMessage={lastSignal?.diagnostics?.message || 'MONITOR CARDÍACO ACTIVO'}
+            isPeak={beatMarker === 1}
+            bpm={heartRate}
+            spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
+            rrIntervals={rrIntervals}
+            publicationGate={true}
+            rejectionReason={forensicGate?.livenessReason || ''}
+          />
+        </div>
+
+        {/* ════════════════════════════════════════════════════════════
+            FLOATING OVERLAYS - ELEMENTOS FLOTANTES SOBRE EL MONITOR
+            ════════════════════════════════════════════════════════════ */}
+        
+        {/* Position guidance - top center */}
+        {isMonitoring && (() => {
+          const pq = getPositionQuality();
+          const isDrifting = pq.drifting;
+          const isLocked = pq.locked && !isDrifting;
+          const showGuidance = !isLocked || isDrifting;
+          return showGuidance || isLocked ? (
+            <div className="absolute top-3 left-0 right-0 z-30 flex justify-center pointer-events-none">
+              <div className={`px-4 py-2 rounded-full text-[11px] font-bold tracking-wider shadow-lg backdrop-blur-md border ${
+                isLocked ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' :
+                isDrifting ? 'bg-red-500/20 border-red-500/40 text-red-300 animate-pulse' :
+                pq.qualityScore > 0.4 ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' :
+                'bg-red-500/20 border-red-500/40 text-red-300'
+              }`}>
+                <span className="flex items-center gap-2">
+                  {isLocked ? <Shield className="w-3 h-3" /> : isDrifting ? <AlertTriangle className="w-3 h-3" /> : <Activity className="w-3 h-3 animate-pulse" />}
+                  {pq.guidance}
+                </span>
+              </div>
+            </div>
+          ) : null;
+        })()}
+
+        {/* Forensic overlay - top right */}
         <ForensicGateOverlay
           gate={forensicGate}
           visible={showForensicOverlay && isMonitoring}
@@ -1339,24 +1391,24 @@ const Index = () => {
           noiseSamples={noiseSamples}
         />
 
-        {/* ── Threshold calibration panel (gear toggle) ────────────── */}
+        {/* Threshold calibration - floating panel */}
         {showForensicOverlay && isMonitoring && (
-          <div className="fixed top-2 right-[296px] z-50 font-mono">
+          <div className="fixed top-3 right-3 z-40 font-mono">
             <button
               type="button"
               onClick={() => setShowThresholdPanel(v => !v)}
-              className="rounded-md border border-zinc-700/70 bg-black/75 backdrop-blur-sm px-2 py-1 text-[10px] font-bold tracking-wide text-zinc-200 hover:bg-zinc-800/80"
+              className="rounded-md border border-zinc-700/70 bg-black/75 backdrop-blur-sm px-3 py-1.5 text-[10px] font-bold tracking-wide text-zinc-200 hover:bg-zinc-800/80"
               title="Calibrar umbrales del safeguard"
             >
               {showThresholdPanel ? 'CERRAR ⚙' : 'UMBRALES ⚙'}
             </button>
             {showThresholdPanel && (
-              <div className="mt-1 w-[240px] rounded-lg border border-zinc-700/70 bg-black/85 backdrop-blur-sm p-2 text-[11px] text-zinc-100 shadow-xl space-y-2">
-                <div className="text-[10px] font-bold tracking-widest text-zinc-300 border-b border-zinc-700/60 pb-1">
+              <div className="mt-2 w-[260px] rounded-lg border border-zinc-700/70 bg-black/90 backdrop-blur-sm p-3 text-[11px] text-zinc-100 shadow-2xl space-y-2">
+                <div className="text-[10px] font-bold tracking-widest text-zinc-300 border-b border-zinc-700/60 pb-2">
                   CALIBRACIÓN SAFEGUARD
                 </div>
                 <div>
-                  <div className="flex justify-between mb-0.5">
+                  <div className="flex justify-between mb-1">
                     <span className="text-zinc-400">Ratio mínimo aceptado</span>
                     <span className="text-emerald-300 font-bold">{Math.round(acceptedRatioMin * 100)}%</span>
                   </div>
@@ -1371,7 +1423,7 @@ const Index = () => {
                   </div>
                 </div>
                 <div>
-                  <div className="flex justify-between mb-0.5">
+                  <div className="flex justify-between mb-1">
                     <span className="text-zinc-400">Warm-up (muestras)</span>
                     <span className="text-emerald-300 font-bold">{warmupSamples}</span>
                   </div>
@@ -1388,11 +1440,10 @@ const Index = () => {
                 <button
                   type="button"
                   onClick={() => { setAcceptedRatioMin(0.15); setWarmupSamples(60); }}
-                  className="w-full rounded-md border border-zinc-600/60 bg-zinc-800/60 hover:bg-zinc-700/60 text-[10px] font-bold tracking-wide py-1"
+                  className="w-full rounded-md border border-zinc-600/60 bg-zinc-800/60 hover:bg-zinc-700/60 text-[10px] font-bold tracking-wide py-1.5"
                 >
                   RESET (15% / 60)
                 </button>
-                {/* ── Auto-relax block ─────────────────────────────── */}
                 <div className="border-t border-zinc-700/60 pt-2 space-y-1.5">
                   <label className="flex items-center justify-between cursor-pointer">
                     <span className="text-zinc-400">Auto-relax tras N frames</span>
@@ -1404,7 +1455,7 @@ const Index = () => {
                     />
                   </label>
                   <div>
-                    <div className="flex justify-between mb-0.5">
+                    <div className="flex justify-between mb-1">
                       <span className="text-zinc-400">N consecutivos</span>
                       <span className="text-emerald-300 font-bold">{autoRelaxN}</span>
                     </div>
@@ -1427,149 +1478,76 @@ const Index = () => {
                     <div className="text-[9px] text-emerald-300 font-bold">⚡ Umbrales relajados activos</div>
                   )}
                 </div>
-                <div className="text-[9px] text-zinc-500 leading-tight">
-                  Bloquea cómputo de latidos si la ratio de muestras válidas en sesión cae bajo el umbral, tras superar el warm-up.
-                </div>
               </div>
             )}
           </div>
         )}
 
-        {isMonitoring && (() => {
-          const pq = getPositionQuality();
-          const isDrifting = pq.drifting;
-          const isLocked = pq.locked && !isDrifting;
-          const showGuidance = !isLocked || isDrifting;
-          return showGuidance || isLocked ? (
-            <div className="absolute top-1 left-0 right-0 z-20 flex justify-center pointer-events-none">
-              <div className={`px-3 py-1.5 rounded-full text-[11px] font-bold tracking-wider shadow-lg backdrop-blur-md border ${
-                isLocked ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' :
-                isDrifting ? 'bg-red-500/20 border-red-500/40 text-red-300 animate-pulse' :
-                pq.qualityScore > 0.4 ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' :
-                'bg-red-500/20 border-red-500/40 text-red-300'
+        {/* Pulse status - floating card bottom center */}
+        {(() => {
+          const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
+          const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
+          const triplePass = !!forensicGate?.passAll;
+          const pulsePresent = isMonitoring && triplePass && heartRate > 0;
+          const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
+          const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
+          return (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+              <div className={`rounded-xl px-5 py-3 border-2 backdrop-blur-sm shadow-2xl ${
+                pulsePresent
+                  ? 'bg-emerald-500/15 border-emerald-400 shadow-[0_0_30px_rgba(16,185,129,0.4)]'
+                  : 'bg-red-500/15 border-red-400'
               }`}>
-                <span className="flex items-center gap-1.5">
-                  {isLocked ? <Shield className="w-3 h-3" /> : isDrifting ? <AlertTriangle className="w-3 h-3" /> : <Activity className="w-3 h-3 animate-pulse" />}
-                  {pq.guidance}
-                </span>
-              </div>
-            </div>
-          ) : null;
-        })()}
-
-        <div className="relative z-10 h-full">
-          <div className="flex-1 h-full">
-            <PPGSignalMeter 
-              value={heartbeatSignal}
-              quality={lastSignal?.quality || 0}
-              isFingerDetected={lastSignal?.fingerDetected || false}
-              onStartMeasurement={handleToggleMonitoring}
-              onReset={handleReset}
-              isMonitoring={isMonitoring}
-              arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
-              rawArrhythmiaData={lastArrhythmiaData.current}
-              preserveResults={showResults}
-              diagnosticMessage={lastSignal?.diagnostics?.message || 'MONITOR CARDÍACO ACTIVO'}
-              isPeak={beatMarker === 1}
-              bpm={heartRate}
-              spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
-              rrIntervals={rrIntervals}
-              publicationGate={true}
-              rejectionReason={forensicGate?.livenessReason || ''}
-            />
-          </div>
-
-          {/* ════════════════════════════════════════════════════════════
-              FORENSIC PULSE PANEL — the only thing the operator sees by
-              default. Shows: PULSO DETECTADO / SIN PULSO + BPM + PI.
-              No SpO2/BP/glucose/lipids unless ?civil=1 is passed.
-              ════════════════════════════════════════════════════════════ */}
-          {(() => {
-            const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
-            const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
-            // FORENSIC: pulse is "present" ONLY when the triple-gate passes.
-            // Optical contact alone is NOT enough — Gate 2 (spectral SNR) and
-            // Gate 3 (morphology) must also be open.
-            const triplePass = !!forensicGate?.passAll;
-            const pulsePresent = isMonitoring && triplePass && heartRate > 0;
-            const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
-            const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
-            return (
-              <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
-                {/* Forensic banner — always visible while monitoring */}
-                {isMonitoring && (
-                  <div className="px-3 py-1 rounded-md bg-slate-900/80 border border-slate-700 text-[10px] text-slate-300 tracking-wider text-center max-w-[95%]">
-                    MODO FORENSE — DETECTOR DE PULSO PPG. NO MIDE SPO₂ / PRESIÓN / GLUCOSA / LÍPIDOS.
-                  </div>
-                )}
-                <div className={`w-[92%] rounded-xl px-4 py-3 border-2 backdrop-blur-sm ${
-                  pulsePresent
-                    ? 'bg-emerald-500/10 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.35)]'
-                    : 'bg-red-500/10 border-red-400'
-                }`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className={`text-xs font-bold tracking-widest ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
-                        {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
-                      </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">
-                        {pulsePresent ? 'TRIPLE GATE VALIDADO' : blockedReason}
-                      </div>
+                <div className="flex items-center gap-6">
+                  <div>
+                    <div className={`text-xs font-bold tracking-widest ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
                     </div>
-                    <div className="text-right">
-                      <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
-                        {pulsePresent ? Math.round(heartRate) : '--'}
-                      </div>
-                      <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {pulsePresent ? 'TRIPLE GATE VALIDADO' : blockedReason}
                     </div>
                   </div>
-                  <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50">
-                    <div className="flex-1">
-                      <div className="text-[8px] text-slate-500 tracking-wider">ÍNDICE DE PERFUSIÓN</div>
-                      <div className="text-sm font-mono text-slate-200">{pi > 0 ? pi.toFixed(2) : '--'}</div>
+                  <div className="text-right">
+                    <div className={`text-4xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
+                      {pulsePresent ? Math.round(heartRate) : '--'}
                     </div>
-                    <div className="flex-1">
-                      <div className="text-[8px] text-slate-500 tracking-wider">CALIDAD SEÑAL</div>
-                      <div className="text-sm font-mono text-slate-200">{lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}</div>
-                    </div>
-                    <div className="flex-1">
-                      <div className="text-[8px] text-slate-500 tracking-wider">TIEMPO</div>
-                      <div className="text-sm font-mono text-slate-200">{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</div>
-                    </div>
+                    <div className="text-[10px] text-slate-400 tracking-wider mt-1">BPM</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-6 mt-2 pt-2 border-t border-slate-700/50">
+                  <div>
+                    <div className="text-[8px] text-slate-500 tracking-wider">PERFUSIÓN</div>
+                    <div className="text-sm font-mono text-slate-200">{pi > 0 ? pi.toFixed(2) : '--'}</div>
+                  </div>
+                  <div>
+                    <div className="text-[8px] text-slate-500 tracking-wider">CALIDAD</div>
+                    <div className="text-sm font-mono text-slate-200">{lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}%</div>
+                  </div>
+                  <div>
+                    <div className="text-[8px] text-slate-500 tracking-wider">TIEMPO</div>
+                    <div className="text-sm font-mono text-slate-200">{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</div>
                   </div>
                 </div>
               </div>
-            );
-          })()}
+            </div>
+          );
+        })()}
 
-          {/* CIVIL MODE — legacy clinical-style vitals (research only). */}
-          {CIVIL_MODE && (
-          <div className="absolute inset-x-0 top-[70%] bottom-[60px] bg-black/10 px-4 py-3">
-            <div className="text-[9px] text-amber-400 mb-1 tracking-widest text-center">⚠ CIVIL — ESTIMACIONES NO CLÍNICAS</div>
-            <div className="grid grid-cols-3 gap-2 place-items-center">
-              <VitalSign label="FRECUENCIA CARDÍACA" value={heartRate > 0 ? Math.round(heartRate) : "--"} unit="BPM" highlighted={showResults} />
-              <VitalSign label="SPO2" value={vitalSigns.spo2 > 0 ? vitalSigns.spo2 : "--"} unit="%" highlighted={showResults} />
-              <VitalSign 
-                label="PRESIÓN ARTERIAL"
-                value={vitalSigns.pressure && vitalSigns.pressure.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}
-                unit="mmHg"
-                highlighted={showResults}
-                confidenceLevel={vitalSigns.pressure?.confidence}
-                featureQuality={vitalSigns.pressure?.featureQuality}
-              />
-              <VitalSign label="GLUCOSA (EST.)" value={vitalSigns.glucose > 0 ? vitalSigns.glucose : "--"} unit="mg/dL" highlighted={showResults} />
-              <VitalSign 
-                label="COLEST./TRIGL. (EST.)"
-                value={vitalSigns.lipids?.totalCholesterol > 0 || vitalSigns.lipids?.triglycerides > 0 ? `${vitalSigns.lipids?.totalCholesterol || "--"}/${vitalSigns.lipids?.triglycerides || "--"}` : "--/--"}
-                unit="mg/dL"
-                highlighted={showResults}
-              />
-              <VitalSign label="ARRITMIAS" value={vitalSigns.arrhythmiaStatus || "SIN ARRITMIAS|0"} highlighted={showResults} />
+        {/* CIVIL MODE - floating panel */}
+        {CIVIL_MODE && (
+          <div className="absolute bottom-4 right-4 z-30 bg-black/90 backdrop-blur-sm border border-slate-700 rounded-xl p-3 max-w-xs">
+            <div className="text-[9px] text-amber-400 mb-2 tracking-widest text-center">⚠ CIVIL — ESTIMACIONES NO CLÍNICAS</div>
+            <div className="grid grid-cols-2 gap-2 text-[10px]">
+              <div className="text-slate-400">FC: <span className="text-white font-mono">{heartRate > 0 ? Math.round(heartRate) : "--"} BPM</span></div>
+              <div className="text-slate-400">SpO2: <span className="text-white font-mono">{vitalSigns.spo2 > 0 ? vitalSigns.spo2.toFixed(0) : "--"}%</span></div>
+              <div className="text-slate-400">PA: <span className="text-white font-mono">{vitalSigns.pressure?.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"} mmHg</span></div>
+              <div className="text-slate-400">GLUC: <span className="text-white font-mono">{vitalSigns.glucose > 0 ? vitalSigns.glucose.toFixed(0) : "--"} mg/dL</span></div>
             </div>
           </div>
-          )}
+        )}
 
-          {showResults && measurementSummary && (() => {
+        {/* Measurement summary modal */}
+        {showResults && measurementSummary && (() => {
             const { totalBeats, arrhythmiaBeats, normalPercent } = measurementSummary;
             const normalBeats = totalBeats - arrhythmiaBeats;
             const avgBpm = heartRate > 0 ? Math.round(heartRate) : '--';

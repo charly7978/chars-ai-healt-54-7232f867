@@ -58,7 +58,7 @@ export class HeartBeatProcessor {
   private lastPeakValue = 0;
   private consecutivePeaks = 0;
   private frameCount = 0;
-  private peakThreshold = 4.0;
+  private peakThreshold = 1.5; // REDUCIDO para modo forense - permitir señales débiles
 
   private beatsAccepted = 0;
   private beatsRejected = 0;
@@ -149,6 +149,18 @@ export class HeartBeatProcessor {
     const { normalizedValue, normRange } = this.normalizeSignal(filteredValue);
     this.updatePeriodicityEstimates();
     this.updateThreshold(normRange);
+    
+    // LOG FORENSE: debug de señal
+    if (this.frameCount % 30 === 0) {
+      console.log('💓 HeartBeatProcessor debug:', {
+        filteredValue,
+        normalizedValue,
+        normRange,
+        peakThreshold: this.peakThreshold,
+        signalBufLength: this.signalBuf.length,
+        consecutivePeaks: this.consecutivePeaks
+      });
+    }
 
     const timeSinceLastPeak = this.lastPeakTime > 0 ? now - this.lastPeakTime : 1e9;
     const expectedRR = this.getExpectedRR();
@@ -419,18 +431,18 @@ export class HeartBeatProcessor {
       }
     }
 
-    const minScore = this.consecutivePeaks < 3 ? 28 : 35;
-    const thresholdMet = c.amplitude > this.peakThreshold * (c.periodicitySupport ? 0.6 : 0.85) ||
-      c.prominence > Math.max(1.8, this.peakThreshold * 0.5);
+    const minScore = this.consecutivePeaks < 3 ? 20 : 28; // REDUCIDO para modo forense
+    const thresholdMet = c.amplitude > this.peakThreshold * (c.periodicitySupport ? 0.4 : 0.6) ||
+      c.prominence > Math.max(1.0, this.peakThreshold * 0.3); // REDUCIDO
 
     if (c.totalScore < minScore && !thresholdMet) {
       c.status = 'rejected'; c.rejectionReason = 'low_total_score'; return;
     }
-    if (c.detectorAgreement >= 1.0 && c.morphologyScore > 40 && thresholdMet) {
+    if (c.detectorAgreement >= 1.0 && c.morphologyScore > 30 && thresholdMet) { // REDUCIDO
       c.status = 'accepted'; return;
     }
     if (c.detectorHits >= 1 && c.totalScore >= minScore && thresholdMet) {
-      if (c.templateCorrelation > 0.5 || c.periodicitySupport || c.morphologyScore > 55) {
+      if (c.templateCorrelation > 0.3 || c.periodicitySupport || c.morphologyScore > 40) { // REDUCIDO
         c.status = 'accepted'; return;
       }
     }
