@@ -458,6 +458,14 @@ export class AdaptiveROIMask {
       this.roiSizeFrac = targetSizeFrac;
     } else if (box.mass > 0) {
       // Smoothly follow the finger; don't snap.
+      // V8: track residual |observation − previous smoothed| as σ proxy.
+      const dxRes = box.cx - this.roiCenterX;
+      const dyRes = box.cy - this.roiCenterY;
+      const resMag = Math.sqrt(dxRes * dxRes + dyRes * dyRes);
+      this.trackerResidualEMA =
+        this.trackerResidualEMA * (1 - this.TRACKER_RES_ALPHA) +
+        resMag * this.TRACKER_RES_ALPHA;
+      this.trackerSigmaPx = this.trackerResidualEMA;
       this.roiCenterX += (box.cx - this.roiCenterX) * this.ROI_CENTER_ALPHA;
       this.roiCenterY += (box.cy - this.roiCenterY) * this.ROI_CENTER_ALPHA;
       this.roiSizeFrac += (targetSizeFrac - this.roiSizeFrac) * this.ROI_SIZE_ALPHA;
@@ -467,6 +475,9 @@ export class AdaptiveROIMask {
       this.roiCenterX += (w / 2 - this.roiCenterX) * 0.05;
       this.roiCenterY += (h / 2 - this.roiCenterY) * 0.05;
       this.roiSizeFrac += (0.85 - this.roiSizeFrac) * 0.05;
+      // Sin observación válida: relajar σ hacia 0.
+      this.trackerResidualEMA *= 0.85;
+      this.trackerSigmaPx = this.trackerResidualEMA;
     }
     const roiSize = minDim * this.roiSizeFrac;
     const half = roiSize / 2;
