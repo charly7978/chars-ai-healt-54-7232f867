@@ -679,11 +679,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
         pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
       },
-      forensicGate: this.computeForensicGate(roi.rawRed, timestamp),
+      forensicGate: (() => {
+        const fg = this.computeForensicGate(roi.rawRed, timestamp);
+        // V6: log final liveness verdict (passAll vs reason) on success path.
+        this.logRoiTelemetry(timestamp, roi, fg.passAll, fg.livenessReason);
+        return fg;
+      })(),
     });
-    // V6: success path → log final liveness verdict (passAll vs reason).
-    const fg = this.computeForensicGate(roi.rawRed, timestamp);
-    this.logRoiTelemetry(timestamp, roi, fg.passAll, fg.livenessReason);
   }
 
   /**
