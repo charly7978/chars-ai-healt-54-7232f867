@@ -21,6 +21,15 @@ interface PPGSignalMeterProps {
   bpm?: number;
   spo2?: number;
   rrIntervals?: number[];
+  /**
+   * FORENSIC: AND duro de los 3 gates + OpticalEvidenceGate. Cuando es
+   * false, el monitor NO dibuja la onda recibida — empuja 0 al buffer y
+   * muestra el motivo exacto del rechazo. Garantiza que ninguna onda
+   * "fantasma" se pinte sobre aire / ruido / saturación.
+   */
+  publicationGate?: boolean;
+  /** Texto humano del motivo (livenessReason / opticalReasonText). */
+  rejectionReason?: string;
 }
 
 const CONFIG = {
@@ -91,14 +100,16 @@ const PPGSignalMeter = ({
   isPeak = false,
   bpm = 0,
   spo2 = 0,
-  rrIntervals = []
+  rrIntervals = [],
+  publicationGate = true,
+  rejectionReason,
 }: PPGSignalMeterProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number | null>(null);
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, publicationGate, rejectionReason });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -110,7 +121,7 @@ const PPGSignalMeter = ({
   const hrvDisplayRef = useRef<{ sdnn: number; rmssd: number }>({ sdnn: 0, rmssd: 0 });
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData };
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, publicationGate, rejectionReason };
     if (rrIntervals && rrIntervals.length >= 2) {
       const last = rrIntervals[rrIntervals.length - 1];
       ibiDisplayRef.current = Math.round(last);
@@ -121,7 +132,7 @@ const PPGSignalMeter = ({
       for (let i = 1; i < rrIntervals.length; i++) sumSqDiffs += (rrIntervals[i] - rrIntervals[i - 1]) ** 2;
       hrvDisplayRef.current.rmssd = Math.round(Math.sqrt(sumSqDiffs / (rrIntervals.length - 1)));
     }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData]);
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, publicationGate, rejectionReason]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
@@ -408,7 +419,12 @@ const PPGSignalMeter = ({
       }
       lastRenderTime = now;
       
-      const { value: signalValue, isFingerDetected: detected, arrhythmiaStatus: arrStatus, preserveResults: preserve, isPeak: peak } = propsRef.current;
+      const { value: signalValueRaw, isFingerDetected: detected, arrhythmiaStatus: arrStatus, preserveResults: preserve, isPeak: peakRaw, publicationGate: pubGate, rejectionReason: rejReason } = propsRef.current;
+      // FORENSIC: si la cadena triple-gate + evidencia óptica no autoriza
+      // publicación, el monitor pinta línea plana (valor=0) y suprime el
+      // marcador de peak. Nunca dibujamos una "onda" sobre aire/ruido.
+      const signalValue = pubGate ? signalValueRaw : 0;
+      const peak = pubGate ? peakRaw : false;
       const rhythm = parseRhythmStatus(arrStatus);
       const plot = getPlotArea();
       const { WINDOW_MS, COLORS } = CONFIG;
@@ -417,6 +433,26 @@ const PPGSignalMeter = ({
       drawAmplitudeScale(ctx);
       drawTimeScale(ctx);
       drawVitalInfo(ctx, now);
+
+      // Banner forense superior cuando no hay autorización de publicación.
+      if (!pubGate && rejReason) {
+        const bannerW = Math.min(900, CONFIG.CANVAS_WIDTH - 40);
+        const bx = (CONFIG.CANVAS_WIDTH - bannerW) / 2;
+        ctx.save();
+        ctx.fillStyle = 'rgba(153, 27, 27, 0.92)';
+        ctx.fillRect(bx, 8, bannerW, 56);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(bx, 8, bannerW, 56);
+        ctx.font = 'bold 18px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = '#fee2e2';
+        ctx.textAlign = 'center';
+        ctx.fillText('NO PUBLICAR — SIN EVIDENCIA ÓPTICA', CONFIG.CANVAS_WIDTH / 2, 30);
+        ctx.font = '14px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = '#fecaca';
+        ctx.fillText(rejReason, CONFIG.CANVAS_WIDTH / 2, 52);
+        ctx.restore();
+      }
       
       if (preserve && !detected) {
         animationRef.current = requestAnimationFrame(render);

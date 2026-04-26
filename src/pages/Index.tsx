@@ -713,6 +713,13 @@ const Index = () => {
         spectralPeakHz: fg.spectralPeakHz,
         spectralConcentration: (fg as any).spectralConcentration ?? 0,
         livenessReason: fg.livenessReason,
+        opticalEvidence: (fg as any).opticalEvidence,
+        opticalReason: (fg as any).opticalReason,
+        opticalReasonText: (fg as any).opticalReasonText,
+        opticalMetrics: (fg as any).opticalMetrics,
+        publicationGate: (fg as any).publicationGate,
+        effectiveSampleRate: (fg as any).effectiveSampleRate,
+        bufferedSeconds: (fg as any).bufferedSeconds,
       };
       forensicGateRef.current = snap;
       const nowMs = performance.now();
@@ -840,6 +847,9 @@ const Index = () => {
         clipLow: 0,
         perfusionIndex: lastSignal.perfusionIndex,
         positionDrifting: positionQuality.drifting,
+        // FORENSIC: triple-gate + evidencia óptica. SOLO con esto en true
+        // el HeartBeatProcessor permite beep + vibración por latido.
+        publicationGate: forensicPass && !!(fg as any)?.opticalEvidence,
       }
     );
 
@@ -1030,7 +1040,11 @@ const Index = () => {
             setArrhythmiaState(isArrhythmiaDetected);
 
             if (isArrhythmiaDetected) {
-              if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+              // FORENSIC: vibración de arritmia SOLO si triple-gate + evidencia
+              // óptica autorizan publicación. Evita falsas alarmas en aire/ruido.
+              if (forensicPass && (fg as any)?.opticalEvidence && navigator.vibrate) {
+                navigator.vibrate([200, 100, 200]);
+              }
               toast({
                 title: `⚠️ ${rhythmLabel.split('_').join(' ')}`,
                 description: count > 0 ? `Eventos detectados: ${count}` : 'Ritmo irregular detectado',
@@ -1152,6 +1166,8 @@ const Index = () => {
               bpm={forensicGate?.passAll ? heartRate : 0}
               spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
               rrIntervals={forensicGate?.passAll ? rrIntervals : []}
+              publicationGate={!!forensicGate?.passAll}
+              rejectionReason={forensicGate?.livenessReason || 'SIN EVIDENCIA ÓPTICA'}
             />
           </div>
 

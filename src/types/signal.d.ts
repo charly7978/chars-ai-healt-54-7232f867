@@ -60,6 +60,29 @@ export interface ProcessedSignal {
     spectralPeakHz: number;
     spectralConcentration: number;
     livenessReason: string;
+    /**
+     * OpticalEvidenceGate (gate físico independiente de morfología).
+     * `opticalEvidence`=true significa que la cámara está físicamente
+     * recibiendo señal compatible con tejido perfundido (no aire/objeto).
+     */
+    opticalEvidence?: boolean;
+    opticalReason?: string;       // código RejectionCode: OK, CLIPPING_HIGH, ...
+    opticalReasonText?: string;   // texto humano en español
+    opticalMetrics?: {
+      acDc: number;
+      rOverGB: number;
+      texture: number;
+      clipHigh: number;
+      clipLow: number;
+      pi: number;
+      meanR: number;
+    } | null;
+    /** AND duro de los 4 gates (3 + evidencia óptica). UI publica SOLO si true. */
+    publicationGate?: boolean;
+    /** Sample rate medido del span temporal real del buffer 10s. */
+    effectiveSampleRate?: number;
+    /** Segundos efectivos cubiertos por el buffer temporal. */
+    bufferedSeconds?: number;
   };
 }
 

@@ -78,11 +78,19 @@ export const useHeartBeatProcessor = () => {
       activeSource?: string;
       perfusionIndex?: number;
       positionDrifting?: boolean;
+      // Forense: triple-gate + evidencia óptica. SOLO con esto en true se
+      // permiten beep, vibración y publicación de waveform/BPM.
+      publicationGate?: boolean;
     }
   ): HeartBeatResult => {
     if (!processorRef.current || processingStateRef.current !== 'ACTIVE') {
       return emptyResult(currentBPMRef.current);
     }
+
+    // Propaga la verdad de publicación al núcleo del beat processor para
+    // que el feedback sensorial (beep + vibrate) NUNCA se dispare sin
+    // evidencia óptica + 3 gates.
+    processorRef.current.setPublicationGate(!!upstreamContext?.publicationGate);
 
     const currentTime = timestamp ?? performance.now();
 

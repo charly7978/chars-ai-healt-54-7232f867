@@ -6,6 +6,17 @@ import { PressureProxyEstimator, type PressureState, type PressureEstimate } fro
 import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
+import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
+
+/**
+ * Conversión sRGB (0..255) → intensidad lineal [0..1] según IEC 61966-2-1.
+ * Necesaria para que la Optical Density represente absorbancia física real
+ * (la cámara aplica gamma ≈ 2.2 que comprime la pulsatilidad).
+ */
+function srgbToLinear(c8: number): number {
+  const x = Math.max(0, Math.min(255, c8)) / 255;
+  return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+}
 
 // Extended contact states
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
@@ -64,6 +75,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private sourceRanker = new SignalSourceRanker();
   // Forensic Gate #2 — cardiac-band SNR verifier on the raw red channel.
   private cardiacVerifier = new CardiacBandVerifier();
+  // Forensic Optical Evidence Gate — physical-only acceptance/rejection
+  // (clipping, exposure, hemoglobin signature, texture, AC/DC, perfusion).
+  // Independiente de morfología, no bloquea por "forma de dedo".
+  private opticalGate = new OpticalEvidenceGate();
+  private lastOpticalEvidence: OpticalEvidence | null = null;
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
@@ -75,6 +91,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private vpgBuf = new RingBuffer(300);
   private apgBuf = new RingBuffer(300);
   private frameTimeBuf = new RingBuffer(120);
+
+  // ── BUFFER CIRCULAR 10s POR TIMESTAMPS REALES ────────────────────────
+  // Cada muestra lleva su tiempo absoluto (frameTimestamp). En cada frame
+  // se desalojan las muestras con edad > TIME_WINDOW_MS. Sample rate
+  // efectivo se mide del span real, NO de un nominal 30 fps.
+  private readonly TIME_WINDOW_MS = 10_000;
+  private timedSamples: { t: number; od: number; r: number; g: number; b: number }[] = [];
+  // PI window ~500 ms para detectar despegue de dedo (PERFUSION_DROP)
+  private piWindow: number[] = [];
+  private readonly PI_WINDOW_MS = 500;
+  private piWindowTimes: number[] = [];
+
+  // OD baseline (DC móvil para conversión sRGB→OD)
+  private odDcMovingAvg = 0;
+
+  // Triple-gate publication state (último resultado autorizado)
+  private publicationGate = false;
 
   // --- AC/DC ---
   private redDC = 0; private redAC = 0;
@@ -131,6 +164,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   public setMorphologyGate(pass: boolean, reason?: string): void {
     this.gate3Pass = pass;
     if (reason) this.gate3Reason = reason;
+  }
+
+  /** Permite ajustar umbrales del OpticalEvidenceGate desde UI/auditoría. */
+  public setOpticalGateConfig(patch: Partial<OpticalGateConfig>): void {
+    this.opticalGate.setConfig(patch);
+  }
+
+  public getOpticalGateConfig(): OpticalGateConfig {
+    return this.opticalGate.getConfig();
+  }
+
+  public getLastOpticalEvidence(): OpticalEvidence | null {
+    return this.lastOpticalEvidence;
+  }
+
+  public isPublicationGateOpen(): boolean {
+    return this.publicationGate;
   }
 
   // --- Smoothed metrics (EWMA) ---
@@ -409,6 +459,21 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.greenBuf.push(roi.rawGreen);
     this.blueBuf.push(roi.rawBlue);
 
+    // ── sRGB → LINEAL → OPTICAL DENSITY (absorbancia hemoglobina) ─────
+    // OD = -log10((I_lin + ε) / I0_lin), donde I0 es el DC móvil lineal.
+    // OD es la magnitud que la espectroscopía ve realmente; usar el rojo
+    // crudo subestima la pulsatilidad cuando la cámara aplica gamma.
+    const linR = srgbToLinear(roi.rawRed);
+    if (this.odDcMovingAvg <= 0) this.odDcMovingAvg = linR;
+    else this.odDcMovingAvg += (linR - this.odDcMovingAvg) * 0.02; // ~5s tau a 30fps
+    const odSample = -Math.log10((linR + 1e-6) / Math.max(this.odDcMovingAvg, 1e-6));
+
+    // ── BUFFER TEMPORAL DE 10s POR TIMESTAMPS REALES ────────────────
+    this.timedSamples.push({ t: timestamp, od: odSample, r: roi.rawRed, g: roi.rawGreen, b: roi.rawBlue });
+    while (this.timedSamples.length > 0 && (timestamp - this.timedSamples[0].t) > this.TIME_WINDOW_MS) {
+      this.timedSamples.shift();
+    }
+
     if (this.redBuf.length >= 36) {
       this.calculateACDC();
     }
@@ -452,6 +517,33 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     // --- GLOBAL SQI ---
     const perfusionIndex = this.calculatePerfusionIndex();
+
+    // ── PI WINDOW (500 ms) para detección de PERFUSION_DROP ──────────
+    this.piWindow.push(perfusionIndex);
+    this.piWindowTimes.push(timestamp);
+    while (this.piWindowTimes.length > 0 && (timestamp - this.piWindowTimes[0]) > this.PI_WINDOW_MS) {
+      this.piWindowTimes.shift();
+      this.piWindow.shift();
+    }
+
+    // ── OPTICAL EVIDENCE GATE (físico, sin morfología) ──────────────
+    // Stats RGB de la ROI + AC/DC reciente del rojo. Si rechaza, el frame
+    // se sigue emitiendo pero con publicationGate=false y razón visible.
+    const stdR_proxy = roi.rawRed > 0 ? roi.rawRed * (1 - this.spatialUniformity) : 0;
+    this.lastOpticalEvidence = this.opticalGate.evaluate(
+      {
+        meanR: roi.rawRed,
+        meanG: roi.rawGreen,
+        meanB: roi.rawBlue,
+        stdR: stdR_proxy,
+        clipHighRatio: roi.clipHighRatio,
+        clipLowRatio: roi.clipLowRatio,
+        acComponent: this.redAC,
+        dcComponent: this.redDC,
+      },
+      { piWindow: this.piWindow.slice() }
+    );
+
     const signalRange = this.getSignalRange();
     const redDominance = this.smoothedRed - (this.smoothedGreen + this.smoothedBlue) / 2;
 
@@ -534,11 +626,26 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.gate2Concentration = g2.concentration;
     this.gate2Reason = g2.reason;
 
-    const passAll = this.opticalLive && this.gate2Pass && this.gate3Pass;
+    // Evidencia óptica física (gate independiente, sin morfología).
+    const opticalAccept = this.lastOpticalEvidence?.accept ?? false;
+    const opticalReason = this.lastOpticalEvidence?.reasonText ?? 'SIN EVIDENCIA';
+
+    const passAll = this.opticalLive && opticalAccept && this.gate2Pass && this.gate3Pass;
+    this.publicationGate = passAll;
+
     let livenessReason = 'OK';
     if (!this.opticalLive) livenessReason = this.lastLivenessReason;
+    else if (!opticalAccept) livenessReason = opticalReason;
     else if (!this.gate2Pass) livenessReason = this.gate2Reason;
     else if (!this.gate3Pass) livenessReason = this.gate3Reason;
+
+    const n = this.timedSamples.length;
+    const bufferedSeconds = n > 1
+      ? (this.timedSamples[n - 1].t - this.timedSamples[0].t) / 1000
+      : 0;
+    const effectiveSampleRate = (n >= 2 && bufferedSeconds > 0.1)
+      ? (n - 1) / bufferedSeconds
+      : this.estimatedSampleRate;
 
     return {
       gate1_optical: this.opticalLive,
@@ -549,6 +656,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       spectralPeakHz: this.gate2PeakHz,
       spectralConcentration: this.gate2Concentration,
       livenessReason,
+      opticalEvidence: opticalAccept,
+      opticalReason: this.lastOpticalEvidence?.reason ?? 'OK',
+      opticalReasonText: opticalReason,
+      opticalMetrics: this.lastOpticalEvidence?.metrics ?? null,
+      publicationGate: passAll,
+      effectiveSampleRate,
+      bufferedSeconds,
     };
   }
 
@@ -900,6 +1014,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.blueDC = 0; this.blueAC = 0;
     this.sourceRanker.reset();
     this.bandpassFilter.reset();
+    // Forensic: limpiar buffers temporales y estado de publicación.
+    this.timedSamples.length = 0;
+    this.piWindow.length = 0;
+    this.piWindowTimes.length = 0;
+    this.odDcMovingAvg = 0;
+    this.publicationGate = false;
+    this.lastOpticalEvidence = null;
   }
 
   reset(): void {

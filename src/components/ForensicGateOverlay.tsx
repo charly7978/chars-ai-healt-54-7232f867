@@ -9,6 +9,17 @@ export interface ForensicGateSnapshot {
   spectralPeakHz: number;
   spectralConcentration: number;
   livenessReason: string;
+  // Optical Evidence Gate (físico, independiente de morfología).
+  opticalEvidence?: boolean;
+  opticalReason?: string;
+  opticalReasonText?: string;
+  opticalMetrics?: {
+    acDc: number; rOverGB: number; texture: number;
+    clipHigh: number; clipLow: number; pi: number; meanR: number;
+  } | null;
+  publicationGate?: boolean;
+  effectiveSampleRate?: number;
+  bufferedSeconds?: number;
 }
 
 export const FORENSIC_CADENCE_OPTIONS = [100, 150, 300, 500, 1000] as const;
@@ -54,6 +65,12 @@ const ForensicGateOverlay: React.FC<Props> = ({
   const peakHz = gate?.spectralPeakHz ?? 0;
   const conc = gate?.spectralConcentration ?? 0;
   const reason = gate?.livenessReason ?? "ESPERANDO SEÑAL";
+  // OpticalEvidenceGate (gate físico independiente de morfología).
+  const opticalOk = gate?.opticalEvidence ?? null;
+  const opticalText = gate?.opticalReasonText ?? '—';
+  const om = gate?.opticalMetrics ?? null;
+  const effSr = gate?.effectiveSampleRate ?? 0;
+  const bufSec = gate?.bufferedSeconds ?? 0;
   // Make the failing gate explicit so the operator never wonders why pulse
   // is not being shown. (Gate 1 = optical, Gate 2 = spectral, Gate 3 = morph.)
   let prefix = '';
@@ -148,6 +165,35 @@ const ForensicGateOverlay: React.FC<Props> = ({
 
       <div className="mt-1.5 pt-1 border-t border-zinc-700/60 text-[9px] text-zinc-500 leading-tight">
         G1 firma hemoglobina · G2 SNR ≥ 6 dB · G3 morfología 4/4
+      </div>
+
+      {/* ─── OpticalEvidenceGate (físico, sin morfología) ────────── */}
+      <div className="mt-1.5 pt-1 border-t border-zinc-700/60">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] font-bold tracking-widest text-zinc-300">EVIDENCIA ÓPTICA</span>
+          <span className={
+            "text-[9px] font-bold px-1 py-0.5 rounded " +
+            (opticalOk === true ? "bg-emerald-500/20 text-emerald-200"
+             : opticalOk === false ? "bg-red-500/20 text-red-200"
+             : "bg-zinc-600/20 text-zinc-300")
+          }>
+            {opticalOk === true ? "ACEPTADA" : opticalOk === false ? "RECHAZADA" : "—"}
+          </span>
+        </div>
+        <div className="text-[10px] text-zinc-300 truncate" title={opticalText}>{opticalText}</div>
+        {om && (
+          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 mt-1 text-[9px] text-zinc-400">
+            <div className="flex justify-between"><span>AC/DC</span><span className="text-zinc-100">{om.acDc.toFixed(4)}</span></div>
+            <div className="flex justify-between"><span>R/(G+B)</span><span className="text-zinc-100">{om.rOverGB.toFixed(2)}</span></div>
+            <div className="flex justify-between"><span>Textura</span><span className="text-zinc-100">{om.texture.toFixed(3)}</span></div>
+            <div className="flex justify-between"><span>PI</span><span className="text-zinc-100">{(om.pi * 100).toFixed(2)}%</span></div>
+            <div className="flex justify-between"><span>Clip↑</span><span className="text-zinc-100">{(om.clipHigh * 100).toFixed(1)}%</span></div>
+            <div className="flex justify-between"><span>Clip↓</span><span className="text-zinc-100">{(om.clipLow * 100).toFixed(1)}%</span></div>
+            <div className="flex justify-between"><span>meanR</span><span className="text-zinc-100">{om.meanR.toFixed(0)}</span></div>
+            <div className="flex justify-between"><span>SR ef.</span><span className="text-zinc-100">{effSr.toFixed(1)}Hz</span></div>
+          </div>
+        )}
+        <div className="text-[9px] text-zinc-500 mt-1">Buffer real: {bufSec.toFixed(1)}s / 10.0s</div>
       </div>
 
       {onCadenceChange && (
