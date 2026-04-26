@@ -72,6 +72,32 @@ export interface CameraSignalHealth {
   shouldReinitialize: boolean;
 }
 
+/**
+ * Per-frame decision record: every call to inspect() produces one of these.
+ * Stored in a bounded ring buffer so the operator can correlate decisions
+ * with "no detecta señal" reports without flooding the console.
+ */
+export interface CameraGateDecision {
+  t: number;                 // performance.now() at decision time
+  frame: number;             // framesSeen counter
+  reason: CameraQualityVerdict['reason'];
+  failing: string[];         // ['G1:BLACK', 'G2:FROZEN', ...]
+  inputs: { redDC: number; greenDC: number; redAC: number; greenAC: number; rg: number };
+  thresholds: { greenDcMin: number; greenDcMax: number; greenAcMin: number; rgRatioMin: number };
+  badStreak: number;
+  streakNeeded: number;
+  warmupRemainingMs: number;
+  cooldownRemainingMs: number;
+  reinitRecommended: boolean;
+  decisionPath:
+    | 'OK'
+    | 'BAD_BUT_WARMUP'
+    | 'BAD_BUT_STREAK_SHORT'
+    | 'BAD_BUT_COOLDOWN'
+    | 'BAD_BUT_NON_HARD'
+    | 'REINIT';
+}
+
 export class CameraQualityGate {
   private cfg: CameraQualityConfig = { ...DEFAULT };
   private badStreak = 0;
@@ -85,6 +111,15 @@ export class CameraQualityGate {
   /** No reinit recommendations during the first warmupMs after reset. */
   private warmupMs = 5000;
 
+  // Ring buffer of the last N per-frame decisions. Bounded so memory and
+  // export size stay predictable on long sessions.
+  private static readonly DECISION_LOG_CAPACITY = 600; // ~20 s @ 30 fps
+  private decisionLog: CameraGateDecision[] = [];
+  /** When true, every decision is also console.debug'd. Off by default. */
+  private verbose = false;
+
+  setVerbose(on: boolean): void { this.verbose = on; }
+
   setConfig(patch: Partial<CameraQualityConfig>): void {
     this.cfg = { ...this.cfg, ...patch };
   }
@@ -96,8 +131,48 @@ export class CameraQualityGate {
     const verdict = this.classify(input);
     this.lastVerdict = verdict;
 
+    const recordDecision = (path: CameraGateDecision['decisionPath'], reinitRecommended: boolean) => {
+      const rg = input.greenDC > 0 ? input.redDC / input.greenDC : 0;
+      const failing: string[] = [];
+      if (!Number.isFinite(input.greenDC) || !Number.isFinite(input.greenAC)) failing.push('INVALID');
+      else {
+        if (input.greenDC < this.cfg.greenDcMin) failing.push('G1:BLACK');
+        if (input.greenDC > this.cfg.greenDcMax) failing.push('G1:SATURATED');
+        if (input.greenAC < this.cfg.greenAcMin) failing.push('G2:FROZEN');
+        if (rg < this.cfg.rgRatioMin) failing.push('G3:NO_FINGER');
+      }
+      const decision: CameraGateDecision = {
+        t: nowMs,
+        frame: this.framesSeen,
+        reason: verdict.reason,
+        failing,
+        inputs: { redDC: input.redDC, greenDC: input.greenDC, redAC: input.redAC, greenAC: input.greenAC, rg },
+        thresholds: {
+          greenDcMin: this.cfg.greenDcMin,
+          greenDcMax: this.cfg.greenDcMax,
+          greenAcMin: this.cfg.greenAcMin,
+          rgRatioMin: this.cfg.rgRatioMin,
+        },
+        badStreak: this.badStreak,
+        streakNeeded: this.cfg.badFrameStreak,
+        warmupRemainingMs: Math.max(0, this.warmupMs - (nowMs - this.warmupStart)),
+        cooldownRemainingMs: Math.max(0, this.cfg.reinitCooldownMs - (nowMs - this.lastReinitAt)),
+        reinitRecommended,
+        decisionPath: path,
+      };
+      this.decisionLog.push(decision);
+      if (this.decisionLog.length > CameraQualityGate.DECISION_LOG_CAPACITY) {
+        this.decisionLog.splice(0, this.decisionLog.length - CameraQualityGate.DECISION_LOG_CAPACITY);
+      }
+      if (this.verbose) {
+        // eslint-disable-next-line no-console
+        console.debug('[CameraQualityGate]', path, decision);
+      }
+    };
+
     if (verdict.ok) {
       this.badStreak = 0;
+      recordDecision('OK', false);
       return false;
     }
     this.badStreak++;
@@ -105,18 +180,31 @@ export class CameraQualityGate {
 
     // Warm-up window after reset/reinit: never recommend another reinit,
     // just keep classifying so telemetry is honest.
-    if (nowMs - this.warmupStart < this.warmupMs) return false;
+    if (nowMs - this.warmupStart < this.warmupMs) {
+      recordDecision('BAD_BUT_WARMUP', false);
+      return false;
+    }
 
-    if (this.badStreak < this.cfg.badFrameStreak) return false;
-    if (nowMs - this.lastReinitAt < this.cfg.reinitCooldownMs) return false;
+    if (this.badStreak < this.cfg.badFrameStreak) {
+      recordDecision('BAD_BUT_STREAK_SHORT', false);
+      return false;
+    }
+    if (nowMs - this.lastReinitAt < this.cfg.reinitCooldownMs) {
+      recordDecision('BAD_BUT_COOLDOWN', false);
+      return false;
+    }
     // Do NOT bounce the camera for normal operator states. NO_FINGER and
     // low early AC (FROZEN) should guide the user / accumulate signal, not
     // tear down the stream repeatedly. Only hard camera-output failures may
     // trigger an automatic recovery.
-    if (!['BLACK', 'SATURATED', 'INVALID'].includes(verdict.reason)) return false;
+    if (!['BLACK', 'SATURATED', 'INVALID'].includes(verdict.reason)) {
+      recordDecision('BAD_BUT_NON_HARD', false);
+      return false;
+    }
 
     this.lastReinitAt = nowMs;
     this.badStreak = 0;
+    recordDecision('REINIT', true);
     return true;
   }
 
@@ -193,7 +281,40 @@ export class CameraQualityGate {
     this.framesBad = 0;
     this.lastVerdict = { ok: true, reason: 'OK' };
     this.warmupStart = performance.now();
+    // decisionLog is intentionally preserved so the operator can inspect
+    // what happened across a reset/reinit boundary.
     // lastReinitAt is intentionally preserved so the cooldown still applies
     // across short-lived reset() calls (e.g. between sessions).
   }
+
+  /** Read-only snapshot of the per-frame decision log. */
+  getDecisionLog(): readonly CameraGateDecision[] {
+    return this.decisionLog;
+  }
+
+  /** Aggregated counts per decision path — useful for the debug overlay. */
+  getDecisionSummary(): Record<CameraGateDecision['decisionPath'], number> & { total: number } {
+    const out = {
+      OK: 0, BAD_BUT_WARMUP: 0, BAD_BUT_STREAK_SHORT: 0,
+      BAD_BUT_COOLDOWN: 0, BAD_BUT_NON_HARD: 0, REINIT: 0, total: 0,
+    };
+    for (const d of this.decisionLog) { out[d.decisionPath]++; out.total++; }
+    return out;
+  }
+
+  /** Trigger a JSON download of the decision log for forensic correlation. */
+  downloadDecisionLog(filename?: string): void {
+    if (typeof window === 'undefined') return;
+    const blob = new Blob([JSON.stringify(this.decisionLog, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename ?? `camera-gate-decisions-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  clearDecisionLog(): void { this.decisionLog = []; }
 }
