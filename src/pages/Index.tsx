@@ -324,8 +324,6 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
-    cachedSampleRateValidRef.current = false;
-    cachedSampleRateRef.current = 30;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
