@@ -1816,8 +1816,13 @@ const Index = () => {
       {isMonitoring && (
         <button
           type="button"
-          onClick={() => setShowCalibration(true)}
-          className="fixed bottom-1 left-9 z-40 h-6 px-2 rounded-full bg-primary/15 hover:bg-primary/25 text-[10px] font-medium text-primary border border-primary/30"
+          onClick={() => { setShowCalibration(true); setCalPromptHighlight(false); }}
+          className={
+            "fixed bottom-1 left-9 z-40 h-6 px-2 rounded-full text-[10px] font-medium text-primary border " +
+            (calPromptHighlight
+              ? "bg-primary/30 border-primary animate-pulse ring-2 ring-primary/50"
+              : "bg-primary/15 hover:bg-primary/25 border-primary/30")
+          }
           aria-label="Calibración clínica"
         >
           CAL
