@@ -13,7 +13,7 @@ import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
 import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
 import { SRDiagnostics } from "@/components/SRDiagnostics";
-import { toast } from "@/components/ui/use-toast";
+import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 
