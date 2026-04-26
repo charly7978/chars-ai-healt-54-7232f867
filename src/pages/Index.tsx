@@ -537,6 +537,10 @@ const Index = () => {
     // Reset session log for a fresh forensic export.
     sessionLogRef.current = [];
     setSessionLogSize(0);
+    validSamplesRef.current = 0;
+    noiseSamplesRef.current = 0;
+    setValidSamples(0);
+    setNoiseSamples(0);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
