@@ -35,6 +35,9 @@ function walk(dir) {
 }
 
 function audit(file) {
+  // Skip test files — they legitimately reference forbidden tokens to
+  // assert behaviour against them.
+  if (/(__tests__|\.test\.[tj]sx?$|src\/test\/)/.test(file)) return;
   const src = readFileSync(file, 'utf8');
   const lines = src.split('\n');
   for (const rule of FORBIDDEN) {
