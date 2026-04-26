@@ -666,6 +666,8 @@ const Index = () => {
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     // Iniciar procesamiento de señal primero
     startProcessing();
+    // Start the IMU motion classifier (no-op on platforms without devicemotion).
+    motionClassifierRef.current.start().catch(() => {});
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
