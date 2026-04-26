@@ -45,6 +45,13 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isStartingRef = useRef(false);
+  // Keep the latest onStreamReady in a ref so the main start/stop effect
+  // does NOT re-run every time the parent re-renders with a new callback
+  // identity. Re-running the effect tears down the MediaStream mid-probe,
+  // which is exactly what was causing the camera to "open and close" and
+  // corrupt the G1/G2/G3 extraction during the first seconds of capture.
+  const onStreamReadyRef = useRef<typeof onStreamReady>(onStreamReady);
+  useEffect(() => { onStreamReadyRef.current = onStreamReady; }, [onStreamReady]);
   // Continuous FPS watchdog — updates diagnostics.realFrameRate every ~2 s
   // so the diagnostics overlay reflects what the camera is actually delivering.
   const fpsWatchdogRef = useRef<{ frames: number; t0: number; rafId: number | null }>({
@@ -372,7 +379,7 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
           '| WB:', diagnosticsRef.current.wbLocked,
           '| ISO:', diagnosticsRef.current.isoValue);
 
-        onStreamReady?.(stream);
+        onStreamReadyRef.current?.(stream);
         isStartingRef.current = false;
 
         // Live FPS watchdog: count rVFC ticks over rolling 2 s windows and
@@ -414,7 +421,10 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
       mounted = false;
       stopCamera();
     };
-  }, [isMonitoring, onStreamReady]);
+  // Intentionally depend ONLY on isMonitoring. onStreamReady is read via
+  // ref so changing parent callbacks never restarts the camera mid-stream.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMonitoring]);
 
   return (
     <video
