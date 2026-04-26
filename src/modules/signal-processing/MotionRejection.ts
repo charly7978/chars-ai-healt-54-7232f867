@@ -166,6 +166,36 @@ export class MotionRejection {
   // V9.4 — count of imuScore samples rejected by the input validator.
   // Surfaced via getTuning() so a flaky IMU shows up in CI telemetry.
   private rejectedImuCount = 0;
+  // V9.5 — last per-frame blend factors (optical, IMU, max). Updated by
+  // `recomputeTuning()` and exposed via getTuning() so external loggers
+  // can correlate tuning switches with downstream artefacts (BPM blips,
+  // SQI dips, etc.) on a frame-by-frame basis.
+  private lastTOpt = 0;
+  private lastTImu = 0;
+  private lastTBlend = 0;
+
+  // V9.5 — per-device IMU baseline calibration. The baseline collector
+  // gathers `imuScore` samples while the user is asked to hold the phone
+  // still for ~2 s. The mean + std of those samples become the device's
+  // *quiet floor*, and the auto-tune trigger/saturate are shifted to sit
+  // a configurable number of std-devs above that floor — this stops a
+  // device with a noisier IMU (or a different driver) from constantly
+  // tripping the IMU branch of the tuner.
+  private calibrating = false;
+  private calibBuf: number[] = [];
+  private calibStartedAt = 0;
+  private calibBaseline: { mean: number; std: number; n: number; updatedAt: number } | null = null;
+  private calibAppliedTrigger: number | null = null;
+  private calibAppliedSaturate: number | null = null;
+
+  /** Per-device calibration tuning constants (frozen — no need to expose). */
+  private static readonly CAL_DURATION_MS = 2000;
+  private static readonly CAL_MIN_SAMPLES = 30;
+  private static readonly CAL_MAX_SAMPLES = 600;
+  /** Trigger sits at mean + this many std-devs above the quiet floor. */
+  private static readonly CAL_TRIGGER_K = 2.0;
+  /** Saturate sits at mean + this many std-devs above the quiet floor. */
+  private static readonly CAL_SATURATE_K = 6.0;
 
   /** Patch any subset of the config; unspecified fields keep current values. */
   setConfig(patch: Partial<MotionRejectionConfig>): void {
@@ -197,7 +227,26 @@ export class MotionRejection {
     sigmaP50: number;
     sigmaP90: number;
     rejectedImu: number;
+    tOpt: number;
+    tImu: number;
+    tBlend: number;
+    tDominant: 'OPTICAL' | 'IMU' | 'TIE';
+    calibrating: boolean;
+    calibration: {
+      hasBaseline: boolean;
+      baselineMean: number;
+      baselineStd: number;
+      samples: number;
+      appliedTrigger: number | null;
+      appliedSaturate: number | null;
+      updatedAt: number;
+    };
   } {
+    const tOpt = this.lastTOpt;
+    const tImu = this.lastTImu;
+    const eps = 1e-6;
+    const tDominant: 'OPTICAL' | 'IMU' | 'TIE' =
+      Math.abs(tOpt - tImu) < eps ? 'TIE' : (tOpt > tImu ? 'OPTICAL' : 'IMU');
     return {
       upgradeConfirmFrames: this.effUpgradeFrames,
       weightSmoothingAlpha: this.effAlpha,
@@ -206,7 +255,98 @@ export class MotionRejection {
       sigmaP50: this.percentile(this.sigmaBuf, this.sigmaCount, 0.50),
       sigmaP90: this.percentile(this.sigmaBuf, this.sigmaCount, 0.90),
       rejectedImu: this.rejectedImuCount,
+      tOpt, tImu, tBlend: this.lastTBlend, tDominant,
+      calibrating: this.calibrating,
+      calibration: {
+        hasBaseline: this.calibBaseline !== null,
+        baselineMean: this.calibBaseline?.mean ?? 0,
+        baselineStd:  this.calibBaseline?.std  ?? 0,
+        samples:      this.calibBaseline?.n    ?? 0,
+        appliedTrigger:  this.calibAppliedTrigger,
+        appliedSaturate: this.calibAppliedSaturate,
+        updatedAt:    this.calibBaseline?.updatedAt ?? 0,
+      },
     };
+  }
+
+  // -- V9.5 per-device calibration API -----------------------------------
+
+  /**
+   * Begin collecting an IMU baseline. The caller should ask the user to
+   * hold the phone still; classify() will accumulate imuScore samples
+   * during the next CAL_DURATION_MS (or until CAL_MAX_SAMPLES) and then
+   * derive autoTuneImuTrigger / autoTuneImuSaturate from the quiet floor.
+   */
+  startImuCalibration(nowMs = performance.now()): void {
+    this.calibrating = true;
+    this.calibBuf.length = 0;
+    this.calibStartedAt = nowMs;
+  }
+
+  /** Abort an in-flight calibration without touching the applied baseline. */
+  cancelImuCalibration(): void {
+    this.calibrating = false;
+    this.calibBuf.length = 0;
+  }
+
+  /**
+   * Force-load a previously persisted baseline (e.g. from localStorage).
+   * `updatedAt` is taken from the snapshot so the operator can see how
+   * fresh the calibration is.
+   */
+  loadBaseline(snapshot: { mean: number; std: number; n: number; updatedAt: number }): void {
+    if (
+      !Number.isFinite(snapshot.mean) || !Number.isFinite(snapshot.std) ||
+      snapshot.n <= 0 || snapshot.std < 0
+    ) return;
+    this.calibBaseline = { ...snapshot };
+    this.applyBaselineToConfig();
+  }
+
+  /** Map the captured baseline into the `cfg.autoTuneImu*` knobs. */
+  private applyBaselineToConfig(): void {
+    if (!this.calibBaseline) return;
+    const { mean, std } = this.calibBaseline;
+    // Anchor at quiet floor + K·σ. Always clamp below the physical max so
+    // we never silently disable the tuner on a very loud device.
+    const trig = Math.min(
+      this.cfg.imuScoreMax,
+      Math.max(0, mean + MotionRejection.CAL_TRIGGER_K  * std),
+    );
+    const sat  = Math.min(
+      this.cfg.imuScoreMax,
+      Math.max(trig + 1e-3, mean + MotionRejection.CAL_SATURATE_K * std),
+    );
+    this.cfg = { ...this.cfg, autoTuneImuTrigger: trig, autoTuneImuSaturate: sat };
+    this.calibAppliedTrigger  = trig;
+    this.calibAppliedSaturate = sat;
+  }
+
+  /** Internal — called from classify() while calibration is in progress. */
+  private feedCalibration(imuScore: number, nowMs: number): void {
+    if (!this.calibrating) return;
+    if (Number.isFinite(imuScore) &&
+        imuScore >= this.cfg.imuScoreMin &&
+        imuScore <= this.cfg.imuScoreMax) {
+      this.calibBuf.push(imuScore);
+    }
+    const elapsed = nowMs - this.calibStartedAt;
+    const enough = this.calibBuf.length >= MotionRejection.CAL_MIN_SAMPLES;
+    const done = (elapsed >= MotionRejection.CAL_DURATION_MS && enough) ||
+                 this.calibBuf.length >= MotionRejection.CAL_MAX_SAMPLES;
+    if (!done) return;
+
+    const n = this.calibBuf.length;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += this.calibBuf[i];
+    const mean = sum / n;
+    let v = 0;
+    for (let i = 0; i < n; i++) { const d = this.calibBuf[i] - mean; v += d * d; }
+    const std = Math.sqrt(v / n);
+    this.calibBaseline = { mean, std, n, updatedAt: nowMs };
+    this.calibrating = false;
+    this.calibBuf.length = 0;
+    this.applyBaselineToConfig();
   }
 
   /** Generic std over the first `count` slots of `buf`. */
@@ -283,6 +423,11 @@ export class MotionRejection {
     const tImu = Math.max(0, Math.min(1, (sImu - loI) / (hiI - loI)));
 
     const t = Math.max(tOpt, tImu);
+    // V9.5 — cache the per-frame blend factors so getTuning() can surface
+    // them and external loggers can correlate switches with artefacts.
+    this.lastTOpt = tOpt;
+    this.lastTImu = tImu;
+    this.lastTBlend = t;
     // Higher variability → MORE confirm frames, SMALLER alpha (slower EMA).
     const baseFrames = this.cfg.upgradeConfirmFrames;
     const highFrames = Math.max(baseFrames, this.cfg.upgradeConfirmFramesHigh);
@@ -294,6 +439,13 @@ export class MotionRejection {
 
   classify(input: MotionRejectionInputs): MotionRejectionResult {
     const { imuScore, trackerSigma, maskIoU, centroidJumpPx } = input;
+
+    // V9.5 — feed the calibration collector BEFORE the validator drops
+    // out-of-band samples. The collector applies the same physical band
+    // internally so a flaky frame still cannot poison the baseline.
+    if (this.calibrating) {
+      this.feedCalibration(imuScore, performance.now());
+    }
 
     // Push the new observations into both circular buffers and recompute the
     // effective tuning BEFORE applying hysteresis this frame.
@@ -412,5 +564,13 @@ export class MotionRejection {
     this.rejectedImuCount = 0;
     this.effUpgradeFrames = this.cfg.upgradeConfirmFrames;
     this.effAlpha = this.cfg.weightSmoothingAlpha;
+    // V9.5 — clear cached blend factors. We DO NOT clear `calibBaseline`:
+    // a per-device calibration must survive session resets so the user
+    // doesn't have to re-baseline every time they start monitoring.
+    this.lastTOpt = 0;
+    this.lastTImu = 0;
+    this.lastTBlend = 0;
+    this.calibrating = false;
+    this.calibBuf.length = 0;
   }
 }

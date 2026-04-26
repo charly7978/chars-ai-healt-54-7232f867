@@ -61,13 +61,15 @@ function makeReplay() {
     const hiI = Math.max(loI + 1e-3, CFG.autoTuneImuSaturate);
     const tImu = Math.max(0, Math.min(1, (sImu - loI) / (hiI - loI)));
     const t = Math.max(tOpt, tImu);
+    const eps = 1e-6;
+    const dominant = Math.abs(tOpt - tImu) < eps ? 'TIE' : (tOpt > tImu ? 'OPTICAL' : 'IMU');
     const baseF = CFG.upgradeConfirmFrames;
     const highF = Math.max(baseF, CFG.upgradeConfirmFramesHigh);
     effFrames = Math.round(baseF + (highF - baseF) * t);
     const baseA = CFG.weightSmoothingAlpha;
     const lowA = Math.min(baseA, CFG.weightSmoothingAlphaLow);
     effAlpha = baseA + (lowA - baseA) * t;
-    return { sigmaStd: sOpt, imuStd: sImu };
+    return { sigmaStd: sOpt, imuStd: sImu, tOpt, tImu, tBlend: t, tDominant: dominant };
   };
 
   return (sigma, imu = 0) => {
@@ -77,8 +79,8 @@ function makeReplay() {
     iBuf[iIdx] = imu;
     iIdx = (iIdx + 1) % iBuf.length;
     if (iCount < iBuf.length) iCount++;
-    const { sigmaStd, imuStd } = recompute();
-    return { effUpgradeFrames: effFrames, effAlpha, sigmaStd, imuStd };
+    const r = recompute();
+    return { effUpgradeFrames: effFrames, effAlpha, ...r };
   };
 }
 
@@ -128,6 +130,9 @@ for (const { name, seq } of trajectories()) {
   let lastFrames = -1, lastAlpha = -1;
   let stateChanges = 0;
   let maxFrames = 0, minAlpha = Infinity, maxSigmaStd = 0, maxImuStd = 0;
+  // V9.5 — count how many frames each branch dominated. Useful for
+  // correlating downstream artefacts with the channel that drove tuning.
+  const dominantCount = { OPTICAL: 0, IMU: 0, TIE: 0 };
 
   for (let i = 0; i < seq.length; i++) {
     const { s, i: imu } = seq[i];
@@ -141,6 +146,7 @@ for (const { name, seq } of trajectories()) {
     if (out.effAlpha < minAlpha) minAlpha = out.effAlpha;
     if (out.sigmaStd > maxSigmaStd) maxSigmaStd = out.sigmaStd;
     if (out.imuStd  > maxImuStd)   maxImuStd   = out.imuStd;
+    dominantCount[out.tDominant]++;
     lines.push(JSON.stringify({
       type: 'sample',
       trajectory: name,
@@ -151,6 +157,10 @@ for (const { name, seq } of trajectories()) {
       effAlpha: +out.effAlpha.toFixed(4),
       sigmaStd: +out.sigmaStd.toFixed(4),
       imuStd:   +out.imuStd.toFixed(4),
+      tOpt:     +out.tOpt.toFixed(4),
+      tImu:     +out.tImu.toFixed(4),
+      tBlend:   +out.tBlend.toFixed(4),
+      tDominant: out.tDominant,
     }));
   }
   lines.push(JSON.stringify({
@@ -162,6 +172,7 @@ for (const { name, seq } of trajectories()) {
     minEffAlpha: +minAlpha.toFixed(4),
     maxSigmaStd: +maxSigmaStd.toFixed(4),
     maxImuStd:   +maxImuStd.toFixed(4),
+    dominantCount,
   }));
 }
 
