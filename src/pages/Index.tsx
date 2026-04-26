@@ -1301,6 +1301,7 @@ const Index = () => {
   };
 
   return (
+    <>
     <div className="fixed inset-0 flex flex-col bg-black" style={{ 
       height: '100svh',
       width: '100vw',
@@ -1732,7 +1733,7 @@ const Index = () => {
         estimator={srEstimatorRef.current}
         hidden={!showFiducialTuner && !showSRDiag}
       />
-    </div>
+    </>
   );
 };
 
