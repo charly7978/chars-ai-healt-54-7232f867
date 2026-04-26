@@ -78,6 +78,18 @@ export class HeartBeatProcessor {
   private contactStable = true;
   private sourceSwitchRecent = false;
 
+  // ── FORENSIC PUBLICATION GATE ────────────────────────────────────────
+  // Cuando es false, NUNCA se reproduce beep ni vibración — incluso si
+  // un peak fue aceptado por la lógica morfológica. Esto evita feedback
+  // sensorial sobre señales no publicables (aire, sin contacto óptico,
+  // gates 1/2/3 cerrados).
+  private publicationGate = false;
+
+  /** Llamado por el hook con la verdad de los 3 gates + evidencia óptica. */
+  public setPublicationGate(pass: boolean): void {
+    this.publicationGate = !!pass;
+  }
+
   constructor() {
     this.setupAudio();
   }
@@ -206,8 +218,13 @@ export class HeartBeatProcessor {
           this.updateTemplate();
         }
 
-        this.vibrate();
-        this.playBeep();
+        // FORENSIC: feedback sensorial SOLO si la cadena triple-gate +
+        // evidencia óptica autoriza publicación. Sin esto, el peak existe
+        // internamente para HRV pero no se notifica al usuario.
+        if (this.publicationGate) {
+          this.vibrate();
+          this.playBeep();
+        }
       } else {
         rejectionReason = candidate.rejectionReason;
         this.lastRejectionReason = rejectionReason;
