@@ -1,77 +1,66 @@
-Voy a corregirlo en dos frentes inseparables: primero despejar la pantalla para que el monitor cardíaco sea realmente el fondo 100%, y segundo endurecer/ajustar la extracción PPG real para que no se quede bloqueada por umbrales o gates contradictorios.
+# Forensic CI gate: block simulation/random/mock/defaults on every push & PR
 
-Plan de implementación
+## Goal
+Make it impossible to merge or push code that reintroduces simulated data, `Math.random`, mock/fake placeholders, or hardcoded physiological defaults (BPM=70/72/75, SpO₂=97/98/99, BP=120/80, glucose=100, cholesterol=200, etc.). Today the CI only runs `npm run build`, so the existing forensic guards (`scripts/audit-forensic.mjs`, `src/test/forensic-audit.test.ts`, `.githooks/pre-commit`) are advisory only.
 
-1. Rediseñar la pantalla como monitor 100%
-- Convertir `PPGSignalMeter` en el lienzo principal absoluto de toda la pantalla, sin paneles grandes dentro del canvas que tapen la onda.
-- Eliminar del canvas los bloques redundantes que hoy ocupan área útil: panel superior grande, panel derecho de SpO2 en modo forense, panel morfológico inferior, historial de latidos grande, leyenda y banner grande.
-- Mantener solo la onda, grid, escala mínima y marcadores esenciales, maximizando el área de trazado.
-- Mover la información crítica a overlays HTML compactos y translúcidos: BPM/estado, calidad/SQI, fuente activa, presión, razón de bloqueo.
-- Hacer que controles `INICIAR/DETENER` y `RESET` sean botones flotantes pequeños, no una barra fija de 48px tapando el monitor.
+## What's already in place (reuse, don't duplicate)
+- `scripts/audit-forensic.mjs` — Node script that scans `src/modules`, `src/hooks`, `src/pages`, `src/components` for forbidden patterns; exits 1 on violations.
+- `src/test/forensic-audit.test.ts` — Vitest suite with a stricter rule set + an explicit allowlist with justifications, plus a "liveness thresholds" lock-in test for `PPGSignalProcessor`.
+- `.githooks/pre-commit` — local hook that blocks commits containing `Math.random`, simulation keywords, non-physiological literals, or the obsolete `HeartRateDisplay`.
 
-2. Reorganizar overlays por importancia
-- Crear una estructura visual tipo cockpit:
-```text
-┌──────────────────────────────┐
-│  mini estado/contacto/BPM     │
-│                              │
-│                              │
-│     MONITOR PPG 100%          │
-│       onda + grid             │
-│                              │
-│  controles compactos          │
-└──────────────────────────────┘
-```
-- Ocultar o colapsar `ForensicGateOverlay` por defecto para que no tape el monitor; dejarlo accesible con botón `DEBUG`.
-- Reemplazar el panel de umbrales flotante grande por un panel desplegable compacto solo cuando debug esté activo.
-- Mantener información técnica, pero sin invadir la onda.
+## Changes
 
-3. Corregir captura y timing de frames
-- Cambiar el canvas de procesamiento de `320x240` a una resolución interna mayor y adaptativa según el video real, con límite móvil seguro para rendimiento.
-- Usar correctamente `requestVideoFrameCallback(now, metadata)` y pasar `metadata.presentationTime`/`expectedDisplayTime` convertido a milisegundos cuando exista; fallback con `performance.now()`.
-- Eliminar `console.log` por frame, porque genera jank y puede arruinar la detección en móviles.
-- Medir tiempo de captura/procesamiento sin contaminar el hot path.
+### 1. `package.json` — add first-class scripts
+Add (no new dependencies; `vitest` is already a devDep):
+- `"test": "vitest run"`
+- `"test:forensic": "vitest run src/test/forensic-audit.test.ts"`
+- `"audit:forensic": "node scripts/audit-forensic.mjs"`
+- `"ci:guard": "npm run audit:forensic && npm run test:forensic && npm run lint && npm run build"`
 
-4. Arreglar la detección de dedo/liveness que está bloqueando señal real
-- Revisar los gates que hoy pueden impedir detección aun con dedo: `LIVENESS`, `OpticalEvidenceGate`, `coverage`, `texture`, `AC/DC`, `clipHigh`, `gate2`, `gate3`.
-- Separar claramente:
-  - contacto óptico real del dedo,
-  - calidad de pulsatilidad,
-  - autorización final de publicación.
-- Evitar que el monitor se quede en `NO PULSO` mientras sí hay contacto óptico pero aún no hay morfología suficiente.
-- Hacer el modo de visualización de señal más útil: mostrar señal PPG cruda/filtrada cuando hay contacto óptico real, aunque BPM todavía esté en adquisición, sin inventar BPM.
-- Mantener la filosofía de no falsear lecturas: si no hay latido validado, no publicar BPM, pero sí permitir ver la onda real de adquisición.
+This gives both humans and CI a single command (`npm run ci:guard`) that fails fast on any forensic regression.
 
-5. Mejorar ROI adaptativo para cobertura real
-- Reducir el ROI fine cuando haya buena masa de dedo para evitar mezclar bordes negros/flash saturado.
-- Cambiar el cálculo de `coverageRatio` para que represente cobertura dentro del ROI adaptado, no castigar injustamente por una grilla demasiado grande.
-- Suavizar el centroide y tamaño, pero permitir reubicación más rápida si el dedo está fuera del centro.
-- Exportar ROI real (`x/y/width/height`) en `ProcessedSignal` para overlay/debug futuro.
+### 2. `.github/workflows/npm-gulp.yml` — turn the build job into a real gate
+Rename to a clearer `Forensic CI` workflow and restructure into ordered, required steps so a failure in any step fails the check:
+1. `actions/checkout@v4`
+2. `actions/setup-node@v4` with `node-version: 20.x` and `cache: 'npm'` (drop the 18/20/22 matrix — Node 18 is EOL and the matrix triples CI cost without catching anything the audit cares about; a single LTS makes the required check unambiguous).
+3. `npm ci`
+4. **Forensic audit script** — `npm run audit:forensic` (fails on `Math.random`, `|| 70/72/75/97/98/99/120/80/60/90`, mock/fake/synthetic/placeholder tokens in pipeline modules).
+5. **Forensic Vitest suite** — `npm run test:forensic` (the stricter superset with allowlist + the `PPGSignalProcessor` threshold lock-ins).
+6. **Full unit tests** — `npm run test` (33/33 must stay green: arrhythmia, gates, sample-rate, sr-diagnostics).
+7. **Lint** — `npm run lint`.
+8. **Build** — `npm run build`.
 
-6. Ajustar presión y clipping sin bloquear dedos reales
-- Distinguir saturación local tolerable de saturación global destructiva.
-- Penalizar `HIGH_PRESSURE`, pero no matar la adquisición si todavía hay AC/DC útil.
-- Actualizar mensajes: “reduzca presión”, “cubra lente”, “mueva dedo al centro”, “mantenga quieto”, según causa real.
+Each step runs independently so the PR check annotations point at the exact failing gate (audit vs. test vs. lint vs. build).
 
-7. Validación final
-- Ejecutar build limpio.
-- Ejecutar pruebas unitarias/instrumentación existentes.
-- Ejecutar auditoría forense contra simulaciones/fakes.
-- Revisar que no haya `Math.random`, mocks ni datos fisiológicos simulados.
-- Entregar resumen de archivos cambiados y evidencia de verificación.
+### 3. `.github/workflows/forensic-pr.yml` — new dedicated PR-only job
+Small additional workflow that runs **only** `npm run audit:forensic` + `npm run test:forensic` on `pull_request` events. Rationale:
+- Gives a fast (~30s) signal on every PR independent of the heavier build matrix.
+- Appears as its own required check in branch protection, so the violation reason is visible without digging through build logs.
+- Uses `concurrency: { group: forensic-${{ github.ref }}, cancel-in-progress: true }` to avoid wasted runs on force-pushes.
 
-Archivos principales a modificar
-- `src/components/PPGSignalMeter.tsx`
-- `src/pages/Index.tsx`
-- `src/modules/signal-processing/PPGSignalProcessor.ts`
-- `src/modules/signal-processing/AdaptiveROIMask.ts`
-- `src/modules/signal-processing/OpticalEvidenceGate.ts`
-- `src/types/signal.d.ts`
+### 4. `.githooks/pre-push` — new local gate that mirrors CI
+Add a pre-push hook that runs `npm run audit:forensic && npm run test:forensic` before allowing a push. Pre-commit already blocks the obvious patterns line-by-line; pre-push catches cross-file regressions (e.g. a new file under `src/modules/biomarkers/` that re-adds a `|| 100` glucose default) before they reach GitHub. The hook is opt-in via `git config core.hooksPath .githooks` (the convention already used by the existing pre-commit).
 
-Criterio de éxito
-- El monitor cardíaco ocupa visualmente el 100% de la pantalla.
-- Los elementos no tapan la onda; solo quedan overlays compactos y controlados.
-- La app diferencia “contacto óptico adquirido” de “BPM validado”.
-- La señal real puede verse durante adquisición sin publicar BPM falso.
-- La detección deja de depender de umbrales visuales demasiado restrictivos que bloquean dedos reales bajo flash.
-- Build, tests y auditoría pasan sin errores.
+### 5. `docs/medical-validation.md` — append a "Forensic CI" section
+Document for future contributors:
+- The exact list of forbidden patterns and where they're enforced (script vs. vitest vs. hook).
+- How to add an entry to the `ALLOWLIST` in `src/test/forensic-audit.test.ts` with a written justification (the only escape hatch).
+- The required-checks list to configure in GitHub branch protection: `Forensic CI / build` and `forensic-pr / audit`.
+
+### 6. README — short "CI gates" section
+One paragraph + the `npm run ci:guard` command so any contributor (or a future AI session) knows the local equivalent of the CI gate.
+
+## Explicitly NOT in scope
+- No changes to `src/integrations/supabase/client.ts`, `src/integrations/supabase/types.ts`, or `.env`.
+- No changes to the signal-processing pipeline, vital estimators, UI, or camera code — this task is purely the enforcement layer.
+- Not touching `supabase/config.toml` project-level settings.
+- Not adding new runtime dependencies; everything reuses `vitest` and plain Node.
+
+## Verification after implementation
+1. `npm run ci:guard` passes locally on current `main` (baseline must be green — audit + 33/33 tests already pass per prior turn).
+2. Insert a deliberate violation (e.g. `const fallbackBpm = real || 72;` in `src/hooks/useHealthAnalysis.ts`), re-run `npm run ci:guard`, and confirm BOTH `audit:forensic` and `test:forensic` fail with a file:line message naming the rule. Revert.
+3. Push a throwaway branch and confirm the new `forensic-pr` check appears and blocks merge on GitHub.
+4. Confirm branch protection on `main` lists the two required checks.
+
+## Result
+Any future change — by a human, an AI, or a merge from a fork — that reintroduces `Math.random`, simulation tokens, or hardcoded vital defaults in `src/` will fail CI before it can land, with a precise file:line:rule message. The existing allowlist remains the single, auditable escape hatch.
