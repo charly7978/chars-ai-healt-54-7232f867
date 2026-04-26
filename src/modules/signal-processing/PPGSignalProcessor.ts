@@ -8,6 +8,7 @@ import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
 import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
 import { ROITelemetryLogger } from './ROITelemetryLogger';
+import { MotionRejection, type MotionRejectionState } from './MotionRejection';
 
 /**
  * Conversión sRGB (0..255) → intensidad lineal [0..1] según IEC 61966-2-1.
@@ -77,6 +78,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // Independiente de morfología, no bloquea por "forma de dedo".
   private opticalGate = new OpticalEvidenceGate();
   private lastOpticalEvidence: OpticalEvidence | null = null;
+
+  // V9 — Fusion of optical motion proxies (trackerSigma, centroidJumpPx,
+  // maskIoU) with the IMU motionScore. Produces a continuous `motionWeight`
+  // ∈ [0,1] used as a soft SQI multiplier and a `freezeBaselines` flag that
+  // pauses DC baseline updates during SLIDING / BURST_MOTION. NEVER blocks
+  // publication — forensic mode keeps the live trace honest.
+  private motionRejection = new MotionRejection();
+  private motionState: MotionRejectionState = 'STILL';
+  private motionWeight = 1.0;
 
   // V6: structured per-frame telemetry — exported on demand so the operator
   // can audit ROI position/size, coverage and Liveness reasons after a
