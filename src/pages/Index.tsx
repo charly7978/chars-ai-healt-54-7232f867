@@ -142,6 +142,49 @@ const Index = () => {
   const noiseSamplesRef = useRef(0);
   const [validSamples, setValidSamples] = useState(0);
   const [noiseSamples, setNoiseSamples] = useState(0);
+  // ── Rolling noise alert ──
+  // Keep a sliding window of the last N samples (1 = pass, 0 = noise) and
+  // raise an alert when the rolling triple-gate pass rate drops below
+  // NOISE_ALERT_THRESHOLD for at least NOISE_ALERT_MIN_SAMPLES consecutive
+  // checks. This tells the operator: "the camera is staring at noise".
+  const NOISE_WINDOW = 40;              // ~6 s @ 150 ms cadence
+  const NOISE_ALERT_THRESHOLD = 0.25;   // <25% pass rate
+  const NOISE_ALERT_MIN_SAMPLES = 20;   // need this many filled slots first
+  const NOISE_ALERT_REPEAT_MS = 6000;   // re-beep every 6 s while in alert
+  const noiseWindowRef = useRef<Uint8Array>(new Uint8Array(NOISE_WINDOW));
+  const noiseWindowFillRef = useRef(0);
+  const noiseWindowIdxRef = useRef(0);
+  const noiseAlertActiveRef = useRef(false);
+  const lastNoiseBeepAtRef = useRef(0);
+  const [noiseAlertActive, setNoiseAlertActive] = useState(false);
+  const [noiseAlertPct, setNoiseAlertPct] = useState(0);
+  // Lazy AudioContext for the noise alert beep.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const playNoiseBeep = useCallback(() => {
+    try {
+      if (typeof window === 'undefined') return;
+      const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+      if (!Ctx) return;
+      if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+      const now = ctx.currentTime;
+      // Two-tone descending alert (880 → 440 Hz) — clearly distinct from the
+      // success ping. Total length ~360 ms.
+      [{ f: 880, t: 0 }, { f: 440, t: 0.18 }].forEach(({ f, t }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = f;
+        gain.gain.setValueAtTime(0.0001, now + t);
+        gain.gain.exponentialRampToValueAtTime(0.18, now + t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + t + 0.16);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + t);
+        osc.stop(now + t + 0.18);
+      });
+    } catch {}
+  }, []);
 
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
