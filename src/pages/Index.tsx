@@ -347,7 +347,10 @@ const Index = () => {
     measurementTimerRef.current = window.setInterval(() => setElapsedTime(prev => prev + 1), 1000);
     setIsCalibrating(true);
     startCalibration();
-    setTimeout(() => setIsCalibrating(false), 3000);
+    // FORENSIC: skip the 3s "calibration" gate. Start reporting pulse from
+    // the first morphology-validated beat. CIVIL keeps the legacy 3s window.
+    if (FORENSIC_MODE) setIsCalibrating(false);
+    else setTimeout(() => setIsCalibrating(false), 3000);
   }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
 
   const handleStreamReady = useCallback((stream: MediaStream) => {
