@@ -446,7 +446,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.redBuf.push(lr);
     this.greenBuf.push(lg);
     this.blueBuf.push(lb);
-    this.updateBaselines(lr, lg, lb, false);
     if (this.redBuf.length >= 6) this.calculateACDC();
     const livenessInstant =
       lAbsorption >= absorptionMin &&
@@ -886,6 +885,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       perfusionIndex,
       rawRed: roi.rawRed,
       rawGreen: roi.rawGreen,
+      rawBlue: roi.rawBlue,
+      rgbStats: this.getRGBStats(),
       diagnostics: {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
