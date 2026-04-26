@@ -580,7 +580,9 @@ const Index = () => {
     stopProcessing();
     if (isCalibrating) forceCalibrationCompletion();
     const savedResults = resetVitalSigns();
-    if (savedResults || vitalSigns.spo2 > 0) {
+    // FORENSIC: never persist vital-signs records that include SpO2/BP/etc.
+    // when running in forensic mode — those numbers are only valid in CIVIL.
+    if (CIVIL_MODE && (savedResults || vitalSigns.spo2 > 0)) {
       const dataToSave = savedResults || vitalSigns;
       await saveMeasurement({
         heartRate,
@@ -1109,20 +1111,24 @@ const Index = () => {
         <div className="relative z-10 h-full">
           <div className="flex-1 h-full">
             <PPGSignalMeter 
-              value={heartbeatSignal}
-              quality={lastSignal?.quality || 0}
-              isFingerDetected={lastSignal?.fingerDetected || false}
+              value={forensicGate?.passAll ? heartbeatSignal : 0}
+              quality={forensicGate?.passAll ? (lastSignal?.quality || 0) : 0}
+              isFingerDetected={!!forensicGate?.passAll}
               onStartMeasurement={handleToggleMonitoring}
               onReset={handleReset}
               isMonitoring={isMonitoring}
-              arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
-              rawArrhythmiaData={lastArrhythmiaData.current}
+              arrhythmiaStatus={forensicGate?.passAll ? vitalSigns.arrhythmiaStatus : 'SIN ARRITMIAS|0'}
+              rawArrhythmiaData={forensicGate?.passAll ? lastArrhythmiaData.current : null}
               preserveResults={showResults}
-              diagnosticMessage={lastSignal?.diagnostics?.message}
-              isPeak={beatMarker === 1}
-              bpm={heartRate}
-              spo2={vitalSigns.spo2}
-              rrIntervals={rrIntervals}
+              diagnosticMessage={
+                forensicGate?.passAll
+                  ? (lastSignal?.diagnostics?.message || 'PULSO REAL DETECTADO')
+                  : (forensicGate?.livenessReason || 'SIN PULSO VALIDADO — TRIPLE GATE BLOQUEADO')
+              }
+              isPeak={!!forensicGate?.passAll && beatMarker === 1}
+              bpm={forensicGate?.passAll ? heartRate : 0}
+              spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
+              rrIntervals={forensicGate?.passAll ? rrIntervals : []}
             />
           </div>
 
@@ -1134,8 +1140,13 @@ const Index = () => {
           {(() => {
             const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
             const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
-            const pulsePresent = isMonitoring && !noOptical && heartRate > 0;
-            const pi = lastSignal?.perfusionIndex || 0;
+            // FORENSIC: pulse is "present" ONLY when the triple-gate passes.
+            // Optical contact alone is NOT enough — Gate 2 (spectral SNR) and
+            // Gate 3 (morphology) must also be open.
+            const triplePass = !!forensicGate?.passAll;
+            const pulsePresent = isMonitoring && triplePass && heartRate > 0;
+            const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
+            const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
             return (
               <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
                 {/* Forensic banner — always visible while monitoring */}
@@ -1155,14 +1166,12 @@ const Index = () => {
                         {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
                       </div>
                       <div className="text-[10px] text-slate-400 mt-0.5">
-                        {noOptical
-                          ? (lastSignal?.diagnostics?.message || 'SIN CONTACTO ÓPTICO')
-                          : (cs === 'OPTICAL_CONTACT_LOW_PERFUSION' ? 'CONTACTO — BAJA PERFUSIÓN' : 'CONTACTO ESTABLE')}
+                        {pulsePresent ? 'TRIPLE GATE VALIDADO' : blockedReason}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
-                        {heartRate > 0 ? Math.round(heartRate) : '--'}
+                        {pulsePresent ? Math.round(heartRate) : '--'}
                       </div>
                       <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
                     </div>
@@ -1247,6 +1256,7 @@ const Index = () => {
                         <div className="text-white text-2xl font-bold leading-none">{avgBpm}</div>
                         <div className="text-slate-500 text-[9px] mt-1 font-medium">BPM PROMEDIO</div>
                       </div>
+                      {CIVIL_MODE && (
                       <div className="bg-slate-900/80 rounded-xl p-3 text-center border border-slate-800/50">
                         <Activity className="w-4 h-4 text-cyan-400 mx-auto mb-1" />
                         <div className="text-white text-2xl font-bold leading-none">
@@ -1255,9 +1265,10 @@ const Index = () => {
                         </div>
                         <div className="text-slate-500 text-[9px] mt-1 font-medium">SpO₂</div>
                       </div>
+                      )}
                     </div>
 
-                    {vitalSigns.pressure?.systolic > 0 && (
+                    {CIVIL_MODE && vitalSigns.pressure?.systolic > 0 && (
                       <div className="bg-slate-900/80 rounded-xl p-3 border border-slate-800/50 flex items-center gap-3">
                         <Shield className="w-5 h-5 text-blue-400" />
                         <div className="flex-1">
@@ -1325,16 +1336,18 @@ const Index = () => {
                         <div className={`text-[10px] font-semibold mt-0.5 ${statusColor === 'emerald' ? 'text-emerald-400' : statusColor === 'yellow' ? 'text-yellow-400' : 'text-red-400'}`}>{statusText}</div>
                       </div>
                     </div>
-                    <button
-                      onClick={() => {
-                        analyzeVitals({ heartRate, vitalSigns, quality: lastSignal?.quality || 0 });
-                        setShowAIAnalysis(true);
-                      }}
-                      disabled={isAnalyzing}
-                      className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm transition-all disabled:opacity-50"
-                    >
-                      {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
-                    </button>
+                    {CIVIL_MODE && (
+                      <button
+                        onClick={() => {
+                          analyzeVitals({ heartRate, vitalSigns, quality: lastSignal?.quality || 0 });
+                          setShowAIAnalysis(true);
+                        }}
+                        disabled={isAnalyzing}
+                        className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm transition-all disabled:opacity-50"
+                      >
+                        {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

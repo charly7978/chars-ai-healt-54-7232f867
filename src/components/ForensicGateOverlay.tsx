@@ -51,7 +51,14 @@ const ForensicGateOverlay: React.FC<Props> = ({
   const peakHz = gate?.spectralPeakHz ?? 0;
   const conc = gate?.spectralConcentration ?? 0;
   const reason = gate?.livenessReason ?? "ESPERANDO SEÑAL";
-  const reasonShort = reason.length > 48 ? reason.slice(0, 47) + "…" : reason;
+  // Make the failing gate explicit so the operator never wonders why pulse
+  // is not being shown. (Gate 1 = optical, Gate 2 = spectral, Gate 3 = morph.)
+  let prefix = '';
+  if (g1 === false) prefix = 'G1 ÓPTICA · ';
+  else if (g2 === false) prefix = 'G2 ESPECTRAL · ';
+  else if (g3 === false) prefix = 'G3 MORFOLOGÍA · ';
+  const fullReason = prefix + reason;
+  const reasonShort = fullReason.length > 60 ? fullReason.slice(0, 59) + "…" : fullReason;
   const bpmEstimate = peakHz > 0 ? Math.round(peakHz * 60) : 0;
 
   return (
@@ -89,7 +96,7 @@ const ForensicGateOverlay: React.FC<Props> = ({
             : "bg-red-700/20 text-red-200")
         }
       >
-        {passAll ? "PULSO REAL DETECTADO" : "SIN PULSO VÁLIDO"}
+        {passAll ? "PULSO REAL DETECTADO" : "NO PUBLICAR VALORES — SIN PULSO VÁLIDO"}
       </div>
 
       <div className="space-y-0.5 px-0.5">
@@ -109,7 +116,7 @@ const ForensicGateOverlay: React.FC<Props> = ({
         </div>
         <div
           className="flex justify-between gap-2 pt-0.5 border-t border-zinc-700/60 mt-1"
-          title={reason}
+          title={fullReason}
         >
           <span className="text-zinc-400 shrink-0">Razón</span>
           <span className="text-zinc-200 truncate text-right">{reasonShort}</span>

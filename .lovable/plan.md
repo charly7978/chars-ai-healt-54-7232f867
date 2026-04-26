@@ -1,49 +1,83 @@
-## Goal
-1. **Add a live forensic debug overlay** showing Gate 1 / Gate 2 / Gate 3 status, the rejection reason, and live SNR / peak frequency / spectral concentration during measurement.
-2. **Harden the Gate-3 morphology feedback loop** so the morphology verdict always feeds back into `PPGSignalProcessor` frame-by-frame through a typed API, removing the current `(window as any).__ppgProcessor` indirection.
+Plan de corrección forense máxima
 
-## Bug found while reading the code
-- `PPGSignalProcessor.computeForensicGate()` already produces the full `forensicGate` payload (`gate1_optical`, `gate2_spectral`, `gate3_morphology`, `passAll`, `cardiacSNRdB`, `spectralPeakHz`, `spectralConcentration`, `livenessReason`) and stamps it on every emitted frame.
-- Gate 3 is set via `processor.setMorphologyGate(pass, reason)` — but `Index.tsx` calls it through `(window as any).__ppgProcessor?.setMorphologyGate?.()`, and **nothing in the codebase ever assigns `window.__ppgProcessor`**. So today Gate 3 stays at its initial `false` and `passAll` can never become true → the triple-gate is silently broken. This change fixes that.
+Objetivo: que la app no vuelva a dibujar onda cardíaca, BPM, SpO2 ni otros valores cuando la cámara está mirando aire, objetos, superficies, luz o ruido. No puedo prometer una certificación forense/regulatoria desde una cámara web móvil sin validación clínica formal, pero sí puedo endurecer el software para que en modo forense solo muestre pulso cuando exista evidencia PPG real y validada por los 3 gates.
 
-## Changes
+Cambios propuestos
 
-### 1. `src/hooks/useSignalProcessor.ts`
-- Add a memoised `setMorphologyGate(pass: boolean, reason?: string)` callback that delegates to `processorRef.current?.setMorphologyGate(...)`.
-- Return it from the hook. Fully typed, no globals.
+1. Cierre total de salida clínica en modo forense
+- El modo por defecto será solo detector de pulso PPG: estado de pulso, BPM validado y métricas técnicas.
+- Ocultar/eliminar del flujo forense SpO2, presión, glucosa, colesterol, análisis AI y resultados civiles que puedan sugerir medición clínica.
+- Evitar guardado de mediciones civiles si no hubo triple gate completo.
+- El canvas/monitor dejará de mostrar panel de SpO2 en modo forense; solo mostrará pulso/BPM/SQI técnico o `SIN PULSO VALIDADO`.
 
-### 2. `src/pages/Index.tsx`
-- Destructure `setMorphologyGate` from `useSignalProcessor()`.
-- Replace the `(window as any).__ppgProcessor?.setMorphologyGate?.(...)` block (around line 552–558) with a direct call: `setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE')`.
-- Track the latest `forensicGate` snapshot in a small ref + state tick so the overlay can re-render without thrashing the hot path (update on each `lastSignal` change, which already drives the existing effect).
-- Add a URL toggle: overlay is visible when `?forensic=1` is present, OR by default in FORENSIC_MODE. Disable with `?forensic=0`.
-- Mount the new `<ForensicGateOverlay />` when the toggle is on and `isMonitoring` is true.
+2. Triple gate como única autoridad de UI
+- Toda salida visible dependerá de `forensicGate.passAll`:
+  - Gate 1: firma óptica compatible con dedo/tejido bajo flash.
+  - Gate 2: potencia cardíaca real con SNR/frecuencia pico/concentración espectral.
+  - Gate 3: morfología de latidos válida y repetida.
+- Si cualquier gate falla: onda = 0, BPM = `--`, beats = 0, RR = vacío, no vitals, no análisis.
+- Ajustar el panel principal para usar `passAll`, no solo `heartRate > 0` ni `fingerDetected`.
 
-### 3. New component `src/components/ForensicGateOverlay.tsx`
-A compact, fixed-position panel (top-right, ~280 px wide, semi-transparent dark bg, monospace, pointer-events-none so it never blocks the camera view). Shows:
-- Three large status pills in a row: **G1 ÓPTICA**, **G2 ESPECTRAL**, **G3 MORFOLOGÍA** — green when pass, red when fail, grey when unknown/null.
-- One "VEREDICTO" line driven by `passAll`: green “PULSO REAL DETECTADO” / red “SIN PULSO VÁLIDO”.
-- Live numeric readouts (fixed-width rows):
-  - `SNR cardíaca: XX.X dB` (color: ≥6 green, 3–6 amber, <3 red)
-  - `Pico: X.XX Hz  (≈ XXX BPM)`  (BPM = `peakHz * 60`, hidden if `peakHz === 0`)
-  - `Concentración: XX %`
-  - `Razón: <livenessReason>` (truncated to 48 chars; full text in `title`)
-- Tiny legend footer: `G1 firma hemoglobina · G2 SNR ≥ 6 dB · G3 morfología 4/4`.
+3. Endurecer Gate 1 para “no medir aire” sin convertirlo en un bloqueo ciego de dedo
+- Mantener “vía libre” de cámara: la cámara sigue viendo y el overlay explica exactamente qué falta.
+- No se bloqueará la cámara; se bloqueará únicamente la publicación de números si no hay evidencia óptica.
+- Recalibrar Gate 1 para usar la ROI gruesa y fina correctamente, porque ahora algunos umbrales pueden ser demasiado rígidos o inconsistentes:
+  - firma rojo/hemoglobina sobre ROI válida, no píxeles saturados;
+  - cobertura mínima real;
+  - rechazo de superficie plana, reflejo, clipping y luz directa;
+  - razón específica en pantalla.
 
-Props: `{ gate: ForensicGateSnapshot | null; visible: boolean }`. Pure presentational, no side effects, no timers.
+4. Endurecer Gate 2 sin cálculos pesados por frame
+- Mantener el verificador Goertzel, pero evitar asignaciones innecesarias en cada evaluación.
+- Validar que el tiempo real del frame llegue correctamente al verificador.
+- Si SNR, pico cardíaco o concentración no son suficientes: no hay onda ni BPM.
 
-### 4. `src/types/signal.d.ts`
-- No schema change required (`forensicGate` already declared). Optionally export a `ForensicGateSnapshot` type alias of the existing inline shape so `ForensicGateOverlay` and `Index.tsx` share it.
+5. Corregir Gate 3 para morfología verdaderamente fisiológica
+- Gate 3 no dependerá de “algún pico” aislado.
+- Requerir latidos recientes con:
+  - morfología suficiente,
+  - fiduciales plausibles cuando estén disponibles,
+  - rise time dentro de rango humano,
+  - RR estable dentro de tolerancia,
+  - detector agreement suficiente.
+- El feedback `setMorphologyGate(...)` seguirá siendo tipado, sin `window` globals.
+- Si no hay 4 latidos válidos recientes: Gate 3 cerrado y razón clara.
 
-## Out of scope
-- No changes to gate thresholds, spectral verifier, or morphology rules.
-- No new tests (the morphology bug fix is verifiable directly via the overlay; can be added later if requested).
+6. El monitor no dibujará falsas ondas
+- Modificar `PPGSignalMeter` para que en modo forense no dibuje señal ni paneles vitales salvo si `forensicPass` es true.
+- Cuando no pase el triple gate, el canvas mostrará línea plana/estado bloqueado y razón, no una onda generada por ruido.
+- Remover visualmente SpO2 del canvas en modo forense.
 
-## Risk & verification
-- Removing the `window` global is strictly safer — today that call is a silent no-op.
-- After this change `passAll` will flip true only when there really are 4 morphology-valid beats with G1+G2 also passing — exactly the forensic spec.
-- Manual verification path:
-  1. No finger → G1 red, G2 red, G3 red, veredicto SIN PULSO VÁLIDO.
-  2. Finger placed → G1 turns green within ~5 frames.
-  3. After ~1.5 s of clean signal → G2 turns green, SNR shows ≥6 dB, peak in 0.7–3.5 Hz.
-  4. After 4 morphology-valid beats → G3 turns green, veredicto flips to PULSO REAL DETECTADO and the waveform/BPM start rendering.
+7. Overlay forense más contundente
+- Ampliar overlay para mostrar:
+  - G1/G2/G3 pass/fail,
+  - razón del gate cerrado,
+  - SNR dB,
+  - pico Hz/BPM,
+  - concentración,
+  - estado `PULSO VALIDADO` / `NO PUBLICAR VALORES`.
+- Mantener cadencia configurable para no afectar fluidez.
+
+8. Export forense solo con contexto de validez
+- El JSON/CSV exportará `pass_all` y razones por muestra.
+- Añadir resumen: porcentaje de muestras con triple gate completo, SNR promedio/máximo, BPM estimado solo en muestras válidas.
+- No exportar valores clínicos en modo forense.
+
+9. Verificación técnica
+- Ejecutar TypeScript/build/test disponibles.
+- Buscar que no queden usos de `window.__...` ni rutas de UI que muestren BPM/onda/vitales si `passAll=false`.
+- Revisar especialmente `Index.tsx`, `PPGSignalMeter.tsx`, `PPGSignalProcessor.ts`, `HeartBeatProcessor.ts` y tipos.
+
+Archivos principales a tocar
+- `src/pages/Index.tsx`
+- `src/components/PPGSignalMeter.tsx`
+- `src/components/ForensicGateOverlay.tsx`
+- `src/modules/signal-processing/PPGSignalProcessor.ts`
+- `src/modules/signal-processing/CardiacBandVerifier.ts`
+- `src/hooks/useHeartBeatProcessor.ts`
+- `src/types/signal.d.ts` / `src/types/beat.ts` si hace falta tipar el gate sin `any`
+
+Resultado esperado
+- Aire/mesa/pared/luz/ruido: pantalla muestra `SIN PULSO VALIDADO`, todos los números en `--`, onda plana, razón técnica visible.
+- Dedo/tejido sin pulsatilidad suficiente: contacto óptico puede aparecer, pero Gate 2/3 bloquean BPM/onda.
+- Pulso PPG real sostenido: los 3 gates pasan, se habilita onda/BPM y se registra/exporta como muestra válida.
