@@ -713,6 +713,13 @@ const Index = () => {
         spectralPeakHz: fg.spectralPeakHz,
         spectralConcentration: (fg as any).spectralConcentration ?? 0,
         livenessReason: fg.livenessReason,
+        opticalEvidence: (fg as any).opticalEvidence,
+        opticalReason: (fg as any).opticalReason,
+        opticalReasonText: (fg as any).opticalReasonText,
+        opticalMetrics: (fg as any).opticalMetrics,
+        publicationGate: (fg as any).publicationGate,
+        effectiveSampleRate: (fg as any).effectiveSampleRate,
+        bufferedSeconds: (fg as any).bufferedSeconds,
       };
       forensicGateRef.current = snap;
       const nowMs = performance.now();
