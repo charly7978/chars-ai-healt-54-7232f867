@@ -329,18 +329,32 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     }
 
     if (!this.opticalLive) {
-      // HARD FORENSIC ZERO. No buffers, no filter step, no source ranking.
-      // Reset transient detector counters so when liveness returns we start clean.
+      // FORENSIC SOFT-ZERO (no longer "hard"): we still keep the OD ring
+      // buffer filling so the moment liveness flips back the spectral
+      // verifier already has data to chew on. We DO publish rawValue=0,
+      // filteredValue=0 and gate1_optical=false so the UI never paints
+      // a waveform. Buffers are append-only here; baselines / source
+      // ranking / bandpass are NOT touched (they would learn noise).
       this.fingerDetected = false;
       this.fingerConfidenceCount = 0;
       this.stableContactCount = 0;
       this.contactState = 'NO_CONTACT';
       this.exportedContactState = 'NO_OPTICAL_CONTACT';
       this.signalQuality = 0;
-      // Reset spectral verifier so a fresh contact starts cleanly.
-      this.cardiacVerifier.reset();
       this.gate2Pass = false; this.gate2Reason = 'SIN SEÑAL';
       this.gate3Pass = false; this.gate3Reason = 'SIN SEÑAL';
+
+      // Append an OD sample so `bufferedSeconds` can climb to ≥1.0 s.
+      // OD uses the moving-average DC; we initialise it lazily here too.
+      const linRng = srgbToLinear(lr);
+      if (this.odDcMovingAvg <= 0) this.odDcMovingAvg = linRng;
+      else this.odDcMovingAvg += (linRng - this.odDcMovingAvg) * 0.02;
+      const odNG = -Math.log10((linRng + 1e-6) / Math.max(this.odDcMovingAvg, 1e-6));
+      this.timedSamples.push({ t: timestamp, od: odNG, r: lr, g: lg, b: lb });
+      while (this.timedSamples.length > 0 && (timestamp - this.timedSamples[0].t) > this.TIME_WINDOW_MS) {
+        this.timedSamples.shift();
+      }
+
       this.onSignalReady({
         timestamp,
         rawValue: 0,
