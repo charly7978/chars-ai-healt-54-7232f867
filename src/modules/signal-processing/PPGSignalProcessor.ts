@@ -982,6 +982,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.blueDC = 0; this.blueAC = 0;
     this.sourceRanker.reset();
     this.bandpassFilter.reset();
+    // Forensic: limpiar buffers temporales y estado de publicación.
+    this.timedSamples.length = 0;
+    this.piWindow.length = 0;
+    this.piWindowTimes.length = 0;
+    this.odDcMovingAvg = 0;
+    this.publicationGate = false;
+    this.lastOpticalEvidence = null;
   }
 
   reset(): void {
