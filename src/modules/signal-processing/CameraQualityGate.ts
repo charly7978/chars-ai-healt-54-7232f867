@@ -117,6 +117,8 @@ export class CameraQualityGate {
   private decisionLog: CameraGateDecision[] = [];
   /** When true, every decision is also console.debug'd. Off by default. */
   private verbose = false;
+  private lastVerboseLogAt = 0;
+  private verboseIntervalMs = 1000;
 
   setVerbose(on: boolean): void { this.verbose = on; }
 
@@ -164,7 +166,8 @@ export class CameraQualityGate {
       if (this.decisionLog.length > CameraQualityGate.DECISION_LOG_CAPACITY) {
         this.decisionLog.splice(0, this.decisionLog.length - CameraQualityGate.DECISION_LOG_CAPACITY);
       }
-      if (this.verbose) {
+      if (this.verbose && (reinitRecommended || nowMs - this.lastVerboseLogAt >= this.verboseIntervalMs)) {
+        this.lastVerboseLogAt = nowMs;
         // eslint-disable-next-line no-console
         console.debug('[CameraQualityGate]', path, decision);
       }
