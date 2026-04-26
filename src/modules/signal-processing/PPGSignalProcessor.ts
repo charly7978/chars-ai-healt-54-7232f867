@@ -488,6 +488,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           pulsatilityValue: 0,
         },
       });
+      this.logRoiTelemetry(timestamp, roi, false, `BUSCANDO DEDO (${this.exportedContactState})`);
       this.processingTimeMs = performance.now() - t0;
       return;
     }
@@ -517,6 +518,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           pulsatilityValue: 0,
         },
       });
+      this.logRoiTelemetry(timestamp, roi, false, 'MOV ALTO');
       this.processingTimeMs = performance.now() - t0;
       return;
     }
