@@ -1256,6 +1256,7 @@ const Index = () => {
                         <div className="text-white text-2xl font-bold leading-none">{avgBpm}</div>
                         <div className="text-slate-500 text-[9px] mt-1 font-medium">BPM PROMEDIO</div>
                       </div>
+                      {CIVIL_MODE && (
                       <div className="bg-slate-900/80 rounded-xl p-3 text-center border border-slate-800/50">
                         <Activity className="w-4 h-4 text-cyan-400 mx-auto mb-1" />
                         <div className="text-white text-2xl font-bold leading-none">
@@ -1264,9 +1265,10 @@ const Index = () => {
                         </div>
                         <div className="text-slate-500 text-[9px] mt-1 font-medium">SpO₂</div>
                       </div>
+                      )}
                     </div>
 
-                    {vitalSigns.pressure?.systolic > 0 && (
+                    {CIVIL_MODE && vitalSigns.pressure?.systolic > 0 && (
                       <div className="bg-slate-900/80 rounded-xl p-3 border border-slate-800/50 flex items-center gap-3">
                         <Shield className="w-5 h-5 text-blue-400" />
                         <div className="flex-1">
