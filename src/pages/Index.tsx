@@ -756,60 +756,15 @@ const Index = () => {
     lastFrameAtRef.current = performance.now();
     softRestartCountRef.current = 0;
     lastSoftRestartAtRef.current = 0;
-    if (watchdogTimerRef.current !== null) {
-      window.clearInterval(watchdogTimerRef.current);
+    // Event-driven dead-stream detection. We no longer poll with
+    // setInterval — instead we listen for `ended` and `mute` on the live
+    // video track. rVFC drives in-loop stall recovery; if the track dies
+    // outright (user revokes permission, OS yanks the camera, hardware
+    // error), the platform fires these events and we bounce the camera.
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
     }
-    // Stall threshold: if no successful captureOneFrame in the last
-    // STALL_MS window, soft-restart the loop. We DO NOT touch the camera
-    // unless the underlying track is dead.
-    const STALL_MS = 1500;
-    const SOFT_RESTART_COOLDOWN_MS = 3000;
-    watchdogTimerRef.current = window.setInterval(() => {
-      if (!isProcessingRef.current) return;
-      const now = performance.now();
-      const sinceLast = now - (lastFrameAtRef.current || now);
-      if (sinceLast < STALL_MS) return;
-
-      // Is the stream actually dead? Only then re-open the camera.
-      // Pull the live stream from the video element so we never read a
-      // stale React state captured in closure.
-      const videoEl = cameraRef.current?.getVideoElement();
-      const stream = (videoEl?.srcObject as MediaStream | null) ?? null;
-      const tracks = stream?.getVideoTracks() ?? [];
-      const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
-      const cameraStatus = cameraRef.current?.getStreamStatus();
-      const inCameraWarmup = now - monitoringStartedAtRef.current < 10000;
-      if (!hasLiveTrack && (inCameraWarmup || cameraStatus?.starting || cameraStatus?.stoppingPending)) {
-        lastFrameAtRef.current = now;
-        return;
-      }
-      if (!stream || !hasLiveTrack) {
-        console.warn('🎥 Watchdog: stream dead — bouncing camera (last frame', sinceLast.toFixed(0), 'ms ago)');
-        setIsCameraOn(false);
-        window.setTimeout(() => { if (monitoringIntentRef.current && isProcessingRef.current) setIsCameraOn(true); }, 2800);
-        lastFrameAtRef.current = now;
-        return;
-      }
-
-      // Stream is alive but the loop stalled (tab backgrounded, rVFC chain
-      // dropped, motion gate over-aggressive). Soft-restart with cooldown.
-      if (now - lastSoftRestartAtRef.current < SOFT_RESTART_COOLDOWN_MS) return;
-      lastSoftRestartAtRef.current = now;
-      softRestartCountRef.current++;
-      console.warn('🔄 Watchdog: frame loop stalled', sinceLast.toFixed(0), 'ms — soft restart #', softRestartCountRef.current);
-      isProcessingRef.current = false;
-      if (frameLoopRef.current) {
-        cancelAnimationFrame(frameLoopRef.current);
-        frameLoopRef.current = null;
-      }
-      // Tiny defer so the in-flight rVFC tick finishes before we re-arm.
-      window.setTimeout(() => {
-        if (cameraRef.current?.getVideoElement()) {
-          startFrameLoop();
-          lastFrameAtRef.current = performance.now();
-        }
-      }, 50);
-    }, 500);
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
