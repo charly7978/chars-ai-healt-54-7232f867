@@ -1,5 +1,12 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import type { SampleRateEstimator, SampleRateEstimate } from "@/modules/signal-processing/timing/SampleRateEstimator";
+import {
+  applySnapshot,
+  createInitialState,
+  deriveStatus,
+  type SRDiagState,
+  type SREvent,
+} from "./sr-diagnostics/srDiagnosticsState";
 
 /**
  * Compact diagnostics panel for the SampleRateEstimator.
@@ -7,73 +14,50 @@ import type { SampleRateEstimator, SampleRateEstimate } from "@/modules/signal-p
  * - Shows: SR (Hz), valid flag, stall state, last trusted SR, jitter (CoV),
  *   median Δt, samples observed, and a recovery bar that fills as plausible
  *   deltas come back after a stall.
+ * - Emits an event log entry whenever the state machine transitions across
+ *   stall/recovery boundaries so devs can audit camera silence in real time.
  */
 interface Props {
   estimator: SampleRateEstimator;
   recoveryFrames?: number; // expected, used to render the bar (defaults 6)
+  maxEvents?: number;
   hidden?: boolean;
 }
 
-export const SRDiagnostics = ({ estimator, recoveryFrames = 6, hidden }: Props) => {
+export const SRDiagnostics = ({ estimator, recoveryFrames = 6, maxEvents = 12, hidden }: Props) => {
   const [snap, setSnap] = useState<SampleRateEstimate>(() => estimator.read());
-  // Track recovery: count consecutive non-stalled good reads after a stall.
-  const wasStalledRef = useRef(false);
-  const recoveryRef = useRef(0);
-  const lastTrustedSRRef = useRef(0);
+  const [diag, setDiag] = useState<SRDiagState>(() => createInitialState());
 
   useEffect(() => {
     const id = window.setInterval(() => {
       const s = estimator.read();
-
-      // Maintain recovery counter
-      if (s.stalled) {
-        wasStalledRef.current = true;
-        recoveryRef.current = 0;
-      } else if (wasStalledRef.current) {
-        if (s.valid && !s.lastRejected) {
-          recoveryRef.current = Math.min(recoveryFrames, recoveryRef.current + 1);
-          if (recoveryRef.current >= recoveryFrames) {
-            wasStalledRef.current = false;
-          }
-        }
-      }
-
-      // Track the last trusted SR (frozen value during stall)
-      if (s.valid && !s.stalled) lastTrustedSRRef.current = s.sampleRate;
-
       setSnap(s);
+      setDiag(prev => applySnapshot(prev, s, Date.now(), { recoveryFrames, maxEvents }));
     }, 200);
     return () => window.clearInterval(id);
-  }, [estimator, recoveryFrames]);
+  }, [estimator, recoveryFrames, maxEvents]);
 
   if (hidden) return null;
 
-  const recovering = wasStalledRef.current && !snap.stalled;
-  const statusColor = snap.stalled
-    ? "bg-destructive text-destructive-foreground"
-    : recovering
-      ? "bg-yellow-500 text-black"
-      : snap.valid
-        ? "bg-emerald-500 text-black"
-        : "bg-muted text-muted-foreground";
-
-  const statusLabel = snap.stalled
-    ? "STALLED"
-    : recovering
-      ? "RECOVERING"
-      : snap.valid
-        ? "LOCKED"
-        : "WARMING";
+  const status = deriveStatus(diag, snap);
+  const statusColor =
+    status === "STALLED"
+      ? "bg-destructive text-destructive-foreground"
+      : status === "RECOVERING"
+        ? "bg-yellow-500 text-black"
+        : status === "LOCKED"
+          ? "bg-emerald-500 text-black"
+          : "bg-muted text-muted-foreground";
 
   return (
     <div
       className="fixed bottom-2 right-2 z-40 rounded-md border border-border bg-card/95 backdrop-blur-md text-card-foreground shadow-lg px-2.5 py-2 text-[10px] leading-tight"
-      style={{ minWidth: 180 }}
+      style={{ minWidth: 200, maxWidth: 240 }}
     >
       <div className="flex items-center justify-between mb-1.5">
         <span className="font-semibold">SR Diagnostics</span>
         <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${statusColor}`}>
-          {statusLabel}
+          {status}
         </span>
       </div>
 
@@ -83,7 +67,7 @@ export const SRDiagnostics = ({ estimator, recoveryFrames = 6, hidden }: Props) 
 
         <span className="text-muted-foreground">Last trusted</span>
         <span className="text-right">
-          {lastTrustedSRRef.current > 0 ? `${lastTrustedSRRef.current.toFixed(2)} Hz` : "—"}
+          {diag.lastTrustedSR > 0 ? `${diag.lastTrustedSR.toFixed(2)} Hz` : "—"}
         </span>
 
         <span className="text-muted-foreground">Median Δt</span>
@@ -97,24 +81,68 @@ export const SRDiagnostics = ({ estimator, recoveryFrames = 6, hidden }: Props) 
       </div>
 
       {/* Recovery progress bar (visible while recovering OR fully stalled) */}
-      {(snap.stalled || recovering) && (
+      {(snap.stalled || diag.wasStalled) && (
         <div className="mt-1.5">
           <div className="flex items-center justify-between mb-0.5">
             <span className="text-muted-foreground">Recovery</span>
             <span className="tabular-nums text-muted-foreground">
-              {snap.stalled ? "0" : recoveryRef.current}/{recoveryFrames}
+              {snap.stalled ? 0 : diag.recoveryProgress}/{recoveryFrames}
             </span>
           </div>
           <div className="h-1.5 rounded bg-muted overflow-hidden">
             <div
               className={`h-full transition-all ${snap.stalled ? "bg-destructive" : "bg-yellow-500"}`}
               style={{
-                width: `${snap.stalled ? 0 : (recoveryRef.current / recoveryFrames) * 100}%`,
+                width: `${snap.stalled ? 0 : (diag.recoveryProgress / recoveryFrames) * 100}%`,
               }}
             />
           </div>
         </div>
       )}
+
+      {/* Event log */}
+      {diag.events.length > 0 && (
+        <div className="mt-1.5 border-t border-border pt-1">
+          <div className="text-muted-foreground mb-0.5">Events</div>
+          <ul className="space-y-0.5 max-h-24 overflow-y-auto pr-1">
+            {diag.events.slice().reverse().map((ev, i) => (
+              <li key={`${ev.at}-${i}`} className="flex items-baseline gap-1">
+                <span className="tabular-nums text-muted-foreground shrink-0">
+                  {formatTime(ev.at)}
+                </span>
+                <span className={eventColor(ev)}>{eventLabel(ev)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
+
+function formatTime(ms: number): string {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function eventLabel(ev: SREvent): string {
+  const sr = ev.lastTrustedSR > 0 ? `${ev.lastTrustedSR.toFixed(1)}Hz` : "—";
+  switch (ev.kind) {
+    case "stall_detected": return `STALL · last ${sr}`;
+    case "recovery_started": return `Recovering · last ${sr}`;
+    case "recovery_completed": return `Recovered · ${ev.recoveryFrames}f · ${sr}`;
+    case "locked": return `LOCKED · ${sr}`;
+  }
+}
+
+function eventColor(ev: SREvent): string {
+  switch (ev.kind) {
+    case "stall_detected": return "text-destructive font-semibold";
+    case "recovery_started": return "text-yellow-500";
+    case "recovery_completed": return "text-emerald-500 font-semibold";
+    case "locked": return "text-emerald-500";
+  }
+}
