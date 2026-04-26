@@ -867,6 +867,8 @@ export class AdaptiveROIMask {
       prepassSuccessRate: this.prepassSuccessRate,
       textureEntropy,
       coverageContiguity,
+      maskIoU,
+      trackerSigma: this.trackerSigmaPx,
     };
   }
 
@@ -890,5 +892,7 @@ export class AdaptiveROIMask {
     this.prepassRecentFilled = 0;
     this.prepassSuccessRate = 0;
     this.lastBox = { cx: 0, cy: 0, sizePx: 0, mass: 0 };
+    this.trackerResidualEMA = 0;
+    this.trackerSigmaPx = 0;
   }
 }
