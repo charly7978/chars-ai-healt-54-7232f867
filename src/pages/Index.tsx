@@ -617,12 +617,8 @@ const Index = () => {
     console.log('🛑 Finalizando medición...');
     playCompletionSound();
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
-    monitoringIntentRef.current = false;
-    stopFrameLoop();
-    if (trackListenersCleanupRef.current) {
-      trackListenersCleanupRef.current();
-      trackListenersCleanupRef.current = null;
-    }
+    ppgCamera.stop();
+    motionClassifierRef.current.stop();
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
       measurementTimerRef.current = null;
@@ -640,8 +636,6 @@ const Index = () => {
         signalQuality: lastSignal?.quality || 0
       });
     }
-    setIsCameraOn(false);
-    setCameraStream(null);
     setIsMonitoring(false);
     setIsCalibrating(false);
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
@@ -657,16 +651,12 @@ const Index = () => {
     setElapsedTime(0);
     setCalibrationProgress(0);
     console.log('✅ Medición finalizada y guardada');
-  }, [isMonitoring, isCalibrating, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
+  }, [isMonitoring, isCalibrating, ppgCamera, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
 
   const handleReset = useCallback(() => {
     console.log('🔄 Reset completo...');
-    monitoringIntentRef.current = false;
-    stopFrameLoop();
-    if (trackListenersCleanupRef.current) {
-      trackListenersCleanupRef.current();
-      trackListenersCleanupRef.current = null;
-    }
+    ppgCamera.stop();
+    motionClassifierRef.current.stop();
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
       measurementTimerRef.current = null;
@@ -676,8 +666,6 @@ const Index = () => {
     resetHeartBeat();
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
-    setIsCameraOn(false);
-    setCameraStream(null);
     setIsMonitoring(false);
     setShowResults(false);
     setMeasurementSummary(null);
@@ -709,7 +697,7 @@ const Index = () => {
     setCalibrationProgress(0);
     arrhythmiaDetectedRef.current = false;
     console.log('✅ Reset completado');
-  }, [stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
+  }, [ppgCamera, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
 
   const vitalSignsFrameCounter = useRef<number>(0);
   const unstableFrameCounter = useRef<number>(0);
