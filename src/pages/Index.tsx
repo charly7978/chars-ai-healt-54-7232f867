@@ -740,7 +740,7 @@ const Index = () => {
       if (sinceLast < STALL_MS) return;
 
       // Is the stream actually dead? Only then re-open the camera.
-      const stream = streamRef.current;
+      const stream = cameraStream;
       const tracks = stream?.getVideoTracks() ?? [];
       const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
       if (!stream || !hasLiveTrack) {
