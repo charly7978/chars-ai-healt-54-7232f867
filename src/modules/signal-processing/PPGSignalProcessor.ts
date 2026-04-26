@@ -6,6 +6,7 @@ import { PressureProxyEstimator, type PressureState, type PressureEstimate } fro
 import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
+import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
 
 // Extended contact states
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
@@ -64,6 +65,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private sourceRanker = new SignalSourceRanker();
   // Forensic Gate #2 — cardiac-band SNR verifier on the raw red channel.
   private cardiacVerifier = new CardiacBandVerifier();
+  // Forensic Optical Evidence Gate — physical-only acceptance/rejection
+  // (clipping, exposure, hemoglobin signature, texture, AC/DC, perfusion).
+  // Independiente de morfología, no bloquea por "forma de dedo".
+  private opticalGate = new OpticalEvidenceGate();
+  private lastOpticalEvidence: OpticalEvidence | null = null;
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
@@ -75,6 +81,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private vpgBuf = new RingBuffer(300);
   private apgBuf = new RingBuffer(300);
   private frameTimeBuf = new RingBuffer(120);
+
+  // ── BUFFER CIRCULAR 10s POR TIMESTAMPS REALES ────────────────────────
+  // Cada muestra lleva su tiempo absoluto (frameTimestamp). En cada frame
+  // se desalojan las muestras con edad > TIME_WINDOW_MS. Sample rate
+  // efectivo se mide del span real, NO de un nominal 30 fps.
+  private readonly TIME_WINDOW_MS = 10_000;
+  private timedSamples: { t: number; od: number; r: number; g: number; b: number }[] = [];
+  // PI window ~500 ms para detectar despegue de dedo (PERFUSION_DROP)
+  private piWindow: number[] = [];
+  private readonly PI_WINDOW_MS = 500;
+  private piWindowTimes: number[] = [];
+
+  // OD baseline (DC móvil para conversión sRGB→OD)
+  private odDcMovingAvg = 0;
+
+  // Triple-gate publication state (último resultado autorizado)
+  private publicationGate = false;
 
   // --- AC/DC ---
   private redDC = 0; private redAC = 0;
@@ -131,6 +154,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   public setMorphologyGate(pass: boolean, reason?: string): void {
     this.gate3Pass = pass;
     if (reason) this.gate3Reason = reason;
+  }
+
+  /** Permite ajustar umbrales del OpticalEvidenceGate desde UI/auditoría. */
+  public setOpticalGateConfig(patch: Partial<OpticalGateConfig>): void {
+    this.opticalGate.setConfig(patch);
+  }
+
+  public getOpticalGateConfig(): OpticalGateConfig {
+    return this.opticalGate.getConfig();
+  }
+
+  public getLastOpticalEvidence(): OpticalEvidence | null {
+    return this.lastOpticalEvidence;
+  }
+
+  public isPublicationGateOpen(): boolean {
+    return this.publicationGate;
   }
 
   // --- Smoothed metrics (EWMA) ---
