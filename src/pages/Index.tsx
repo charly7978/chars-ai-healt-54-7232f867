@@ -1171,16 +1171,8 @@ const Index = () => {
     // ════════════════════════════════════════════════════════════════
     //  ALIMENTACIÓN INCONDICIONAL DEL DETECTOR
     //  El detector procesa SIEMPRE (analiza, aprende morfología, abre gate3)
-    //  independientemente del estado de publicación. Esto rompe el deadlock
-    //  donde morphology necesita morphology para abrirse.
+    //  independientemente del estado de publicación.
     // ════════════════════════════════════════════════════════════════
-    console.log('💓 Procesando heartbeat:', {
-      signalValue,
-      contactState,
-      quality: lastSignal.quality,
-      timestamp: lastSignal.timestamp
-    });
-    
     const heartBeatResult = processHeartBeat(
       signalValue,
       contactState,
@@ -1201,14 +1193,6 @@ const Index = () => {
       }
     );
     
-    console.log('💓 HeartBeat result:', {
-      bpm: heartBeatResult.bpm,
-      bpmConfidence: heartBeatResult.bpmConfidence,
-      isPeak: heartBeatResult.isPeak,
-      beatSQI: heartBeatResult.beatSQI,
-      morphologyGatePass: (heartBeatResult as any).morphologyGatePass
-    });
-
     // Cerrar gate3_morphology con la verdad del detector — SIEMPRE que el
     // detector haya corrido. Esto es lo que permite que forensicPass pueda
     // llegar a true en el próximo frame.
