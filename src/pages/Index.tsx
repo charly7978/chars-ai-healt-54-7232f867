@@ -445,11 +445,13 @@ const Index = () => {
   useEffect(() => {
     if (!canvasRef.current) {
       canvasRef.current = document.createElement('canvas');
-      canvasRef.current.width = 320;
-      canvasRef.current.height = 240;
-      ctxRef.current = canvasRef.current.getContext('2d', { 
+      // Initial size; adapted to native video size at first frame.
+      canvasRef.current.width = 480;
+      canvasRef.current.height = 360;
+      ctxRef.current = canvasRef.current.getContext('2d', {
         willReadFrequently: true,
-        alpha: false 
+        alpha: false,
+        desynchronized: true,
       });
     }
   }, []);
@@ -527,30 +529,57 @@ const Index = () => {
       return;
     }
 
-    const captureOneFrame = (nowOrMetadata?: number | any) => {
+    // Forensic capture loop — single hot path. No per-frame logging.
+    //
+    // Frame timing strategy (in priority order):
+    //   1. metadata.mediaTime (s) → ms, the camera's authoritative
+    //      capture clock; immune to main-thread jank.
+    //   2. metadata.presentationTime (ms) — DOMHighResTimeStamp at the
+    //      moment the frame was made available to the page.
+    //   3. performance.now() fallback for browsers without rVFC.
+    //
+    // Capture canvas is sized to (native_w / 2, native_h / 2) on first
+    // frame, capped at 640×480 pixels. This keeps the ROI mask working
+    // on a high-fidelity downscale without paying full-frame imageData
+    // cost on mobile GPUs.
+    let canvasSized = false;
+    let lastErrorLogAt = 0;
+
+    const sizeCanvasToVideo = (video: HTMLVideoElement) => {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+      // Aim for ~2× the legacy 320×240 (= 4× the pixel count) but cap
+      // at 640×480 so getImageData stays under ~1.2 ms on mid-range phones.
+      const targetMaxW = 640;
+      const scale = Math.min(1, targetMaxW / vw);
+      const w = Math.max(320, Math.round(vw * scale));
+      const h = Math.max(240, Math.round(vh * scale));
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      canvasSized = true;
+    };
+
+    const captureOneFrame = (frameTimestamp: number) => {
       if (!isProcessingRef.current) return;
       const video = cameraRef.current?.getVideoElement();
       if (!video || video.readyState < 2 || video.videoWidth === 0) {
-        frameLoopRef.current = requestAnimationFrame(() => captureOneFrame());
+        frameLoopRef.current = requestAnimationFrame(() =>
+          captureOneFrame(performance.now())
+        );
         return;
       }
-
-      let frameTimestamp: number | undefined;
-      if (typeof nowOrMetadata === 'object' && nowOrMetadata?.mediaTime != null) {
-        frameTimestamp = performance.now();
-      } else if (typeof nowOrMetadata === 'number') {
-        frameTimestamp = nowOrMetadata;
-      } else {
-        frameTimestamp = performance.now();
-      }
+      if (!canvasSized) sizeCanvasToVideo(video);
 
       try {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        console.log('📷 Frame capturado:', canvas.width, 'x', canvas.height, 'timestamp:', frameTimestamp);
         processFrame(imageData, frameTimestamp);
       } catch (e) {
-        console.error('❌ Error procesando frame:', e);
+        const now = performance.now();
+        if (now - lastErrorLogAt > 2000) {
+          lastErrorLogAt = now;
+          console.error('Frame capture error:', e);
+        }
       }
       scheduleNext(video);
     };
@@ -558,13 +587,22 @@ const Index = () => {
     const scheduleNext = (video: HTMLVideoElement) => {
       if (!isProcessingRef.current) return;
       if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback((now: number, metadata: any) => captureOneFrame(metadata?.presentationTime ?? now));
+        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+          // mediaTime is in seconds (camera capture clock); presentationTime
+          // is in DOMHighResTimeStamp ms; performance.now() is fallback.
+          const ts =
+            (typeof metadata?.mediaTime === 'number' ? metadata.mediaTime * 1000 : null)
+            ?? (typeof metadata?.presentationTime === 'number' ? metadata.presentationTime : null)
+            ?? performance.now();
+          captureOneFrame(ts);
+        });
       } else {
-        frameLoopRef.current = requestAnimationFrame(() => captureOneFrame(performance.now()));
+        frameLoopRef.current = requestAnimationFrame(() =>
+          captureOneFrame(performance.now())
+        );
       }
     };
-    
-    console.log('🎬 Capture started (rVFC with real timestamps)');
+
     captureOneFrame(performance.now());
   }, [processFrame]);
 
