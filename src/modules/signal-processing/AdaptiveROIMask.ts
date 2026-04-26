@@ -686,6 +686,36 @@ export class AdaptiveROIMask {
       const smR = this.tileMeanR[ti];
       const smG = this.tileMeanG[ti];
       const smB = this.tileMeanB[ti];
+      // V9 — Welford incremental por canal R y G (ventana ~60 muestras).
+      // Cuando el contador llega al máximo, decaemos M2 multiplicando por
+      // (n−1)/n para mantener una varianza "deslizante" sin re-alocar.
+      {
+        let n = this.tileNObs[ti];
+        if (n < this.TILE_PI_WINDOW) {
+          n++;
+          this.tileNObs[ti] = n;
+        } else {
+          // Ventana llena → decay suave de M2 (forgetting factor exponencial
+          // equivalente a una EWMA de varianza con tau ≈ window).
+          this.tileM2R_W[ti] *= (n - 1) / n;
+          this.tileM2G_W[ti] *= (n - 1) / n;
+        }
+        const dR = meanR - this.tileMeanR_W[ti];
+        this.tileMeanR_W[ti] += dR / n;
+        this.tileM2R_W[ti] += dR * (meanR - this.tileMeanR_W[ti]);
+        const dG = meanG - this.tileMeanG_W[ti];
+        this.tileMeanG_W[ti] += dG / n;
+        this.tileM2G_W[ti] += dG * (meanG - this.tileMeanG_W[ti]);
+        if (n >= 8) {
+          const muR_W = this.tileMeanR_W[ti];
+          const muG_W = this.tileMeanG_W[ti];
+          this.tilePI_R[ti] = muR_W > 1 ? Math.sqrt(this.tileM2R_W[ti] / n) / muR_W : 0;
+          this.tilePI_G[ti] = muG_W > 1 ? Math.sqrt(this.tileM2G_W[ti] / n) / muG_W : 0;
+        } else {
+          this.tilePI_R[ti] = 0;
+          this.tilePI_G[ti] = 0;
+        }
+      }
       const intensity = smR + smG + smB;
       const redDominance = smR - (smG + smB) / 2;
       const rgRatio = smG > 1 ? smR / smG : 0;
