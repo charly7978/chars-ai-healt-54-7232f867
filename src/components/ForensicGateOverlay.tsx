@@ -116,7 +116,7 @@ const ForensicGateOverlay: React.FC<Props> = ({
         </div>
         <div
           className="flex justify-between gap-2 pt-0.5 border-t border-zinc-700/60 mt-1"
-          title={reason}
+          title={fullReason}
         >
           <span className="text-zinc-400 shrink-0">Razón</span>
           <span className="text-zinc-200 truncate text-right">{reasonShort}</span>
