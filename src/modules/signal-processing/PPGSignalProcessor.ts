@@ -404,12 +404,28 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const lAbsorption = (lg + lb) > 1 ? lr / (lg + lb) : 0;
     const lRedDom = lr - (lg + lb) / 2;
     const lTotalI = lr + lg + lb;
-    // Spatial texture from ROI (1 - spatialUniformity) acts as the std/mean
-    // proxy: a real fingertip pressed on the lens has micro-texture (>0.008
-    // and <0.06); a wall/air/glare is either perfectly flat (~0) or wildly
-    // non-uniform (>0.06). spatialUniformity in [0..1] inverts to texture.
-    const textureProxy = Math.max(0, 1 - roi.spatialUniformity);
-    const textureOk = textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX;
+    // V8: Preferimos entropía Shannon real del canal G (banda piel real
+    // 1.6–3.9 bits, Wang 2020). El proxy legacy (1-spatialUniformity) queda
+    // como fallback únicamente cuando entropy=0 (ROI demasiado pequeña).
+    const entropy = roi.textureEntropy;
+    const useEntropy = entropy > 0;
+    const textureProxy = useEntropy ? entropy : Math.max(0, 1 - roi.spatialUniformity);
+    const textureOk = useEntropy
+      ? entropy >= 1.6 && entropy <= 3.9
+      : (textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX);
+
+    // V8: Liveness adaptativo por fototipo (Fitzpatrick V-VI). Cuando los
+    // tres gates espaciales fuertes pasan (entropy ∈ [2.0, 3.5] Y contiguity
+    // ≥ 0.75 Y maskIoU ≥ 0.85), permitimos rebajar los umbrales de firma
+    // hemoglobina porque pieles oscuras tienen menor red dominance pero
+    // perfusión real. Pared/fondo no abren esta vía: fallan entropy O
+    // contiguity.
+    const rescueGates =
+      useEntropy && entropy >= 2.0 && entropy <= 3.5 &&
+      roi.coverageContiguity >= 0.75 &&
+      roi.maskIoU >= 0.85;
+    const absorptionMin = rescueGates ? 1.18 : LIVENESS.ABSORPTION_MIN;
+    const redOverGbMin = rescueGates ? 10 : LIVENESS.RED_OVER_GB_MIN;
     // Snapshot raw liveness telemetry for the forensic overlay.
     this.g1RawR = lr; this.g1RawG = lg; this.g1RawB = lb;
     this.g1TotalI = lTotalI;
@@ -418,8 +434,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.g1Texture = textureProxy;
     this.g1Coverage = roi.coverageRatio;
     const livenessInstant =
-      lAbsorption >= LIVENESS.ABSORPTION_MIN &&
-      lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
+      lAbsorption >= absorptionMin &&
+      lRedDom >= redOverGbMin &&
       lTotalI >= LIVENESS.TOTAL_I_MIN &&
       lTotalI <= LIVENESS.TOTAL_I_MAX &&
       roi.coverageRatio >= LIVENESS.COVERAGE_MIN &&
