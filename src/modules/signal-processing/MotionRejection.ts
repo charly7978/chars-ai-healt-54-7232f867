@@ -91,6 +91,16 @@ export interface MotionRejectionConfig {
   autoTuneSigmaSaturate: number;     // px std-dev where blend reaches 1.0
   upgradeConfirmFramesHigh: number;  // ceiling under high variability
   weightSmoothingAlphaLow: number;   // EMA alpha under high variability (slower → smaller)
+  /**
+   * V9.3 — IMU jitter input.
+   * The auto-tuner also estimates σ(imuScore) over the same window. The
+   * final blend factor is `max(t_sigma, t_imu)` so whichever channel is
+   * jitterier dominates the tuning — device shake without optical drift
+   * (e.g. handheld at arm's length) still slows the EMA and lengthens the
+   * confirmation streak.
+   */
+  autoTuneImuTrigger: number;        // imuScore std-dev that starts blending
+  autoTuneImuSaturate: number;       // imuScore std-dev where blend reaches 1.0
 }
 
 const DEFAULT_CONFIG: MotionRejectionConfig = {
@@ -109,6 +119,8 @@ const DEFAULT_CONFIG: MotionRejectionConfig = {
   autoTuneSigmaSaturate: 4.0,
   upgradeConfirmFramesHigh: 8,
   weightSmoothingAlphaLow: 0.10,
+  autoTuneImuTrigger: 0.15,
+  autoTuneImuSaturate: 0.80,
 };
 
 export class MotionRejection {
@@ -122,6 +134,10 @@ export class MotionRejection {
   private sigmaBuf = new Float64Array(64);
   private sigmaIdx = 0;
   private sigmaCount = 0;
+  // V9.3 — parallel buffer of recent imuScore observations.
+  private imuBuf = new Float64Array(64);
+  private imuIdx = 0;
+  private imuCount = 0;
   // Effective (post-tuning) values used by the current frame; exposed for
   // telemetry so the operator can see what the auto-tuner picked.
   private effUpgradeFrames = DEFAULT_CONFIG.upgradeConfirmFrames;
@@ -137,6 +153,11 @@ export class MotionRejection {
       this.sigmaIdx = 0;
       this.sigmaCount = 0;
     }
+    if (this.imuBuf.length !== w) {
+      this.imuBuf = new Float64Array(w);
+      this.imuIdx = 0;
+      this.imuCount = 0;
+    }
   }
 
   getConfig(): MotionRejectionConfig {
@@ -144,25 +165,31 @@ export class MotionRejection {
   }
 
   /** Telemetry — what the auto-tuner is currently using. */
-  getTuning(): { upgradeConfirmFrames: number; weightSmoothingAlpha: number; sigmaStd: number } {
+  getTuning(): { upgradeConfirmFrames: number; weightSmoothingAlpha: number; sigmaStd: number; imuStd: number } {
     return {
       upgradeConfirmFrames: this.effUpgradeFrames,
       weightSmoothingAlpha: this.effAlpha,
-      sigmaStd: this.computeSigmaStd(),
+      sigmaStd: this.computeStd(this.sigmaBuf, this.sigmaCount),
+      imuStd:   this.computeStd(this.imuBuf,   this.imuCount),
     };
   }
 
-  private computeSigmaStd(): number {
-    if (this.sigmaCount < 4) return 0;
+  /** Generic std over the first `count` slots of `buf`. */
+  private computeStd(buf: Float64Array, count: number): number {
+    if (count < 4) return 0;
     let sum = 0;
-    for (let i = 0; i < this.sigmaCount; i++) sum += this.sigmaBuf[i];
-    const mean = sum / this.sigmaCount;
+    for (let i = 0; i < count; i++) sum += buf[i];
+    const mean = sum / count;
     let v = 0;
-    for (let i = 0; i < this.sigmaCount; i++) {
-      const d = this.sigmaBuf[i] - mean;
+    for (let i = 0; i < count; i++) {
+      const d = buf[i] - mean;
       v += d * d;
     }
-    return Math.sqrt(v / this.sigmaCount);
+    return Math.sqrt(v / count);
+  }
+  // Back-compat shim — older call sites (and tests) used computeSigmaStd().
+  private computeSigmaStd(): number {
+    return this.computeStd(this.sigmaBuf, this.sigmaCount);
   }
 
   private recomputeTuning(): void {
@@ -171,11 +198,22 @@ export class MotionRejection {
       this.effAlpha = this.cfg.weightSmoothingAlpha;
       return;
     }
-    const s = this.computeSigmaStd();
-    const lo = this.cfg.autoTuneSigmaTrigger;
-    const hi = Math.max(lo + 1e-3, this.cfg.autoTuneSigmaSaturate);
-    // Linear blend factor in [0,1] from σ ∈ [lo, hi].
-    const t = Math.max(0, Math.min(1, (s - lo) / (hi - lo)));
+    // Two independent jitter channels — optical (trackerSigma) and IMU
+    // (imuScore). Each is mapped through its own [trigger, saturate] band
+    // into a [0,1] blend factor; we take the max so whichever channel is
+    // most chaotic governs the tuning. This catches "still finger but
+    // shaky hand" cases the optical-only V9.2 tuner missed.
+    const sOpt = this.computeStd(this.sigmaBuf, this.sigmaCount);
+    const loO = this.cfg.autoTuneSigmaTrigger;
+    const hiO = Math.max(loO + 1e-3, this.cfg.autoTuneSigmaSaturate);
+    const tOpt = Math.max(0, Math.min(1, (sOpt - loO) / (hiO - loO)));
+
+    const sImu = this.computeStd(this.imuBuf, this.imuCount);
+    const loI = this.cfg.autoTuneImuTrigger;
+    const hiI = Math.max(loI + 1e-3, this.cfg.autoTuneImuSaturate);
+    const tImu = Math.max(0, Math.min(1, (sImu - loI) / (hiI - loI)));
+
+    const t = Math.max(tOpt, tImu);
     // Higher variability → MORE confirm frames, SMALLER alpha (slower EMA).
     const baseFrames = this.cfg.upgradeConfirmFrames;
     const highFrames = Math.max(baseFrames, this.cfg.upgradeConfirmFramesHigh);
@@ -188,11 +226,14 @@ export class MotionRejection {
   classify(input: MotionRejectionInputs): MotionRejectionResult {
     const { imuScore, trackerSigma, maskIoU, centroidJumpPx } = input;
 
-    // Push the new observation into the circular σ buffer and recompute the
+    // Push the new observations into both circular buffers and recompute the
     // effective tuning BEFORE applying hysteresis this frame.
     this.sigmaBuf[this.sigmaIdx] = trackerSigma;
     this.sigmaIdx = (this.sigmaIdx + 1) % this.sigmaBuf.length;
     if (this.sigmaCount < this.sigmaBuf.length) this.sigmaCount++;
+    this.imuBuf[this.imuIdx] = imuScore;
+    this.imuIdx = (this.imuIdx + 1) % this.imuBuf.length;
+    if (this.imuCount < this.imuBuf.length) this.imuCount++;
     this.recomputeTuning();
 
     // Detección instantánea (antes de aplicar hysteresis).
