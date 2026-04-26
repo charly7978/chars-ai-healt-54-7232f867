@@ -16,6 +16,7 @@ import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
+import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -58,6 +59,9 @@ const Index = () => {
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [rrIntervals, setRRIntervals] = useState<number[]>([]);
+  // Pin overlays whenever the operator likely needs status:
+  // - not yet monitoring, no finger contact, low quality, or after results
+  // Otherwise auto-hide after a few seconds so the waveform stays clean.
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
@@ -1300,9 +1304,21 @@ const Index = () => {
     else startMonitoring();
   };
 
+  // Auto-hide overlays unless we need the operator's attention.
+  const overlayPinned = !isMonitoring
+    || !lastSignal?.fingerDetected
+    || (lastSignal?.quality ?? 0) < 40
+    || showResults;
+  const { visible: overlaysVisible, reveal: revealOverlays } =
+    useAutoHideOverlays({ idleMs: 4000, initialMs: 4000, pinned: overlayPinned });
+
   return (
     <>
-    <div className="fixed inset-0 flex flex-col bg-black" style={{ 
+    <div
+      data-overlay-visible={overlaysVisible}
+      onPointerDown={revealOverlays}
+      className="fixed inset-0 flex flex-col bg-black"
+      style={{ 
       height: '100svh',
       width: '100vw',
       maxWidth: '100vw',
@@ -1363,7 +1379,7 @@ const Index = () => {
           const isDrifting = pq.drifting;
           const isLocked = pq.locked && !isDrifting;
           return (
-            <div className="absolute top-2 left-0 right-0 z-30 flex justify-center pointer-events-none">
+            <div className="auto-hide safe-top absolute top-0 left-0 right-0 z-30 flex justify-center pointer-events-none">
               <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider shadow-md backdrop-blur-md border ${
                 isLocked ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300' :
                 isDrifting ? 'bg-red-500/15 border-red-500/30 text-red-300 animate-pulse' :
@@ -1393,7 +1409,7 @@ const Index = () => {
 
         {/* Threshold calibration - floating panel */}
         {showForensicOverlay && isMonitoring && (
-          <div className="fixed top-3 right-3 z-40 font-mono">
+          <div className="auto-hide fixed top-0 right-0 z-40 font-mono safe-top safe-right">
             <button
               type="button"
               onClick={() => setShowThresholdPanel(v => !v)}
@@ -1492,7 +1508,7 @@ const Index = () => {
           const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
           const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
           return (
-            <div className="absolute top-10 left-2 z-30 pointer-events-none">
+            <div className="auto-hide safe-top safe-left absolute top-8 left-0 z-30 pointer-events-none">
               <div className={`rounded-lg px-2.5 py-1.5 border backdrop-blur-md shadow-lg ${
                 pulsePresent
                   ? 'bg-emerald-500/10 border-emerald-400/50'
@@ -1519,13 +1535,15 @@ const Index = () => {
 
         {/* CIVIL MODE - compact bottom-right chip */}
         {CIVIL_MODE && (
-          <div className="absolute bottom-2 right-2 z-30 bg-black/70 backdrop-blur-md border border-slate-700/50 rounded-lg px-2 py-1.5 pointer-events-none">
-            <div className="text-[7px] text-amber-400/80 mb-0.5 tracking-widest">⚠ CIVIL · NO CLÍNICO</div>
-            <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] font-mono">
-              <span className="text-slate-400">FC <span className="text-white">{heartRate > 0 ? Math.round(heartRate) : "--"}</span></span>
-              <span className="text-slate-400">O₂ <span className="text-white">{vitalSigns.spo2 > 0 ? vitalSigns.spo2.toFixed(0) : "--"}%</span></span>
-              <span className="text-slate-400">PA <span className="text-white">{vitalSigns.pressure?.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}</span></span>
-              <span className="text-slate-400">GL <span className="text-white">{vitalSigns.glucose > 0 ? vitalSigns.glucose.toFixed(0) : "--"}</span></span>
+          <div className="auto-hide safe-bottom safe-right absolute bottom-0 right-0 z-30 pointer-events-none">
+            <div className="bg-black/70 backdrop-blur-md border border-slate-700/50 rounded-lg px-2 py-1.5">
+              <div className="text-[7px] text-amber-400/80 mb-0.5 tracking-widest">⚠ CIVIL · NO CLÍNICO</div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] font-mono">
+                <span className="text-slate-400">FC <span className="text-white">{heartRate > 0 ? Math.round(heartRate) : "--"}</span></span>
+                <span className="text-slate-400">O₂ <span className="text-white">{vitalSigns.spo2 > 0 ? vitalSigns.spo2.toFixed(0) : "--"}%</span></span>
+                <span className="text-slate-400">PA <span className="text-white">{vitalSigns.pressure?.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}</span></span>
+                <span className="text-slate-400">GL <span className="text-white">{vitalSigns.glucose > 0 ? vitalSigns.glucose.toFixed(0) : "--"}</span></span>
+              </div>
             </div>
           </div>
         )}
