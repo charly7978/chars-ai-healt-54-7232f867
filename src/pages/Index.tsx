@@ -633,6 +633,7 @@ const Index = () => {
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           processFrame(imageData, frameTimestamp);
         }
+        lastFrameAtRef.current = nowMs;
       } catch (e) {
         const now = performance.now();
         if (now - lastErrorLogAt > 2000) {
