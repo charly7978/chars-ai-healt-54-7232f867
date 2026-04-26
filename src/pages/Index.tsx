@@ -112,6 +112,10 @@ const Index = () => {
   });
   const lastAlertAtRef = useRef<Record<string, number>>({});
   const ALERT_COOLDOWN_MS = 2500;
+  // Last frame's publicationGate verdict — used to authorise beep/vibrate
+  // inside HeartBeatProcessor on the NEXT frame (one-frame lag, ~30 ms).
+  // Avoids the deadlock of needing morphology to allow morphology.
+  const lastPublicationGateRef = useRef<boolean>(false);
 
   // ── Forensic session log (rolling ring buffer of overlay snapshots) ──
   // Each entry mirrors the overlay payload + a timestamp + a session ID, so
@@ -1005,9 +1009,11 @@ const Index = () => {
         clipLow:  om?.clipLow  ?? 0,
         perfusionIndex: lastSignal.perfusionIndex,
         positionDrifting: positionQuality.drifting,
-        // IMPORTANTE: false aquí. La autorización real se setea más abajo
-        // tras conocer el morphologyGatePass real. Esto evita el deadlock.
-        publicationGate: false,
+        // Usamos el veredicto del FRAME ANTERIOR (~30ms de retraso) para
+        // autorizar beep/vibrate del latido actual. Esto evita el deadlock
+        // (morphology no puede depender de morphology) y mantiene el sonido
+        // sincronizado en estado estacionario.
+        publicationGate: lastPublicationGateRef.current,
       }
     );
 
@@ -1029,6 +1035,7 @@ const Index = () => {
       !ratioGuardActive &&
       heartBeatResult.bpm > 0 &&
       heartBeatResult.bpmConfidence >= 0.30;
+    lastPublicationGateRef.current = publicationGate;
 
     if (!publicationGate) {
       // El detector ya corrió y aprendió de la señal. Solo cerramos la UI.
@@ -1214,7 +1221,7 @@ const Index = () => {
             if (isArrhythmiaDetected) {
               // FORENSIC: vibración de arritmia SOLO si triple-gate + evidencia
               // óptica autorizan publicación. Evita falsas alarmas en aire/ruido.
-              if (forensicPass && (fg as any)?.opticalEvidence && navigator.vibrate) {
+              if (publicationGate && navigator.vibrate) {
                 navigator.vibrate([200, 100, 200]);
               }
               toast({
