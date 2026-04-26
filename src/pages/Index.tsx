@@ -20,7 +20,6 @@ import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
-import RecalibrationLogPanel from "@/components/RecalibrationLogPanel";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -1402,7 +1401,7 @@ const Index = () => {
       motionLevel: motionClassifierRef.current.classify(),
       baseline: calibrationBaseline,
     },
-    { onPrompt: () => triggerCalPromptHighlight() },
+    { onPrompt: triggerCalPromptHighlight },
   );
 
   return (
@@ -1848,9 +1847,6 @@ const Index = () => {
           });
         }}
       />
-
-      {/* Operator-visible recalibration event log — only during monitoring. */}
-      <RecalibrationLogPanel visible={isMonitoring} />
 
       <FiducialTuner
         open={showFiducialTuner}

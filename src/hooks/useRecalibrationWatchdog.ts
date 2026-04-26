@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 import { toast } from '@/hooks/use-toast';
 import type { CalibrationBaseline } from '@/components/CalibrationWizard';
 import type { MotionLevel } from '@/modules/signal-processing/MotionClassifier';
-import { recalibrationLog, type RecalibrationReason } from '@/utils/recalibrationLog';
 
 /**
  * useRecalibrationWatchdog
@@ -32,12 +31,7 @@ export interface RecalibrationInputs {
 }
 
 export interface UseRecalibrationWatchdogOpts {
-  /**
-   * Fired immediately after the toast is shown. The host typically uses this
-   * to flash the CAL chip; the reason + metrics are also written to the
-   * shared `recalibrationLog` for auditability.
-   */
-  onPrompt: (entry: { reason: RecalibrationReason }) => void;
+  onPrompt: () => void;      // called when the toast's action button is pressed
 }
 
 const HOLD_MS = 4000;         // sustained-degradation window
@@ -49,7 +43,7 @@ const Q_DROP = 20;            // quality drop vs baseline that counts as degrade
 const BPM_ABS = 15;           // absolute BPM drift floor (bpm)
 const SPO2_ABS = 4;           // absolute SpO₂ drift floor (%)
 
-type Reason = RecalibrationReason;
+type Reason = 'quality' | 'motion' | 'bpm_drift' | 'spo2_drift';
 
 const reasonLabel: Record<Reason, string> = {
   quality:    'Calidad de señal degradada',
@@ -141,20 +135,6 @@ export function useRecalibrationWatchdog(
       // Reset all timers so we don't immediately re-fire on the next tick.
       sinceRef.current = { quality: null, motion: null, bpm_drift: null, spo2_drift: null };
 
-      // Audit log — record reason + full metrics snapshot at fire time.
-      recalibrationLog.add({
-        reason: fired,
-        metrics: {
-          quality: i.quality,
-          bpm: i.bpm,
-          spo2: i.spo2,
-          motionLevel: i.motionLevel,
-          baselineBpmMean: i.baseline?.bpmMean ?? null,
-          baselineSpo2Mean: i.baseline?.spo2Mean ?? null,
-          baselineQualityMean: i.baseline?.qualityMean ?? null,
-        },
-      });
-
       toast({
         title: 'Recalibración recomendada',
         description: `${reasonLabel[fired]}. Toque CAL para recalibrar.`,
@@ -164,7 +144,7 @@ export function useRecalibrationWatchdog(
       try { navigator.vibrate?.([60, 40, 60]); } catch {}
       // Surface the prompt callback so the host can highlight the CAL button
       // (the toast itself doesn't get an inline button to keep UI noise low).
-      onPromptRef.current?.({ reason: fired });
+      onPromptRef.current?.();
     }, 500);
 
     return () => window.clearInterval(intervalId);
