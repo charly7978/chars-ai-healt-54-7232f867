@@ -678,12 +678,26 @@ export class AdaptiveROIMask {
       }
     }
 
-    // V3: temporal mask stability — fraction of tiles unchanged
-    let maskChangeCount = 0;
+    // V8: maskIoU — Jaccard real |M_t ∩ M_{t-1}| / |M_t ∪ M_{t-1}|.
+    // Reemplaza al Hamming-style "1 − change-rate" que sobrestimaba la
+    // estabilidad cuando ambas máscaras eran mayoritariamente vacías
+    // (fondo oscuro: 81/81 tiles iguales-a-cero → "stability=1.0" falso).
+    // Cuando la unión es 0 (sin tiles válidos en ningún frame), devolvemos
+    // 0 explícitamente — neutro, no máximo.
+    let inter = 0, uni = 0;
     for (let ti = 0; ti < TOTAL_TILES; ti++) {
-      if (this.currentMask[ti] !== this.prevMaskValid[ti]) maskChangeCount++;
+      const a = this.currentMask[ti] !== 0 ? 1 : 0;
+      const b = this.prevMaskValid[ti] !== 0 ? 1 : 0;
+      if (a | b) {
+        uni++;
+        if (a & b) inter++;
+      }
     }
-    const maskStability = 1 - maskChangeCount / TOTAL_TILES;
+    const maskIoU = uni > 0 ? inter / uni : 0;
+    // Mantenemos `maskStability` como alias del IoU para no romper consumidores
+    // existentes (PPGSignalProcessor.detectFingerInstant) — la semántica nueva
+    // es estrictamente más estricta (rechaza falsos positivos de fondo plano).
+    const maskStability = maskIoU;
     this.prevMaskValid.set(this.currentMask);
 
     // --- V3: COARSE ROI (all tiles with finger signature, lenient) ---
