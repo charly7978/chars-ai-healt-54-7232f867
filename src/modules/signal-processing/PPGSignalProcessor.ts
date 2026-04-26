@@ -614,10 +614,32 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     }
 
     // --- Contact detected: update baselines & buffers ---
+    // V8: además del EWMA legacy, alimentamos un buffer de mediana 5 s por
+    // canal y, cuando hay datos suficientes, reemplazamos el baseline por
+    // su mediana — robusto a clip-high transitorios (glare) que arrastran
+    // el EWMA durante segundos.
     this.updateBaselines(roi.rawRed, roi.rawGreen, roi.rawBlue, motionArtifact);
+    this.redDcMedianBuf.push(roi.rawRed);
+    this.greenDcMedianBuf.push(roi.rawGreen);
+    this.blueDcMedianBuf.push(roi.rawBlue);
+    if (this.redDcMedianBuf.length >= 90) {
+      this.redBaseline = this.redDcMedianBuf.percentile(0.5);
+      this.greenBaseline = this.greenDcMedianBuf.percentile(0.5);
+      this.blueBaseline = this.blueDcMedianBuf.percentile(0.5);
+    }
     this.redBuf.push(roi.rawRed);
     this.greenBuf.push(roi.rawGreen);
     this.blueBuf.push(roi.rawBlue);
+
+    // V8: bloqueo por contigüidad — parches dispersos no son un dedo.
+    if (roi.coverageContiguity < 0.55) {
+      this.lowContiguityStreak++;
+      if (this.lowContiguityStreak >= this.CONTIGUITY_BLOCK_FRAMES) {
+        this.exportedContactState = 'OPTICAL_CONTACT_LOW_PERFUSION';
+      }
+    } else {
+      this.lowContiguityStreak = 0;
+    }
 
     // ── sRGB → LINEAL → OPTICAL DENSITY (absorbancia hemoglobina) ─────
     // OD = -log10((I_lin + ε) / I0_lin), donde I0 es el DC móvil lineal.
@@ -651,6 +673,24 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.activeSourceLabel = source.label;
     this.allSourceSQI = source.allSQI;
 
+    // V8: BANDPASS DUAL AUTO-SWITCH. CHROM/POS son proyecciones que cancelan
+    // glare/illumination; cuando el ranker delega sostenidamente en ellas,
+    // conmutamos a banda RESCUE más estrecha. Switch O(1) sin reset de
+    // estado biquad → sin transitorios audibles.
+    if (source.label === 'CHROM' || source.label === 'POS') {
+      this.chromPosStreak++;
+      this.normalStreak = 0;
+      if (this.chromPosStreak >= this.BP_RESCUE_FRAMES) {
+        this.bandpassFilter.setMode('RESCUE');
+      }
+    } else {
+      this.normalStreak++;
+      this.chromPosStreak = 0;
+      if (this.normalStreak >= this.BP_NORMAL_FRAMES) {
+        this.bandpassFilter.setMode('NORMAL');
+      }
+    }
+
     // Track source stability
     if (source.label === this.lastSourceLabel) {
       this.sourceStableFrames = Math.min(this.sourceStableFrames + 1, 300);
@@ -662,7 +702,17 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     // --- FILTERING ---
     this.rawSignalBuf.push(source.value);
-    const filtered = this.bandpassFilter.filter(source.value);
+    // V8: ante un salto de frame (rVFC dropeó >1 frame), congelamos el
+    // bandpass este ciclo: re-usamos el último valor filtrado para evitar
+    // que el biquad arrastre el cambio brusco como un transitorio. La
+    // continuidad del estado interno se preserva porque NO inyectamos la
+    // muestra al filtro.
+    let filtered: number;
+    if (frameJump && this.filteredBuf.length > 0) {
+      filtered = this.filteredBuf.get(this.filteredBuf.length - 1);
+    } else {
+      filtered = this.bandpassFilter.filter(source.value);
+    }
     this.filteredBuf.push(filtered);
 
     // Derivatives for morphology analysis
@@ -705,6 +755,26 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     );
 
     const signalRange = this.getSignalRange();
+
+    // V8: PERFUSION INDEX POR CANAL → vitalityCount.
+    // Una pulsación viva debe modular ≥2 canales simultáneamente.
+    const winSamples = Math.min(this.redBuf.length, Math.max(30, Math.round(this.estimatedSampleRate * 3)));
+    if (winSamples >= 30) {
+      const computePI = (buf: RingBuffer): number => {
+        const p5 = buf.percentile(0.05, winSamples);
+        const p95 = buf.percentile(0.95, winSamples);
+        const med = buf.percentile(0.5, winSamples);
+        return med > 1 ? (p95 - p5) / med : 0;
+      };
+      this.piR = computePI(this.redBuf);
+      this.piG = computePI(this.greenBuf);
+      this.piB = computePI(this.blueBuf);
+      let vc = 0;
+      if (this.piR > 0.0015) vc++;
+      if (this.piG > 0.0010) vc++;
+      if (this.piB > 0.0006) vc++;
+      this.vitalityCount = vc;
+    }
     const redDominance = this.smoothedRed - (this.smoothedGreen + this.smoothedBlue) / 2;
 
     // Periodicity from source ranker autocorrelation
@@ -730,11 +800,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
     // Motion penalty applied on top of contact/drift gating
     const motionQualPenalty = motionHigh ? 0.40 : (motionArtifact ? 0.70 : 1.0);
+    // V8: tracker σ óptico como soft-penalty adicional (independiente del
+    // IMU). σ ~ 0 px = perfectamente estable; σ ≥ 8 px = reposicionamiento
+    // o temblor agresivo → reduce calidad pero NUNCA bloquea (forense).
+    const trackerSigmaPenalty = 1 - 0.4 * Math.min(1, roi.trackerSigma / 8);
+    // V8: vitality count como soft-penalty: <2 canales modulando = penaliza
+    // fuerte (50%); =2 = penaliza ligero (15%); =3 = sin penalty.
+    const vitalityPenalty = this.vitalityCount >= 3 ? 1.0
+      : this.vitalityCount === 2 ? 0.85
+      : 0.5;
+    // V8: salto de frame → publica con quality reducida.
+    const jumpPenalty = frameJump ? 0.5 : 1.0;
     const isGoodPerfusion = this.exportedContactState === 'OPTICAL_CONTACT_GOOD_PERFUSION';
     const gatedQuality = isGoodPerfusion && perfusionIndex >= 0.005
       ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
-    const finalQuality = gatedQuality * motionQualPenalty;
+    const finalQuality = gatedQuality * motionQualPenalty
+      * trackerSigmaPenalty * vitalityPenalty * jumpPenalty;
 
     // --- TELEMETRY ---
     // Hot path: no console output. Operators read live state through the
