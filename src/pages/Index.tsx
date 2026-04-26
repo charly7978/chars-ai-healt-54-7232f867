@@ -24,6 +24,13 @@ const NON_ALERT_RHYTHMS = new Set([
   'UNDETERMINED_LOW_QUALITY'
 ]);
 
+// FORENSIC MODE: civil (clinical-style) vitals are hidden by default.
+// They can be re-enabled with ?civil=1 (kept behind a flag, NOT clinical).
+const CIVIL_MODE = typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).get('civil') === '1';
+// FORENSIC MODE: bypass the mandatory 60s auto-finalize (continuous monitoring).
+const FORENSIC_MODE = !CIVIL_MODE;
+
 const Index = () => {
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
@@ -467,16 +474,44 @@ const Index = () => {
     if (!lastSignal || !isMonitoring) return;
     
     const signalValue = lastSignal.filteredValue;
-    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
+    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
+    const noOpticalContact = contactState === 'NO_OPTICAL_CONTACT' || contactState === 'NO_CONTACT';
+    const goodPerfusion = contactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' || contactState === 'STABLE_CONTACT';
     const positionQuality = getPositionQuality();
     const motionInfo = getMotionInfo();
-    const stableHumanSignal =
-      contactState === 'STABLE_CONTACT' &&
-      (lastSignal.quality || 0) >= 12 &&
-      (lastSignal.perfusionIndex || 0) >= 0.005 &&
-      !motionInfo.motionHigh; // IMU gate: high motion blocks "stable human signal"
 
-    const pressureOptimal = positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
+    // FORENSIC: a "stable human signal" is just optical contact + minimal
+    // perfusion. We do NOT require GOOD perfusion (a victim in shock won't
+    // have it) and we do NOT block on motion (operator may be moving).
+    // What protects us against fake numbers is the upstream liveness gate:
+    // if there is no hemoglobin signature → contactState === NO_OPTICAL_CONTACT
+    // → we early-return below with everything zeroed.
+    const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
+
+    if (noOpticalContact) {
+      // Hard forensic zero — never invent waveforms or numbers from air.
+      setHeartbeatSignal(0);
+      setHeartRate(0);
+      setBeatMarker(0);
+      setRRIntervals([]);
+      vitalSignsFrameCounter.current = 0;
+      if (vitalSigns.spo2 !== 0 || vitalSigns.glucose !== 0 ||
+          vitalSigns.pressure.systolic !== 0 || vitalSigns.pressure.diastolic !== 0) {
+        setVitalSigns(prev => ({
+          ...prev,
+          spo2: 0, glucose: 0,
+          pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+          arrhythmiaCount: 0, arrhythmiaStatus: "SIN ARRITMIAS|0",
+          lipids: { totalCholesterol: 0, triglycerides: 0 },
+          lastArrhythmiaData: undefined,
+          signalQuality: 0,
+          measurementConfidence: 'INVALID',
+        }));
+      }
+      return;
+    }
+
+    const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
@@ -531,9 +566,17 @@ const Index = () => {
     }
 
     unstableFrameCounter.current = 0;
-    const smoothedBPM = applyEMA(emaRef.current.bpm, heartBeatResult.bpm);
-    emaRef.current.bpm = smoothedBPM;
-    setHeartRate(smoothedBPM);
+    // FORENSIC: report the real instantaneous BPM (no EMA), but only when
+    // the heartbeat processor has enough morphology-validated confidence.
+    // Otherwise keep showing 0 → "BUSCANDO PULSO".
+    const forensicBpmOk = heartBeatResult.bpm > 0 && heartBeatResult.bpmConfidence >= 0.30;
+    if (forensicBpmOk) {
+      setHeartRate(Math.round(heartBeatResult.bpm));
+      emaRef.current.bpm = heartBeatResult.bpm;
+    } else if (!goodPerfusion) {
+      // In low-perfusion mode, don't display stale BPM either.
+      setHeartRate(0);
+    }
 
     if (heartBeatResult.isPeak) {
       setBeatMarker(1);
@@ -552,7 +595,9 @@ const Index = () => {
 
     vitalSignsFrameCounter.current++;
 
-    if (vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
+    // FORENSIC: only run civil vitals (SpO2/BP/glucose/lipids) when explicitly
+    // enabled via ?civil=1. By default the forensic operator only sees pulse.
+    if (CIVIL_MODE && vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
       vitalSignsFrameCounter.current = 0;
       const rgbStats = getRGBStats();
       const detectorAgreement = heartBeatResult.detectorAgreement || heartBeatResult.debug.detectorAgreement || 0;
