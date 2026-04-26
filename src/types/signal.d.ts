@@ -39,6 +39,28 @@ export interface ProcessedSignal {
     hasPulsatility: boolean;
     pulsatilityValue: number;
   };
+  /**
+   * Forensic triple-gate verdict — the ONLY thing that authorises the UI
+   * to render BPM, the PPG waveform, or any vital sign.
+   *
+   *   gate1_optical   : hardened hemoglobin signature + spatial texture
+   *   gate2_spectral  : cardiac-band SNR ≥ 6 dB sustained 1.5 s
+   *   gate3_morphology: 4 consecutive morphology-valid beats
+   *   passAll         : AND of the three (frame-level go/no-go)
+   *
+   * `livenessReason` is a human-readable Spanish sentence describing why the
+   * gate is closed (or 'OK' when open). UI surfaces it directly.
+   */
+  forensicGate?: {
+    gate1_optical: boolean;
+    gate2_spectral: boolean;
+    gate3_morphology: boolean;
+    passAll: boolean;
+    cardiacSNRdB: number;
+    spectralPeakHz: number;
+    spectralConcentration: number;
+    livenessReason: string;
+  };
 }
 
 export interface ProcessingError {
