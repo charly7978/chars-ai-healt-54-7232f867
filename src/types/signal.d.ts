@@ -38,6 +38,17 @@ export interface ProcessedSignal {
     message: string;
     hasPulsatility: boolean;
     pulsatilityValue: number;
+    // V8: telemetría extendida (todos opcionales, no rompen consumidores).
+    textureEntropy?: number;
+    coverageContiguity?: number;
+    maskIoU?: number;
+    trackerSigma?: number;
+    piR?: number;
+    piG?: number;
+    piB?: number;
+    vitalityCount?: number;
+    bandpassMode?: 'NORMAL' | 'RESCUE';
+    frameJump?: boolean;
   };
   /**
    * Forensic triple-gate verdict — the ONLY thing that authorises the UI

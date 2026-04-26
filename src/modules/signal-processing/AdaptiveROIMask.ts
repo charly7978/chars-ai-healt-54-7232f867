@@ -72,6 +72,20 @@ export interface ROIMaskResult {
    * 8-connectivity. 1 = un solo dedo cohesionado; <0.55 ≈ parches dispersos.
    */
   coverageContiguity: number;
+  /**
+   * V8: Jaccard real |M_t ∩ M_{t-1}| / |M_t ∪ M_{t-1}| en el grid 9×9 de
+   * finger-tiles. 1 = máscara idéntica al frame previo; 0 = sin solape.
+   * Reemplaza la métrica Hamming usada como `maskStability` (que se mantiene
+   * por compatibilidad pero ahora alias del IoU).
+   */
+  maskIoU: number;
+  /**
+   * V8: σ del tracker EMA del centroide ROI en píxeles del frame, expuesto
+   * como motion-proxy óptico independiente del IMU. Mide cuánto se mueve la
+   * observación del centroide respecto al estado suavizado: ~0 cuando el
+   * dedo está quieto, > 4 px cuando hay temblor / reposicionamiento.
+   */
+  trackerSigma: number;
 }
 
 const GRID = 9; // V3: 9x9 grid for finer adaptive ROI
@@ -225,6 +239,13 @@ export class AdaptiveROIMask {
   private roiSizeFrac = 0.85; // adaptive size fraction of min(w,h)
   private readonly ROI_CENTER_ALPHA = 0.35; // EMA on centroid
   private readonly ROI_SIZE_ALPHA = 0.25;   // EMA on size
+
+  // --- V8: residual EMA of |observation − smoothed_state| as σ proxy ---
+  // Cheap online estimate: lo usamos como motion proxy óptico que no depende
+  // del IMU. EMA con α=0.2 → ~5-frame time constant (≈170 ms @30 fps).
+  private trackerResidualEMA = 0;
+  private trackerSigmaPx = 0;
+  private readonly TRACKER_RES_ALPHA = 0.2;
 
   // --- V6: auto-tuned pre-pass thresholds ---
   // The 32×32 coarse pass used to require redDom≥12 and r≥70 for every skin
@@ -437,6 +458,14 @@ export class AdaptiveROIMask {
       this.roiSizeFrac = targetSizeFrac;
     } else if (box.mass > 0) {
       // Smoothly follow the finger; don't snap.
+      // V8: track residual |observation − previous smoothed| as σ proxy.
+      const dxRes = box.cx - this.roiCenterX;
+      const dyRes = box.cy - this.roiCenterY;
+      const resMag = Math.sqrt(dxRes * dxRes + dyRes * dyRes);
+      this.trackerResidualEMA =
+        this.trackerResidualEMA * (1 - this.TRACKER_RES_ALPHA) +
+        resMag * this.TRACKER_RES_ALPHA;
+      this.trackerSigmaPx = this.trackerResidualEMA;
       this.roiCenterX += (box.cx - this.roiCenterX) * this.ROI_CENTER_ALPHA;
       this.roiCenterY += (box.cy - this.roiCenterY) * this.ROI_CENTER_ALPHA;
       this.roiSizeFrac += (targetSizeFrac - this.roiSizeFrac) * this.ROI_SIZE_ALPHA;
@@ -446,6 +475,9 @@ export class AdaptiveROIMask {
       this.roiCenterX += (w / 2 - this.roiCenterX) * 0.05;
       this.roiCenterY += (h / 2 - this.roiCenterY) * 0.05;
       this.roiSizeFrac += (0.85 - this.roiSizeFrac) * 0.05;
+      // Sin observación válida: relajar σ hacia 0.
+      this.trackerResidualEMA *= 0.85;
+      this.trackerSigmaPx = this.trackerResidualEMA;
     }
     const roiSize = minDim * this.roiSizeFrac;
     const half = roiSize / 2;
@@ -646,12 +678,26 @@ export class AdaptiveROIMask {
       }
     }
 
-    // V3: temporal mask stability — fraction of tiles unchanged
-    let maskChangeCount = 0;
+    // V8: maskIoU — Jaccard real |M_t ∩ M_{t-1}| / |M_t ∪ M_{t-1}|.
+    // Reemplaza al Hamming-style "1 − change-rate" que sobrestimaba la
+    // estabilidad cuando ambas máscaras eran mayoritariamente vacías
+    // (fondo oscuro: 81/81 tiles iguales-a-cero → "stability=1.0" falso).
+    // Cuando la unión es 0 (sin tiles válidos en ningún frame), devolvemos
+    // 0 explícitamente — neutro, no máximo.
+    let inter = 0, uni = 0;
     for (let ti = 0; ti < TOTAL_TILES; ti++) {
-      if (this.currentMask[ti] !== this.prevMaskValid[ti]) maskChangeCount++;
+      const a = this.currentMask[ti] !== 0 ? 1 : 0;
+      const b = this.prevMaskValid[ti] !== 0 ? 1 : 0;
+      if (a | b) {
+        uni++;
+        if (a & b) inter++;
+      }
     }
-    const maskStability = 1 - maskChangeCount / TOTAL_TILES;
+    const maskIoU = uni > 0 ? inter / uni : 0;
+    // Mantenemos `maskStability` como alias del IoU para no romper consumidores
+    // existentes (PPGSignalProcessor.detectFingerInstant) — la semántica nueva
+    // es estrictamente más estricta (rechaza falsos positivos de fondo plano).
+    const maskStability = maskIoU;
     this.prevMaskValid.set(this.currentMask);
 
     // --- V3: COARSE ROI (all tiles with finger signature, lenient) ---
@@ -821,6 +867,8 @@ export class AdaptiveROIMask {
       prepassSuccessRate: this.prepassSuccessRate,
       textureEntropy,
       coverageContiguity,
+      maskIoU,
+      trackerSigma: this.trackerSigmaPx,
     };
   }
 
@@ -844,5 +892,7 @@ export class AdaptiveROIMask {
     this.prepassRecentFilled = 0;
     this.prepassSuccessRate = 0;
     this.lastBox = { cx: 0, cy: 0, sizePx: 0, mass: 0 };
+    this.trackerResidualEMA = 0;
+    this.trackerSigmaPx = 0;
   }
 }

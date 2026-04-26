@@ -156,6 +156,47 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private frameCount = 0;
   private lastLogTime = 0;
 
+  // ── V8: TIMING REAL ESTRICTO ──────────────────────────────────────
+  // Detección de frames duplicados (rVFC entrega 2 callbacks con el mismo
+  // mediaTime → dt < 5 ms) y de saltos (cámara dropea frame → dt > 80 ms).
+  // Cada caso degrada de forma distinta: duplicado se descarta por completo,
+  // salto preserva estado del filtro pero baja la calidad publicada.
+  private readonly DT_DUPLICATE_MS = 5;
+  private readonly DT_JUMP_MS = 80;
+  private duplicateFrameCount = 0;
+  private jumpFrameCount = 0;
+  private lastFrameJump = false;
+
+  // ── V8: DC MEDIANA 5 s POR CANAL ──────────────────────────────────
+  // Reemplaza al EWMA puro como baseline robusto: la mediana de 150 muestras
+  // (~5 s @30 fps) es inmune a clip-high transitorios (glare) que hoy
+  // contaminan el EWMA y arrastran absR/absG durante segundos.
+  private redDcMedianBuf = new RingBuffer(150);
+  private greenDcMedianBuf = new RingBuffer(150);
+  private blueDcMedianBuf = new RingBuffer(150);
+
+  // ── V8: BANDPASS DUAL AUTO-SWITCH ─────────────────────────────────
+  // CHROM/POS son proyecciones que cancelan glare → cuando el ranker delega
+  // sostenidamente en ellas, conmutamos el bandpass a RESCUE (banda más
+  // estrecha 0.5–8 Hz). El switch O(1) en BandpassFilter preserva el estado
+  // del biquad para evitar transitorios.
+  private chromPosStreak = 0;
+  private normalStreak = 0;
+  private readonly BP_RESCUE_FRAMES = 150; // ~5 s @30 fps
+  private readonly BP_NORMAL_FRAMES = 90;  // ~3 s @30 fps
+
+  // ── V8: PERFUSION INDEX POR CANAL (vitality count) ────────────────
+  // Una pulsación viva debe modular ≥2 canales simultáneamente; cualquier
+  // gate puro de R sucumbe a glare cíclico, y cualquier gate puro de G
+  // sucumbe a flicker de iluminación. El conteo cruzado es la firma física
+  // más simple de pulso real.
+  private piR = 0; private piG = 0; private piB = 0;
+  private vitalityCount = 0;
+
+  // ── V8: BLOQUEO POR CONTIGÜIDAD ───────────────────────────────────
+  private lowContiguityStreak = 0;
+  private readonly CONTIGUITY_BLOCK_FRAMES = 6;
+
   // --- Contact state machine ---
   private contactState: ExtendedContactState = 'NO_CONTACT';
   private exportedContactState: ContactState = 'NO_CONTACT';
@@ -311,8 +352,33 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     if (!this.isProcessing || !this.onSignalReady) return;
 
     const t0 = performance.now();
-    this.frameCount++;
     const timestamp = frameTimestamp ?? performance.now();
+
+    // ── V8: TIMING REAL ESTRICTO ──────────────────────────────────
+    // 1) Duplicado: rVFC entregó dos callbacks con (casi) el mismo mediaTime.
+    //    Lo descartamos completo — procesarlo contaminaría el sample-rate
+    //    estimado y duplicaría el latido visual.
+    // 2) Salto: la cámara dropeó ≥1 frame. NO lo extrapolamos: marcamos
+    //    `frameJump=true`, congelamos el bandpass este frame (no llamamos
+    //    `filter()`) y publicamos quality *= 0.5.
+    let dtMs = 0;
+    let frameJump = false;
+    if (this.lastFrameTime > 0) {
+      dtMs = timestamp - this.lastFrameTime;
+      if (dtMs > 0 && dtMs < this.DT_DUPLICATE_MS) {
+        this.duplicateFrameCount++;
+        // No actualizar lastFrameTime: el siguiente dt se mide contra
+        // el último frame válido (preserva estimación correcta de fps).
+        this.processingTimeMs = performance.now() - t0;
+        return;
+      }
+      if (dtMs > this.DT_JUMP_MS) {
+        this.jumpFrameCount++;
+        frameJump = true;
+      }
+    }
+    this.lastFrameJump = frameJump;
+    this.frameCount++;
     this.updateSampleRate(timestamp);
 
     // --- ADAPTIVE ROI ---
@@ -338,12 +404,28 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const lAbsorption = (lg + lb) > 1 ? lr / (lg + lb) : 0;
     const lRedDom = lr - (lg + lb) / 2;
     const lTotalI = lr + lg + lb;
-    // Spatial texture from ROI (1 - spatialUniformity) acts as the std/mean
-    // proxy: a real fingertip pressed on the lens has micro-texture (>0.008
-    // and <0.06); a wall/air/glare is either perfectly flat (~0) or wildly
-    // non-uniform (>0.06). spatialUniformity in [0..1] inverts to texture.
-    const textureProxy = Math.max(0, 1 - roi.spatialUniformity);
-    const textureOk = textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX;
+    // V8: Preferimos entropía Shannon real del canal G (banda piel real
+    // 1.6–3.9 bits, Wang 2020). El proxy legacy (1-spatialUniformity) queda
+    // como fallback únicamente cuando entropy=0 (ROI demasiado pequeña).
+    const entropy = roi.textureEntropy;
+    const useEntropy = entropy > 0;
+    const textureProxy = useEntropy ? entropy : Math.max(0, 1 - roi.spatialUniformity);
+    const textureOk = useEntropy
+      ? entropy >= 1.6 && entropy <= 3.9
+      : (textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX);
+
+    // V8: Liveness adaptativo por fototipo (Fitzpatrick V-VI). Cuando los
+    // tres gates espaciales fuertes pasan (entropy ∈ [2.0, 3.5] Y contiguity
+    // ≥ 0.75 Y maskIoU ≥ 0.85), permitimos rebajar los umbrales de firma
+    // hemoglobina porque pieles oscuras tienen menor red dominance pero
+    // perfusión real. Pared/fondo no abren esta vía: fallan entropy O
+    // contiguity.
+    const rescueGates =
+      useEntropy && entropy >= 2.0 && entropy <= 3.5 &&
+      roi.coverageContiguity >= 0.75 &&
+      roi.maskIoU >= 0.85;
+    const absorptionMin = rescueGates ? 1.18 : LIVENESS.ABSORPTION_MIN;
+    const redOverGbMin = rescueGates ? 10 : LIVENESS.RED_OVER_GB_MIN;
     // Snapshot raw liveness telemetry for the forensic overlay.
     this.g1RawR = lr; this.g1RawG = lg; this.g1RawB = lb;
     this.g1TotalI = lTotalI;
@@ -352,8 +434,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.g1Texture = textureProxy;
     this.g1Coverage = roi.coverageRatio;
     const livenessInstant =
-      lAbsorption >= LIVENESS.ABSORPTION_MIN &&
-      lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
+      lAbsorption >= absorptionMin &&
+      lRedDom >= redOverGbMin &&
       lTotalI >= LIVENESS.TOTAL_I_MIN &&
       lTotalI <= LIVENESS.TOTAL_I_MAX &&
       roi.coverageRatio >= LIVENESS.COVERAGE_MIN &&
@@ -374,12 +456,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       // Build forensic reason string for the diagnostic banner
       if (lTotalI < LIVENESS.TOTAL_I_MIN) this.lastLivenessReason = 'OSCURO / SIN CONTACTO';
       else if (lTotalI > LIVENESS.TOTAL_I_MAX) this.lastLivenessReason = 'LUZ DIRECTA / NO ES TEJIDO';
-      else if (lAbsorption < LIVENESS.ABSORPTION_MIN) this.lastLivenessReason = `SIN FIRMA DE HEMOGLOBINA (R/(G+B)=${lAbsorption.toFixed(2)})`;
-      else if (lRedDom < LIVENESS.RED_OVER_GB_MIN) this.lastLivenessReason = 'ROJO INSUFICIENTE — NO ES TEJIDO';
+      else if (lAbsorption < absorptionMin) this.lastLivenessReason = `SIN FIRMA DE HEMOGLOBINA (R/(G+B)=${lAbsorption.toFixed(2)})`;
+      else if (lRedDom < redOverGbMin) this.lastLivenessReason = 'ROJO INSUFICIENTE — NO ES TEJIDO';
       else if (roi.coverageRatio < LIVENESS.COVERAGE_MIN) this.lastLivenessReason = 'CUBRA EL LENTE CON EL DEDO';
-      else if (!textureOk) this.lastLivenessReason = textureProxy < LIVENESS.TEXTURE_MIN
-        ? 'SUPERFICIE PLANA — NO ES PIEL'
-        : 'TEXTURA INESTABLE — REFLEJO/MOVIMIENTO';
+      else if (!textureOk) {
+        if (useEntropy) {
+          this.lastLivenessReason = entropy < 1.6
+            ? `SUPERFICIE PLANA — entropy=${entropy.toFixed(2)} bits`
+            : `TEXTURA INESTABLE — entropy=${entropy.toFixed(2)} bits`;
+        } else {
+          this.lastLivenessReason = textureProxy < LIVENESS.TEXTURE_MIN
+            ? 'SUPERFICIE PLANA — NO ES PIEL'
+            : 'TEXTURA INESTABLE — REFLEJO/MOVIMIENTO';
+        }
+      }
       else this.lastLivenessReason = 'SIN CONTACTO ÓPTICO';
     }
 
@@ -524,10 +614,32 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     }
 
     // --- Contact detected: update baselines & buffers ---
+    // V8: además del EWMA legacy, alimentamos un buffer de mediana 5 s por
+    // canal y, cuando hay datos suficientes, reemplazamos el baseline por
+    // su mediana — robusto a clip-high transitorios (glare) que arrastran
+    // el EWMA durante segundos.
     this.updateBaselines(roi.rawRed, roi.rawGreen, roi.rawBlue, motionArtifact);
+    this.redDcMedianBuf.push(roi.rawRed);
+    this.greenDcMedianBuf.push(roi.rawGreen);
+    this.blueDcMedianBuf.push(roi.rawBlue);
+    if (this.redDcMedianBuf.length >= 90) {
+      this.redBaseline = this.redDcMedianBuf.percentile(0.5);
+      this.greenBaseline = this.greenDcMedianBuf.percentile(0.5);
+      this.blueBaseline = this.blueDcMedianBuf.percentile(0.5);
+    }
     this.redBuf.push(roi.rawRed);
     this.greenBuf.push(roi.rawGreen);
     this.blueBuf.push(roi.rawBlue);
+
+    // V8: bloqueo por contigüidad — parches dispersos no son un dedo.
+    if (roi.coverageContiguity < 0.55) {
+      this.lowContiguityStreak++;
+      if (this.lowContiguityStreak >= this.CONTIGUITY_BLOCK_FRAMES) {
+        this.exportedContactState = 'OPTICAL_CONTACT_LOW_PERFUSION';
+      }
+    } else {
+      this.lowContiguityStreak = 0;
+    }
 
     // ── sRGB → LINEAL → OPTICAL DENSITY (absorbancia hemoglobina) ─────
     // OD = -log10((I_lin + ε) / I0_lin), donde I0 es el DC móvil lineal.
@@ -561,6 +673,24 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.activeSourceLabel = source.label;
     this.allSourceSQI = source.allSQI;
 
+    // V8: BANDPASS DUAL AUTO-SWITCH. CHROM/POS son proyecciones que cancelan
+    // glare/illumination; cuando el ranker delega sostenidamente en ellas,
+    // conmutamos a banda RESCUE más estrecha. Switch O(1) sin reset de
+    // estado biquad → sin transitorios audibles.
+    if (source.label === 'CHROM' || source.label === 'POS') {
+      this.chromPosStreak++;
+      this.normalStreak = 0;
+      if (this.chromPosStreak >= this.BP_RESCUE_FRAMES) {
+        this.bandpassFilter.setMode('RESCUE');
+      }
+    } else {
+      this.normalStreak++;
+      this.chromPosStreak = 0;
+      if (this.normalStreak >= this.BP_NORMAL_FRAMES) {
+        this.bandpassFilter.setMode('NORMAL');
+      }
+    }
+
     // Track source stability
     if (source.label === this.lastSourceLabel) {
       this.sourceStableFrames = Math.min(this.sourceStableFrames + 1, 300);
@@ -572,7 +702,17 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     // --- FILTERING ---
     this.rawSignalBuf.push(source.value);
-    const filtered = this.bandpassFilter.filter(source.value);
+    // V8: ante un salto de frame (rVFC dropeó >1 frame), congelamos el
+    // bandpass este ciclo: re-usamos el último valor filtrado para evitar
+    // que el biquad arrastre el cambio brusco como un transitorio. La
+    // continuidad del estado interno se preserva porque NO inyectamos la
+    // muestra al filtro.
+    let filtered: number;
+    if (frameJump && this.filteredBuf.length > 0) {
+      filtered = this.filteredBuf.get(this.filteredBuf.length - 1);
+    } else {
+      filtered = this.bandpassFilter.filter(source.value);
+    }
     this.filteredBuf.push(filtered);
 
     // Derivatives for morphology analysis
@@ -615,6 +755,26 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     );
 
     const signalRange = this.getSignalRange();
+
+    // V8: PERFUSION INDEX POR CANAL → vitalityCount.
+    // Una pulsación viva debe modular ≥2 canales simultáneamente.
+    const winSamples = Math.min(this.redBuf.length, Math.max(30, Math.round(this.estimatedSampleRate * 3)));
+    if (winSamples >= 30) {
+      const computePI = (buf: RingBuffer): number => {
+        const p5 = buf.percentile(0.05, winSamples);
+        const p95 = buf.percentile(0.95, winSamples);
+        const med = buf.percentile(0.5, winSamples);
+        return med > 1 ? (p95 - p5) / med : 0;
+      };
+      this.piR = computePI(this.redBuf);
+      this.piG = computePI(this.greenBuf);
+      this.piB = computePI(this.blueBuf);
+      let vc = 0;
+      if (this.piR > 0.0015) vc++;
+      if (this.piG > 0.0010) vc++;
+      if (this.piB > 0.0006) vc++;
+      this.vitalityCount = vc;
+    }
     const redDominance = this.smoothedRed - (this.smoothedGreen + this.smoothedBlue) / 2;
 
     // Periodicity from source ranker autocorrelation
@@ -640,11 +800,23 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
     // Motion penalty applied on top of contact/drift gating
     const motionQualPenalty = motionHigh ? 0.40 : (motionArtifact ? 0.70 : 1.0);
+    // V8: tracker σ óptico como soft-penalty adicional (independiente del
+    // IMU). σ ~ 0 px = perfectamente estable; σ ≥ 8 px = reposicionamiento
+    // o temblor agresivo → reduce calidad pero NUNCA bloquea (forense).
+    const trackerSigmaPenalty = 1 - 0.4 * Math.min(1, roi.trackerSigma / 8);
+    // V8: vitality count como soft-penalty: <2 canales modulando = penaliza
+    // fuerte (50%); =2 = penaliza ligero (15%); =3 = sin penalty.
+    const vitalityPenalty = this.vitalityCount >= 3 ? 1.0
+      : this.vitalityCount === 2 ? 0.85
+      : 0.5;
+    // V8: salto de frame → publica con quality reducida.
+    const jumpPenalty = frameJump ? 0.5 : 1.0;
     const isGoodPerfusion = this.exportedContactState === 'OPTICAL_CONTACT_GOOD_PERFUSION';
     const gatedQuality = isGoodPerfusion && perfusionIndex >= 0.005
       ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
-    const finalQuality = gatedQuality * motionQualPenalty;
+    const finalQuality = gatedQuality * motionQualPenalty
+      * trackerSigmaPenalty * vitalityPenalty * jumpPenalty;
 
     // --- TELEMETRY ---
     // Hot path: no console output. Operators read live state through the
@@ -671,6 +843,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}`,
         hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
         pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
+        textureEntropy: roi.textureEntropy,
+        coverageContiguity: roi.coverageContiguity,
+        maskIoU: roi.maskIoU,
+        trackerSigma: roi.trackerSigma,
+        piR: this.piR,
+        piG: this.piG,
+        piB: this.piB,
+        vitalityCount: this.vitalityCount,
+        bandpassMode: this.bandpassFilter.getMode(),
+        frameJump,
       },
       forensicGate: (() => {
         const fg = this.computeForensicGate(roi.rawRed, timestamp);

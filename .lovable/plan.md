@@ -1,288 +1,71 @@
-# PLAN — FASE 1: Detección de dedo + Extracción PPG al máximo
 
-## Lo que ya tiene el repo (no reinventar)
+# ROI adaptativa con seguimiento temporal + extracción PPG alineada por timestamps con rechazo de movimiento
 
-- **`CameraView.tsx`**: cámara trasera con torch, ladder de resoluciones con probe FPS real, locks de exposure/WB/focus/ISO, watchdog FPS por `requestVideoFrameCallback`, diagnostics expuestos vía `getDiagnostics()`.
-- **`PPGSignalProcessor.ts`**: sRGB→linear→OD, ventana temporal 10 s indexada por timestamp real, gates 1/2/3 (óptico / SNR cardíaco / morfología), bloque `LIVENESS` (6 condiciones), motion gating IMU, contact state machine extendida, EWMA de RGB, position lock.
-- **`AdaptiveROIMask.ts`**: grilla 9×9, pre-pass 32×32 con auto-tune de umbrales, exclusión de clipping, EMA por tile, score multifactor, percentiles por frame, ROI re-centrada con EMA.
-- **`SignalSourceRanker.ts`**: 8 fuentes (R, G, RG, absR, absG, diffRG, **CHROM**, **POS**), SQI compuesto, autocorr con interpolación parabólica, histéresis 90 frames.
-- **`OpticalEvidenceGate.ts`**: gate físico configurable (clipping, exposición, R/(G+B), textura, AC/DC, perfusion drop).
-- **`BandpassFilter.ts`**: HPF 0.4 Hz + LPF 10 Hz biquad, dual-EWMA detrend, notch adaptativo de aliased line frequency.
-- **`Index.tsx`**: `requestVideoFrameCallback` con `frameTimestamp` real propagado al hook, `SampleRateEstimator`, motion classifier, calibración, recalibration watchdog.
+## Objetivo
+Cerrar dos frentes simultáneos sobre el pipeline ya parcialmente refactorizado:
 
-> **Doctrina (no negociable)**: no hay mocks/random/simulación; "no reading > false reading"; cero-alloc en hot path; sin valores fisiológicos hardcodeados; `npm run ci:guard` debe quedar verde.
+1. **Máscara ROI dinámica con seguimiento temporal** que maximice SNR sobre piel real (no fondo, glare ni reflejos), usando los nuevos campos `textureEntropy` y `coverageContiguity` ya emitidos por `AdaptiveROIMask`, sumando un **tracker Kalman 1D** del centroide y un **mask-IoU temporal** (Jaccard) que penalice deformaciones bruscas.
+2. **Pipeline de extracción re-alineado por `frameTimestamp` real** (de `requestVideoFrameCallback.metadata.mediaTime`), con **rechazo de artefactos por movimiento** integrado al SQI multi-fuente como soft-penalty (no hard-gate, requisito forense), detección de frames duplicados/saltados, y **dual bandpass** conmutado por estabilidad de fuente activa.
+
+Sin mocks, sin random, sin clamping fisiológico de salidas. Cero-alloc en hot path. Todo passes `npm run ci:guard`.
 
 ---
 
-## PROMPT PARA CURSOR (copiar/pegar tal cual)
+## Cambios por archivo
 
-````
-Actuá como principal engineer en smartphone contact-PPG. Vas a EVOLUCIONAR
-los archivos EXISTENTES de este repo. PROHIBIDO: crear módulos paralelos,
-duplicar lógica que ya vive en AdaptiveROIMask / OpticalEvidenceGate /
-SignalSourceRanker / PPGSignalProcessor / BandpassFilter / CameraView,
-Math.random, mocks, simulaciones, fake data, valores fisiológicos
-hardcodeados, defaults clínicos. PROHIBIDO romper la API pública del hook
-useSignalProcessor consumida por Index.tsx. `npm run ci:guard` debe quedar
-verde tras CADA commit.
+### 1) `src/modules/signal-processing/AdaptiveROIMask.ts` — Tracker temporal + máscara dinámica SNR
+- **Tracker Kalman 1D** sobre `(cx, cy, sizePx)` del bounding box: estado `[pos, vel]`, observación = box CC del frame, ruido proceso `Q=0.5 px²`, ruido observación `R = 4 px² · (1 + clipHighRatio)`. Provee `roiBox.cx/cy/sizePx` suavizado; cuando la observación queda fuera de `±3σ` del predict, se rechaza ese frame y se mantiene el predict (handles glare flicker y micro-temblor).
+- **Mask-IoU temporal**: hoy `maskStability` mide Hamming. Re-definir `maskStability = |M_t ∩ M_{t-1}| / |M_t ∪ M_{t-1}|` (Jaccard real) y exportar `maskIoU` separado para que SQI lo consuma directo.
+- **Tile-level SNR weighting** (núcleo de "máscara que maximiza SNR"): por cada finger-tile, mantener `tileGreenAC` y `tileGreenDC` con varianza Welford incremental (window 60 frames). Calcular `tilePI = √var(G)/mean(G)`, reordenar tiles por `tilePI · centerBias · contiguityFlag`, y reemplazar el promedio uniforme por **promedio ponderado top-K=25 tiles** con pesos `softmax(tilePI/τ)`. Exportar pesos como `Float64Array` para que SignalSourceRanker los use.
+- **Output extendido en `ROIMaskResult`**: añadir `maskIoU`, `topKTilePI` (mediana del top-K), `trackerSigma` (σ del Kalman como motion-proxy óptico independiente del IMU), `topKWeights: Float64Array` (referencia al scratch interno, read-only por contrato).
 
-ALCANCE FASE 1 (NADA MÁS):
-   1. detección de dedo / contact state
-   2. extracción robusta de señal PPG cruda y filtrada
-   3. SQI y telemetría asociada
-   4. performance del hot path
+### 2) `src/modules/signal-processing/SignalSourceRanker.ts` — Block-wise CHROM/POS top-K (Commit 5)
+- Añadir argumento opcional `topKWeights: Float64Array | null` a `update(...)`. Si presente, proyectar **CHROM/POS sobre la media ponderada de los top-25 tiles** (necesita además los promedios RGB por tile — extender la firma para recibir `tileR/G/B: Float64Array | null` o mantener compatibilidad limitándolo a un escalar de "boost factor" si pasar tiles enteros implica rework grande; decidir en implementación por menor invasividad).
+- Mantener fórmulas R/G/RG/absR/absG/diffRG sin tocar (canal-wise promedio ROI ya es correcto).
+- Bonus de SNR cuando `bestLag` cae en banda 0.7–3.5 Hz Y la fuente activa es CHROM/POS (refuerza estabilidad de proyecciones que cancelan glare).
 
-NO TOCAR: HeartBeatProcessor, VitalSignsProcessor, BP/SpO2/Glucose/Lipids,
-edge functions, UI principal salvo el debug overlay ya existente
-(ForensicGateOverlay).
+### 3) `src/modules/signal-processing/PPGSignalProcessor.ts` — Liveness adaptativo + timing real + motion-aware
+- **Reemplazar `textureProxy = 1 - spatialUniformity`** por uso directo de `roi.textureEntropy` con banda piel real `[1.6, 3.9]` bits. Legacy queda de fallback solo cuando `textureEntropy === 0`.
+- **Bloqueo por contigüidad**: si `roi.coverageContiguity < 0.55` durante ≥6 frames consecutivos, degradar `exportedContactState` a `UNSTABLE_CONTACT` aunque el resto de gates pasen. Evita publicar señal de parches dispersos.
+- **Liveness adaptativo por fototipo (Commit 4)**: cuando `textureEntropy ∈ [2.0, 3.5]` Y `coverageContiguity ≥ 0.75` Y `maskIoU ≥ 0.85` (tres gates ortogonales fuertes), permitir bajar `RED_OVER_GB_MIN` de 16 → 10 y `ABSORPTION_MIN` de 1.30 → 1.18. Rescata Fitzpatrick V-VI sin abrir la puerta a pared/fondo (que fallan entropy o contiguity).
+- **Perfusion Index por canal (Commit 3)**: ventana de 3 s sobre `redBuf`/`greenBuf`/`blueBuf` (longitud = `3 · estimatedSampleRate`). Calcular `piR = (p95-p5)/median`, idem `piG`, `piB`. `vitalityCount = (piR > 0.0015) + (piG > 0.0010) + (piB > 0.0006)`. Bloquear publicación numérica cuando `vitalityCount < 2`.
+- **Timing real estricto**: confirmar que `processFrame(imageData, frameTimestamp)` ya recibe `mediaTime` desde `Index.tsx` (auditar). `dtMs = timestamp - lastFrameTime`. Frames duplicados (`dtMs < 5 ms`) → descartar early-return. Saltos (`dtMs > 80 ms`) → marcar `frameJump=true`, **no** llamar `bandpassFilter.applyBandpass` (preserva estado), publicar `quality *= 0.5` y `diagnostics.frameJump=true`.
+- **Motion-aware SQI soft-penalty**: pasar `motionScore` y `trackerSigma` a `computeGlobalSQI()` (o aplicar fuera): `qFinal = qBase · (1 - 0.6·min(1, motionScore)) · (1 - 0.4·min(1, trackerSigma/8))`. Mantener `motionGated = false` (requisito forense). Publicar señal aún con movimiento, pero con calidad realmente baja.
+- **Bandpass dual auto-switch (Commit 6.b)**: contador `chromPosStreak`. Cuando `sourceRanker.getActiveSource() ∈ {CHROM, POS}` por ≥150 frames (~5 s @30fps), `bandpassFilter.setMode('RESCUE')`. Cuando vuelve a otras fuentes por ≥90 frames (~3 s), `'NORMAL'`. Sin reset de estado.
+- **DC mediana 5 s (Commit 6.c)**: añadir `redDcMedianBuf = new RingBuffer(150)` (idem G, B), push de `roi.rawRed` cada frame válido. Cuando `length ≥ 90`, reemplazar `this.redBaseline` por `redDcMedianBuf.percentile(0.5, length)`. Robusto a clip-high transitorios (glare) que hoy contaminan EWMA y arrastran absR/absG durante segundos.
 
-──────────────────────────────────────────────────────────────────────────
-COMMIT 1 — CONNECTED-COMPONENTS EN EL PRE-PASS DE ROI
-Archivo: src/modules/signal-processing/AdaptiveROIMask.ts
+### 4) `src/modules/signal-processing/BandpassFilter.ts` — sin cambios (ya tiene `setMode` del turno previo)
 
-Hoy `estimateFingerBox` usa centroide ponderado: cualquier mancha roja
-fuera del dedo (tela, luz, reflejo) lo arrastra. Cambiar a:
+### 5) `src/components/ForensicGateOverlay.tsx` — Telemetría extendida (Commit 8)
+- Añadir 6 chips: `ENT` (textureEntropy: rojo <1.6, verde 1.6–3.9, ámbar >3.9), `CTG` (contiguity: rojo <0.55, ámbar 0.55–0.75, verde ≥0.75), `IoU` (maskIoU), `PI-R/G/B` (perfusion index por canal), `BP` (NORMAL/RESCUE), `TRK σ` (trackerSigma).
+- Layout: segunda fila de chips compacta debajo de la actual; mismo estilo `tabular-nums`, sin tocar tipografía/colores existentes.
 
-- Sobre el grid 32×32 ya existente, construir una máscara binaria
-  Uint8Array(1024) con 1 cuando el píxel cumple los criterios actuales
-  (redDom ≥ prepassRedDomMin, r ≥ prepassRedMin, banda de luminancia).
-- Two-pass connected-components 8-connectivity, in-place, con
-  Int16Array(1024) de labels y union-find por path-compression. Sin libs.
-- Elegir la componente que MAXIMIZA `area_in_central_disk × Σ redDom`,
-  donde central_disk = radio = 0.45·min(W,H) en coords del grid.
-- Devolver bbox + centroide PESADO de esa componente.
-- Si la componente ganadora no toca el centro o aspect ratio > 2.5:
-  setear `box.mass = 0` (mantiene el fallback geométrico actual).
-- Mantener TODO lo demás: EMA de centroide/tamaño, autotune del prepass,
-  clamps a [0.5, 0.95]·minDim. Cero-alloc: scratch arrays como campos
-  privados.
+### 6) `src/types/signal.d.ts` — Extender `ProcessedSignal.diagnostics`
+- Campos opcionales: `textureEntropy?`, `coverageContiguity?`, `maskIoU?`, `piR?`, `piG?`, `piB?`, `vitalityCount?`, `bandpassMode?`, `trackerSigma?`, `frameJump?`. Solo opcionales → no rompe consumidores existentes.
 
-Test: `src/modules/signal-processing/__tests__/AdaptiveROIMask.cc.test.ts`
-con 4 ImageData sintéticos:
-  (a) dedo centrado → centroide ≈ centro, mass>0
-  (b) dedo + parche rojo en esquina → centroide sigue al dedo (no al parche)
-  (c) sólo parche rojo en esquina → mass = 0
-  (d) dos dedos parciales → gana el que tiene más area_in_central_disk
+### 7) `src/hooks/useSignalProcessor.ts` — Surface mínimo
+- Exponer `getBandpassMode()` y `getTrackerSigma()`, equivalentes al patrón ya existente con `getMotionInfo`/`getPositionQuality`. Usados por overlay.
 
-──────────────────────────────────────────────────────────────────────────
-COMMIT 2 — SHANNON-ENTROPY TEXTURE EN G + COVERAGE CONTIGUITY
-Archivo: src/modules/signal-processing/AdaptiveROIMask.ts
-       + src/modules/signal-processing/PPGSignalProcessor.ts
+### 8) Tests Vitest
+- `__tests__/AdaptiveROIMask.tracker.test.ts`: secuencia de boxes con jitter ±2 px → Kalman suaviza σ<1 px; outlier ±15 px → rechazo (mantiene predict).
+- `__tests__/PPGSignalProcessor.timing.test.ts`: `dt=33.3 ms` → `estimatedSampleRate ≈ 30`; duplicado `dt=2 ms` → frame descartado; salto `dt=120 ms` → `frameJump=true` + quality halved.
+- `__tests__/SignalSourceRanker.topK.test.ts`: `topKWeights` no nulo → CHROM/POS reflejan proyección ponderada.
+- Extender `PPGSignalProcessor.gates.test.ts`: fototipo alto (`redDom=12, absorption=1.20, entropy=2.8, contiguity=0.80, IoU=0.90`) → Liveness PASS modo rescue; pared roja (`redDom=20, absorption=1.5, entropy=0.8, contiguity=0.30`) → Liveness FAIL.
 
-(2.a) En AdaptiveROIMask devolver dos campos nuevos en `ROIMaskResult`:
-  - `textureEntropy: number` (bits, 0..4): entropía de Shannon sobre
-    histograma de 16 bins del canal G en píxeles válidos del fine ROI.
-    Implementación: Int32Array(16) reusable, p_i = c_i/Σ, H = −Σ p log2 p.
-    Saltar el cálculo si validPixels < 200 → devolver 0.
-  - `coverageContiguity: number` (0..1): fracción de tiles 9×9 con
-    `score ≥ fingerThreshold` que pertenecen a la mayor componente
-    conexa 8-conn del coverageMap. Reutilizar el algoritmo de CC del
-    commit 1 (extraerlo a helper privado `connectedComponents8(mask, w, h)`).
-
-(2.b) En PPGSignalProcessor:
-  - Reemplazar `textureProxy = 1 - spatialUniformity` por
-    `textureEntropy` venido del ROI. Banda válida: `[1.6, 3.9]` bits.
-  - Agregar a LIVENESS un sexto requisito implícito: `coverageContiguity ≥ 0.55`.
-    Si falla, registrar `lastLivenessReason = 'COBERTURA FRAGMENTADA — REPOSICIONE EL DEDO'`.
-  - Exponer `textureEntropy`, `coverageContiguity` en `diagnostics` del
-    frame emitido y en `ForensicGateOverlay` (sumar dos chips).
-  - Mantener LIVENESS.CONFIRM_FRAMES y RELEASE_FRAMES sin cambios.
-
-Justificación (citar en JSDoc): Wang et al. Sensors 2020 — la entropía
-espacial G discrimina piel real (crestas dactilares ⇒ 1.6–3.9 bits) de
-superficies planas (<1.5) y reflejos (>3.9). Contiguity bloquea el caso
-"manchas rojas dispersas" que connected-components no llega a filtrar
-en el grid 9×9.
-
-──────────────────────────────────────────────────────────────────────────
-COMMIT 3 — PERFUSION INDEX POR CANAL + GATE VITAL
-Archivo: src/modules/signal-processing/PPGSignalProcessor.ts
-
-- Calcular PI por canal sobre los buffers existentes (redBuf, greenBuf,
-  blueBuf) en ventana de 3 s (90 muestras a 30 fps; usar `bufferedSeconds`
-  real, no nominal):
-    piX = (p95(X) − p5(X)) / mean(X)
-  RingBuffer ya tiene `percentile` y `mean`; cero-alloc.
-- Devolver `piR`, `piG`, `piB` en `diagnostics`.
-- Nuevo criterio para promover `fingerDetected = true`:
-  además de los actuales, exigir
-    `piR > 0.0015 && piG > 0.0010` durante ≥10 frames consecutivos.
-  Mantener un contador independiente del de liveness: `vitalityCount`,
-  con release de 90 frames (3 s) para no perder al dedo en una breath
-  hold.
-- Justificación (Allen 2007, Physiol Meas): bloquea cuerpos sin pulso
-  (cadáver, prótesis, juguete) sin penalizar perfusión baja real
-  (frío/shock). Threshold G < threshold R porque la pulsatilidad verde
-  ronda el 60% de la roja en piel clara y ~80% en piel oscura — esto
-  permite que el gate también funcione en fototipos altos.
-
-──────────────────────────────────────────────────────────────────────────
-COMMIT 4 — LIVENESS ADAPTATIVO POR FOTOTIPO / PERFUSIÓN BAJA
-Archivo: src/modules/signal-processing/PPGSignalProcessor.ts
-
-LIVENESS hoy asume torch sobre piel media. Hacerlo ADAPTATIVO:
-
-- Detectar el régimen "stress mode" cuando, durante ≥3 s seguidos,
-  `prepassSuccessRate < 0.30` Y `textureEntropy ∈ [1.6, 3.9]` Y
-  `coverageContiguity ≥ 0.55` (es decir: hay UN dedo cohesionado pero
-  la firma roja es débil — fototipo VI / cianosis / shock).
-- En stress mode, BAJAR temporalmente:
-    LIVENESS.RED_OVER_GB_MIN: 16 → 10
-    LIVENESS.ABSORPTION_MIN  : 1.30 → 1.18
-  Restaurar a default cuando la condición cesa por ≥3 s.
-- Loguear cada transición en ROITelemetryLogger con tag
-  "LIVENESS_ADAPT" (campos: from, to, reason).
-- NO tocar el resto de los gates.
-
-Justificación: Bent et al., npj Digital Medicine 2020 — sesgo demostrado
-de PPG en piel oscura. La contramedida es bajar umbrales de R/(G+B)
-SOLO cuando otros gates físicos confirman tejido cohesionado.
-
-──────────────────────────────────────────────────────────────────────────
-COMMIT 5 — CHROM/POS BLOQUE-WISE (top-K tiles)
-Archivo: src/modules/signal-processing/SignalSourceRanker.ts
-       + src/modules/signal-processing/PPGSignalProcessor.ts
-
-- En SignalSourceRanker.update(...) aceptar un parámetro extra opcional:
-    `tilesRGB?: { r: Float64Array; g: Float64Array; b: Float64Array; score: Float64Array; n: number }`
-  (mantener overload antiguo: si no viene, usar el RGB medio actual).
-- Cuando venga, calcular CHROM y POS por tile sobre los TOP-25 tiles
-  por score (ordenar copia en sortScratch reutilizable). Promediar las 25
-  proyecciones para obtener `chromVal` y `posVal`. NO tocar las otras 6
-  fuentes (R, G, RG, absR, absG, diffRG).
-- En PPGSignalProcessor, después de `roiMask.process`, exponer los tiles
-  smR/smG/smB (ya existen como `tileMeanR/G/B`) vía un getter
-  `getSmoothedTiles()` y pasarlos al ranker.
-- Cero-alloc: vectores devueltos son referencias a campos privados;
-  no copiar.
-
-Justificación: McDuff et al. 2023 (skin-mask weighted CHROM) — proyectar
-sobre los tiles de mayor score en lugar del promedio espacial sube ~3–6
-dB de SNR bajo micro-movimiento porque elimina tiles glare/borde.
-
-──────────────────────────────────────────────────────────────────────────
-COMMIT 6 — DC TRACKING ROBUSTO (mediana 5 s) + BANDPASS DUAL
-Archivo: src/modules/signal-processing/BandpassFilter.ts
-       + src/modules/signal-processing/PPGSignalProcessor.ts
-
-(6.a) BandpassFilter: añadir un MODO dual conmutable
-  - Banda normal (default): HPF 0.4 Hz, LPF 10 Hz (ya implementado).
-  - Banda rescate: HPF 0.5 Hz, LPF 8 Hz, recomputar coeficientes solo si
-    cambia el modo. Switch O(1) entre dos juegos de B/A precomputados.
-  - API pública: `setMode('NORMAL' | 'RESCUE')`. Exponer `getMode()`.
-
-(6.b) PPGSignalProcessor: invocar `setMode('RESCUE')` cuando el
-  `SignalSourceRanker.getActiveSource()` ∈ {CHROM, POS} durante ≥5 s
-  (recuento por frames del ranker). Volver a NORMAL cuando vuelva a
-  R/G/RG ≥ 5 s. Cero alloc.
-
-(6.c) `odDcMovingAvg` (que hoy es media exponencial 0.02) reemplazarlo
-  por una MEDIANA RODANTE de 5 s sobre OD. Implementación: ring de 150
-  muestras + insertion-sort O(n) por inserción/remoción (n ≤ 150;
-  ~0.1 ms/frame en mobile). Dejar el viejo como fallback los primeros 60
-  frames (warm-up).
-
-Justificación: Berkaya 2018 — la mediana es ~5× más robusta a
-artefactos transitorios que la media móvil para DC tracking en PPG.
-La banda dual mantiene morfología en operación normal y prioriza SNR
-cuando el ranker ya delegó en proyecciones (señal ya degradada).
-
-──────────────────────────────────────────────────────────────────────────
-COMMIT 7 — AUTO-EXPOSURE FEEDBACK LOOP
-Archivos: src/components/CameraView.tsx
-        + src/modules/signal-processing/ExposureController.ts (nuevo)
-
-- Crear ExposureController con API:
-    constructor(track: MediaStreamTrack)
-    notify(metrics: { meanR: number; clipHigh: number; meanRMin: number; meanRMax: number; tNow: number }): void
-    stop(): void
-- Lógica:
-  * Si `clipHigh > 0.20` durante ≥1 s → bajar `exposureCompensation` un
-    paso (paso = (caps.max-caps.min)/16, clamp a caps).
-  * Si `meanR < 80` durante ≥1 s → subir un paso.
-  * Histéresis: nunca dos cambios en menos de 800 ms.
-  * Si tras 5 s `meanR ∉ [120, 220]`, intentar TOGGLE TORCH una sola
-    vez por sesión (con histéresis 3 s antes de revertir).
-  * PROHIBIDO tocar focus/WB (ya están locked en Phase 4 actual).
-  * PROHIBIDO cambiar resolución (rompería SampleRateEstimator).
-- En CameraView: instanciar tras Phase 4, exponer en diagnostics
-  `exposureControllerActive: boolean`.
-- En PPGSignalProcessor: pasarle al controller `meanR` del ROI y
-  `clipHighRatio` cada frame vía un callback opcional ya existente
-  (o `EventTarget` tipado si no hay; sin window globals).
-- Loguear cada cambio en ROITelemetryLogger tag "EXPOSURE".
-
-Justificación: Apple HIG / Google CameraX — sin este loop, en piel oscura
-o flash débil el sensor sub-expone, `meanR` cae bajo 80, y todos los
-gates físicos disparan falsos negativos aunque haya pulso.
-
-──────────────────────────────────────────────────────────────────────────
-COMMIT 8 — TELEMETRÍA EXTENDIDA EN OVERLAY FORENSE
-Archivo: src/components/ForensicGateOverlay.tsx
-       + src/types/signal.d.ts (extender ProcessedSignal.diagnostics)
-
-Sumar al overlay (sin romper layout existente) chips:
-  - textureEntropy (bits, 1 decimal)
-  - coverageContiguity (%, entero)
-  - piR / piG / piB (%, 2 decimales)
-  - exposure step actual (entero, signo)
-  - bandpass mode (NORMAL/RESCUE)
-  - active source (ya existe, dejarlo)
-  - prepassRedDomMin / prepassRedMin actuales (ya existen via telemetry)
-Throttle con el mismo mecanismo de 150 ms ya implementado.
-
-──────────────────────────────────────────────────────────────────────────
-REQUISITOS TRANSVERSALES (no negociables)
-
-1. Cero-alloc en hot path: nada de Map, Object.entries, .map/.filter
-   dentro de processFrame o computeSQI. Reutilizar Float64Array/Int32Array.
-2. Timing: usar `frameTimestamp` real ya propagado por
-   `useSignalProcessor.processFrame(imageData, frameTimestamp)`. Si no
-   viene, fallback a `performance.now()` (NUNCA Date.now).
-3. Sample rate: respetar el `SampleRateEstimator` ya integrado en
-   `Index.tsx`. Si el estimador cambia >1.2 fps, llamar a
-   `bandpassFilter.setSampleRate(rate)` (ya existe). NO resetear estado.
-4. Cada nuevo threshold debe ser una constante nombrada con cita de
-   literatura en JSDoc (Apple Heart Study 2020, Nature Sci.Rep. 2014,
-   IEEE TBME 2019/2023, de Haan TBME 2013, Wang TBME 2017, McDuff 2023,
-   Bent npj Digit Med 2020, Berkaya 2018, Allen Physiol Meas 2007).
-5. Cada commit con su Vitest en __tests__ hermano. `npm run ci:guard`
-   verde antes de pasar al siguiente commit.
-6. Actualizar memorias:
-   - mem://procesamiento-senal/extraccion-senal-ppg-v2 (resumen nuevo)
-   - mem://procesamiento-senal/deteccion-dedo-y-estabilidad-v2 (resumen nuevo)
-   - mem://camera/configuracion-y-activacion-nativa (sumar ExposureController)
-7. Actualizar `docs/medical-validation.md` sección "Finger detection &
-   raw PPG extraction" con los 8 commits y su racional.
-
-ENTREGABLES AL TERMINAR:
-  (a) Diff resumido por archivo.
-  (b) Salida de `npm run ci:guard`.
-  (c) Lista de los 8 commits con sus tests pasando.
-  (d) Antes/después en SQI medio sobre un video de prueba que dejes
-      cargado en /test/fixtures (si no existe, usar la grabación
-      sintética que genere el test del commit 1).
-````
+### 9) `scripts/audit-forensic.mjs` — sin cambios (los nuevos campos no introducen patrones prohibidos)
 
 ---
 
-## Por qué este conjunto exacto y por qué en este orden
+## Garantías
+- **Cero `Math.random`, cero mocks, cero clamping fisiológico** en valores de salida (sólo en pesos internos del Kalman/softmax — nunca en BPM/SpO₂/PA).
+- **Cero-alloc en hot path**: Kalman = 6 floats; tile-PI usa Float64Array existente; ring buffers reutilizados.
+- **Backward compatible**: `ROIMaskResult` sólo añade campos; `SignalSourceRanker.update()` añade arg opcional; `ProcessedSignal.diagnostics` añade opcionales.
+- **Verificación final**: `npm run ci:guard` (audit-forensic + vitest + lint + build) verde antes de cerrar.
 
-1. **CC primero** — sin él, el resto de mejoras siguen viendo "dedo + ruido rojo del fondo" como un único blob.
-2. **Texture entropy + contiguity** — completa la triada física (firma + cohesión + textura) que LIVENESS necesita para no depender únicamente de R/(G+B).
-3. **PI por canal** — el primer gate biológico (no óptico) del pipeline; bloquea cadáver/silicona sin matar perfusión baja.
-4. **Liveness adaptativo** — solo seguro DESPUÉS de 1+2+3, porque baja umbrales solo cuando los otros gates ya confirmaron tejido.
-5. **CHROM/POS bloque-wise** — mejora la fuente proyectada SIN tocar las clásicas R/G/RG (preserva lo que ya funciona).
-6. **DC mediana + bandpass dual** — protege contra artefactos transitorios y permite "modo rescate" cuando el ranker ya cedió a proyecciones.
-7. **Auto-exposure loop** — cierra el lazo de control que CameraView abre en Phase 4 pero no mantiene en runtime.
-8. **Telemetría** — sin observabilidad nueva, lo anterior es invisible.
-
-## Lo que NO hace este plan (a propósito, según workspace-knowledge)
-
-- No toca BPM/SpO2/BP/glucosa/colesterol — son fases siguientes.
-- No introduce ML on-device — fuera de scope de Fase 1.
-- No introduce dependencias nuevas (no opencv, no tf.js).
-- No rompe API pública del hook `useSignalProcessor`.
-- No cambia diseño visual salvo chips nuevos en el overlay forense ya existente.
-
-Aprobá este plan y aplico los 8 commits en una sola tirada quirúrgica, archivo por archivo, con sus tests y `ci:guard` verde.
+## Orden de aplicación
+1. Tracker Kalman + maskIoU + tile-PI + topK weights en `AdaptiveROIMask.ts`.
+2. SignalSourceRanker acepta topK weights (CHROM/POS).
+3. PPGSignalProcessor: integra entropy/contiguity/IoU/PI, liveness adaptativo, timing real estricto, motion-aware SQI, bandpass auto-switch, mediana DC.
+4. Types + hook surface.
+5. Overlay extendido.
+6. Tests + ci:guard verde.
