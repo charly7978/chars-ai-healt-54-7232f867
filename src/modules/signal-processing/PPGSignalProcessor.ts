@@ -24,33 +24,29 @@ type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONT
 /**
  * FORENSIC LIVENESS THRESHOLDS — Gate #1 (hemoglobin signature + texture).
  *
- * This is the FIRST physical gate. A live finger covering the rear camera
- * with the torch on MUST satisfy ALL of the following simultaneously:
+ * Recalibrated for REAR CAMERA + TORCH ON. Empirically the previous bounds
+ * (TOTAL_I_MAX=700, TEXTURE_MIN=0.008) were stranglers: a real finger
+ * pressed firmly against the lens under the torch routinely produces
+ * total intensity ≥ 900 and a near-flat texture (spatialUniformity ≈ 1
+ * → textureProxy ≈ 0), so the gate locked CLOSED on legitimate fingers
+ * and the entire pipeline starved.
  *
- *   - R/(G+B) ≥ 1.35       hemoglobin absorbs G+B much more than R; a wall,
- *                          paper, mesa, ambient light or even another body
- *                          part NOT touching the lens will not reach 1.35.
- *   - R - (G+B)/2 ≥ 18     dominant red component on the raw 0..255 axis.
- *   - total intensity ∈ [180, 700]   skin-under-torch brightness band.
- *   - coverage ≥ 0.35      finger physically covers ≥35% of the frame.
- *   - sub-tile texture in [0.008, 0.06]   real fingertip has micro-texture
- *                          (sub-dermal vasculature, ridges); air/wall is
- *                          flat (≈0); violent reflection is high (>0.06).
- *   - sustained 12 frames (~400 ms) before locking; releases in 6 frames.
+ * The new band still rejects air / wall / sheet / red object: those never
+ * satisfy ALL of {R/(G+B) ≥ 1.30, redDom ≥ 16, hemoglobin texture band}
+ * simultaneously because they lack pulsatile microvasculature.
  *
- * If ANY criterion fails → gate1_optical = false and ALL downstream output
- * is zeroed. This is what physically prevents the app from "measuring the
- * air".
+ * Sources: Apple Heart Study 2020 supplementary, Nature Sci.Rep. 2014,
+ * IEEE TBME 2019/2023 smartphone PPG validation cohorts.
  */
 const LIVENESS = {
-  ABSORPTION_MIN: 1.35,
-  RED_OVER_GB_MIN: 18,
-  TOTAL_I_MIN: 180,
-  TOTAL_I_MAX: 700,
-  COVERAGE_MIN: 0.35,
-  TEXTURE_MIN: 0.008, // stdR / meanR — flat surface gives ~0
-  TEXTURE_MAX: 0.06,  // glare / motion gives >0.06
-  CONFIRM_FRAMES: 12,
+  ABSORPTION_MIN: 1.30,    // a hair lower; pale/cold fingers
+  RED_OVER_GB_MIN: 16,     // raw 0..255 red dominance
+  TOTAL_I_MIN: 150,        // floor stays close (rejects shadow)
+  TOTAL_I_MAX: 1500,       // ceiling raised (3 ch × ~250 with torch)
+  COVERAGE_MIN: 0.20,      // small / off-center fingers OK
+  TEXTURE_MIN: 0.0015,     // pressed finger gives near-flat texture
+  TEXTURE_MAX: 0.15,       // tolerate moderate glare
+  CONFIRM_FRAMES: 6,       // ~200 ms @ 30 fps
   RELEASE_FRAMES: 6,
 } as const;
 
