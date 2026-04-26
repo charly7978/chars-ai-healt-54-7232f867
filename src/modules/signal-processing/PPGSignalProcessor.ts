@@ -681,6 +681,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       },
       forensicGate: this.computeForensicGate(roi.rawRed, timestamp),
     });
+    // V6: success path → log final liveness verdict (passAll vs reason).
+    const fg = this.computeForensicGate(roi.rawRed, timestamp);
+    this.logRoiTelemetry(timestamp, roi, fg.passAll, fg.livenessReason);
   }
 
   /**
