@@ -20,6 +20,9 @@ const FORBIDDEN = [
   { re: /\|\|\s*97\b(?![0-9])/g, msg: 'Default SpO2=97 sospechoso' },
   { re: /\|\|\s*120\b(?![0-9])/g, msg: 'Default systolic=120 sospechoso' },
   { re: /\|\|\s*80\b(?![0-9])/g, msg: 'Default diastolic=80 sospechoso' },
+  { re: /\|\|\s*60\b(?![0-9])/g, where: /modules\/(vital-signs|biomarkers)|HeartBeatProcessor/, msg: 'Default BPM=60 sospechoso' },
+  { re: /\|\|\s*90\b(?![0-9])/g, where: /modules\/(vital-signs|biomarkers)/, msg: 'Default 90 (SpO2/dia) sospechoso' },
+  { re: /\b(mock|fake|dummy|synthetic|placeholder)\b/gi, where: /modules\/(signal-processing|vital-signs|biomarkers)|HeartBeatProcessor/, msg: 'Palabra prohibida (mock/fake/synthetic)' },
 ];
 
 function walk(dir) {
