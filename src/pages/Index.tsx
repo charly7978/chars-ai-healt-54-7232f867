@@ -580,7 +580,9 @@ const Index = () => {
     stopProcessing();
     if (isCalibrating) forceCalibrationCompletion();
     const savedResults = resetVitalSigns();
-    if (savedResults || vitalSigns.spo2 > 0) {
+    // FORENSIC: never persist vital-signs records that include SpO2/BP/etc.
+    // when running in forensic mode — those numbers are only valid in CIVIL.
+    if (CIVIL_MODE && (savedResults || vitalSigns.spo2 > 0)) {
       const dataToSave = savedResults || vitalSigns;
       await saveMeasurement({
         heartRate,
