@@ -148,6 +148,12 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // OD baseline (DC móvil para conversión sRGB→OD)
   private odDcMovingAvg = 0;
 
+  // Persistent diagnostic RGB ring: survives contact/gate resets so G1/G2/G3
+  // never drop to zero during minor state changes or soft frame-loop restarts.
+  private diagnosticRedBuf = new RingBuffer(300);
+  private diagnosticGreenBuf = new RingBuffer(300);
+  private diagnosticBlueBuf = new RingBuffer(300);
+
   // Triple-gate publication state (último resultado autorizado)
   private publicationGate = false;
 
@@ -446,6 +452,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.redBuf.push(lr);
     this.greenBuf.push(lg);
     this.blueBuf.push(lb);
+    this.diagnosticRedBuf.push(lr);
+    this.diagnosticGreenBuf.push(lg);
+    this.diagnosticBlueBuf.push(lb);
     if (this.redBuf.length >= 6) this.calculateACDC();
     const livenessInstant =
       lAbsorption >= absorptionMin &&
