@@ -50,7 +50,23 @@ export class SignalSourceRanker {
     rawR: number, rawG: number, rawB: number,
     baseR: number, baseG: number, baseB: number,
     redPI: number, greenPI: number,
-    clipHigh: number, motionArtifact: boolean
+    clipHigh: number, motionArtifact: boolean,
+    /**
+     * V9 — Optional weighted top-K tile inputs from AdaptiveROIMask.
+     * When supplied, CHROM and POS are computed on the weighted mean of the
+     * top-K tiles (per-channel SNR-maximised mask) instead of the uniform
+     * ROI mean. This concentrates the projection on tiles with the highest
+     * tile-PI, which dominates SNR of CHROM/POS in finger-PPG.
+     *
+     * For B (no per-channel weight), we average wR and wG to obtain a fused
+     * weight; if either weights array is missing or all-zero, we fall back
+     * to the uniform mean (rawR, rawG, rawB) — preserving prior behaviour.
+     */
+    topKWeightsR?: Float64Array,
+    topKWeightsG?: Float64Array,
+    tileMeanR?: Float64Array,
+    tileMeanG?: Float64Array,
+    tileMeanB?: Float64Array,
   ): { value: number; label: string; allSQI: Record<string, number> } {
     this.frameCount++;
     const eps = 0.01;
@@ -74,18 +90,50 @@ export class SignalSourceRanker {
     if (rawR > 245) { rW *= 0.4; gW = 1 - rW; }
 
     // --- CHROM (de Haan 2013) & POS (Wang 2017) ---
-    // Normalize RGB by their slow EWMA mean → unit-mean RGB Rn,Gn,Bn
+    // V9: prefer weighted top-K tile means per channel when provided. The
+    // softmax weights from AdaptiveROIMask emphasise the tiles with highest
+    // tile-PI (Welford incremental, 60 frames), which boosts CHROM/POS SNR
+    // because the projection is dominated by truly pulsatile skin patches
+    // instead of being diluted by lower-perfusion edges.
+    let chromR = rawR;
+    let chromG = rawG;
+    let chromB = rawB;
+    if (
+      topKWeightsR && topKWeightsG &&
+      tileMeanR && tileMeanG && tileMeanB &&
+      topKWeightsR.length === topKWeightsG.length &&
+      tileMeanR.length === topKWeightsR.length
+    ) {
+      let sR = 0, sG = 0, sB = 0;
+      let wRsum = 0, wGsum = 0, wBsum = 0;
+      const N = topKWeightsR.length;
+      for (let i = 0; i < N; i++) {
+        const wR = topKWeightsR[i];
+        const wG = topKWeightsG[i];
+        if (wR > 0) { sR += tileMeanR[i] * wR; wRsum += wR; }
+        if (wG > 0) { sG += tileMeanG[i] * wG; wGsum += wG; }
+        // Fused weight for B (no native B weighting from the mask).
+        const wB = (wR + wG) * 0.5;
+        if (wB > 0) { sB += tileMeanB[i] * wB; wBsum += wB; }
+      }
+      if (wRsum > 0) chromR = sR / wRsum;
+      if (wGsum > 0) chromG = sG / wGsum;
+      if (wBsum > 0) chromB = sB / wBsum;
+    }
+    // Normalize RGB by their slow EWMA mean → unit-mean RGB Rn,Gn,Bn.
+    // The EWMA tracks the chosen (weighted or uniform) channel triplet so
+    // the normalisation reference moves coherently with the projection.
     if (!this.muInit) {
-      this.muR = rawR; this.muG = rawG; this.muB = rawB; this.muInit = true;
+      this.muR = chromR; this.muG = chromG; this.muB = chromB; this.muInit = true;
     } else {
       const a = this.MU_ALPHA;
-      this.muR = this.muR * (1 - a) + rawR * a;
-      this.muG = this.muG * (1 - a) + rawG * a;
-      this.muB = this.muB * (1 - a) + rawB * a;
+      this.muR = this.muR * (1 - a) + chromR * a;
+      this.muG = this.muG * (1 - a) + chromG * a;
+      this.muB = this.muB * (1 - a) + chromB * a;
     }
-    const Rn = this.muR > 1 ? rawR / this.muR : 1;
-    const Gn = this.muG > 1 ? rawG / this.muG : 1;
-    const Bn = this.muB > 1 ? rawB / this.muB : 1;
+    const Rn = this.muR > 1 ? chromR / this.muR : 1;
+    const Gn = this.muG > 1 ? chromG / this.muG : 1;
+    const Bn = this.muB > 1 ? chromB / this.muB : 1;
 
     // CHROM:  Xs = 3·Rn − 2·Gn ;  Ys = 1.5·Rn + Gn − 1.5·Bn ;  S = Xs − α·Ys
     // α adapts as σ(Xs)/σ(Ys); approximate online with a tiny EWMA of |Xs|/|Ys|
