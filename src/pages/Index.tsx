@@ -934,6 +934,21 @@ const Index = () => {
     const positionQuality = getPositionQuality();
     const motionInfo = getMotionInfo();
 
+    // Per-frame camera/extraction health: records full G1/G2/G3 evidence even
+    // when downstream gates return early, but updates UI only once per second.
+    const rgbStatsForHealth = getRGBStats();
+    cameraQualityRef.current.inspect({
+      redDC: rgbStatsForHealth.redDC,
+      greenDC: rgbStatsForHealth.greenDC,
+      redAC: rgbStatsForHealth.redAC,
+      greenAC: rgbStatsForHealth.greenAC,
+    });
+    const healthNow = performance.now();
+    if (healthNow - lastSignalHealthCommitAtRef.current >= 1000) {
+      lastSignalHealthCommitAtRef.current = healthNow;
+      setSignalHealth(cameraQualityRef.current.getSignalHealth(healthNow));
+    }
+
     // ════════════════════════════════════════════════════════════
     //  FORENSIC TRIPLE GATE — single source of truth for the UI.
     //  If passAll is false → zero everything. No waveform, no BPM, no
@@ -1275,22 +1290,6 @@ const Index = () => {
     }
 
     vitalSignsFrameCounter.current++;
-
-    // Camera/extraction health must run for every processed frame, not only
-    // in CIVIL_MODE vitals. It records the full ring buffer but commits the
-    // overlay at 1 Hz to avoid React re-render pressure on mobile capture.
-    const rgbStatsForHealth = getRGBStats();
-    cameraQualityRef.current.inspect({
-      redDC: rgbStatsForHealth.redDC,
-      greenDC: rgbStatsForHealth.greenDC,
-      redAC: rgbStatsForHealth.redAC,
-      greenAC: rgbStatsForHealth.greenAC,
-    });
-    const healthNow = performance.now();
-    if (healthNow - lastSignalHealthCommitAtRef.current >= 1000) {
-      lastSignalHealthCommitAtRef.current = healthNow;
-      setSignalHealth(cameraQualityRef.current.getSignalHealth(healthNow));
-    }
 
     // FORENSIC: only run civil vitals (SpO2/BP/glucose/lipids) when explicitly
     // enabled via ?civil=1. By default the forensic operator only sees pulse.
