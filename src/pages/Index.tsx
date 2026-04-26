@@ -134,6 +134,14 @@ const Index = () => {
   const sessionIdRef = useRef<string>("");
   const SESSION_LOG_MAX = 4000; // ~10 min @ 1 sample / 150 ms
   const [sessionLogSize, setSessionLogSize] = useState(0);
+  // Session-wide counters: a "valid sample" is one where the triple gate
+  // passed at the moment we sampled it; a "noise sample" is everything
+  // else (any gate closed). The percentage tells the operator whether
+  // the device is truly measuring or staring at noise.
+  const validSamplesRef = useRef(0);
+  const noiseSamplesRef = useRef(0);
+  const [validSamples, setValidSamples] = useState(0);
+  const [noiseSamples, setNoiseSamples] = useState(0);
 
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
@@ -529,6 +537,10 @@ const Index = () => {
     // Reset session log for a fresh forensic export.
     sessionLogRef.current = [];
     setSessionLogSize(0);
+    validSamplesRef.current = 0;
+    noiseSamplesRef.current = 0;
+    setValidSamples(0);
+    setNoiseSamples(0);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
@@ -732,9 +744,18 @@ const Index = () => {
           reason: snap.livenessReason,
         });
         if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
+        // Increment session-wide valid/noise counters at the same throttled
+        // cadence. These drive the "Válidas / Ruido" + "Triple-gate %"
+        // display in the forensic overlay.
+        if (snap.passAll) validSamplesRef.current += 1;
+        else noiseSamplesRef.current += 1;
         // Cheap state ping (only when buckets of 25 rounds elapse) so the
-        // export button counter updates without spamming React.
-        if (log.length % 25 === 0) setSessionLogSize(log.length);
+        // overlay counters update without spamming React.
+        if (log.length % 25 === 0) {
+          setSessionLogSize(log.length);
+          setValidSamples(validSamplesRef.current);
+          setNoiseSamples(noiseSamplesRef.current);
+        }
       }
 
       // ── Gate transition alerts (haptic + toast) ──
@@ -1084,6 +1105,8 @@ const Index = () => {
           sampleCount={sessionLogSize}
           cadenceMs={overlayCadenceMs}
           onCadenceChange={setOverlayCadenceMs}
+          validSamples={validSamples}
+          noiseSamples={noiseSamples}
         />
 
         {isMonitoring && (() => {
