@@ -58,7 +58,7 @@ export class HeartBeatProcessor {
   private lastPeakValue = 0;
   private consecutivePeaks = 0;
   private frameCount = 0;
-  private peakThreshold = 1.5; // REDUCIDO para modo forense - permitir señales débiles
+  private peakThreshold = 4.0;
 
   private beatsAccepted = 0;
   private beatsRejected = 0;
@@ -77,18 +77,6 @@ export class HeartBeatProcessor {
   private pressurePenalty = 0;
   private contactStable = true;
   private sourceSwitchRecent = false;
-
-  // ── FORENSIC PUBLICATION GATE ────────────────────────────────────────
-  // Cuando es false, NUNCA se reproduce beep ni vibración — incluso si
-  // un peak fue aceptado por la lógica morfológica. Esto evita feedback
-  // sensorial sobre señales no publicables (aire, sin contacto óptico,
-  // gates 1/2/3 cerrados).
-  private publicationGate = false;
-
-  /** Llamado por el hook con la verdad de los 3 gates + evidencia óptica. */
-  public setPublicationGate(pass: boolean): void {
-    this.publicationGate = !!pass;
-  }
 
   constructor() {
     this.setupAudio();
@@ -149,18 +137,6 @@ export class HeartBeatProcessor {
     const { normalizedValue, normRange } = this.normalizeSignal(filteredValue);
     this.updatePeriodicityEstimates();
     this.updateThreshold(normRange);
-    
-    // LOG FORENSE: debug de señal
-    if (this.frameCount % 30 === 0) {
-      console.log('💓 HeartBeatProcessor debug:', {
-        filteredValue,
-        normalizedValue,
-        normRange,
-        peakThreshold: this.peakThreshold,
-        signalBufLength: this.signalBuf.length,
-        consecutivePeaks: this.consecutivePeaks
-      });
-    }
 
     const timeSinceLastPeak = this.lastPeakTime > 0 ? now - this.lastPeakTime : 1e9;
     const expectedRR = this.getExpectedRR();
@@ -230,13 +206,8 @@ export class HeartBeatProcessor {
           this.updateTemplate();
         }
 
-        // FORENSIC: feedback sensorial SOLO si la cadena triple-gate +
-        // evidencia óptica autoriza publicación. Sin esto, el peak existe
-        // internamente para HRV pero no se notifica al usuario.
-        if (this.publicationGate) {
-          this.vibrate();
-          this.playBeep();
-        }
+        this.vibrate();
+        this.playBeep();
       } else {
         rejectionReason = candidate.rejectionReason;
         this.lastRejectionReason = rejectionReason;
@@ -431,18 +402,18 @@ export class HeartBeatProcessor {
       }
     }
 
-    const minScore = this.consecutivePeaks < 3 ? 20 : 28; // REDUCIDO para modo forense
-    const thresholdMet = c.amplitude > this.peakThreshold * (c.periodicitySupport ? 0.4 : 0.6) ||
-      c.prominence > Math.max(1.0, this.peakThreshold * 0.3); // REDUCIDO
+    const minScore = this.consecutivePeaks < 3 ? 28 : 35;
+    const thresholdMet = c.amplitude > this.peakThreshold * (c.periodicitySupport ? 0.6 : 0.85) ||
+      c.prominence > Math.max(1.8, this.peakThreshold * 0.5);
 
     if (c.totalScore < minScore && !thresholdMet) {
       c.status = 'rejected'; c.rejectionReason = 'low_total_score'; return;
     }
-    if (c.detectorAgreement >= 1.0 && c.morphologyScore > 30 && thresholdMet) { // REDUCIDO
+    if (c.detectorAgreement >= 1.0 && c.morphologyScore > 40 && thresholdMet) {
       c.status = 'accepted'; return;
     }
     if (c.detectorHits >= 1 && c.totalScore >= minScore && thresholdMet) {
-      if (c.templateCorrelation > 0.3 || c.periodicitySupport || c.morphologyScore > 40) { // REDUCIDO
+      if (c.templateCorrelation > 0.5 || c.periodicitySupport || c.morphologyScore > 55) {
         c.status = 'accepted'; return;
       }
     }

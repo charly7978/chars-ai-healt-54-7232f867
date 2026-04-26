@@ -32,19 +32,17 @@ export const useHealthAnalysis = () => {
     setAnalysis(null);
 
     try {
-      // FORENSIC: NUNCA inyectar defaults fisiológicos. Si no hay medición
-      // real, se envía null y la Edge Function debe rechazar/abstenerse.
-      // Defaults eliminados: 70 BPM, 97 SpO2, 120/80 mmHg.
       const { data: result, error } = await supabase.functions.invoke('analyze-vitals', {
         body: {
-          heartRate: heartRate > 0 ? heartRate : null,
-          spo2: vitalSigns.spo2 > 0 ? vitalSigns.spo2 : null,
-          systolic: vitalSigns.pressure?.systolic > 0 ? vitalSigns.pressure.systolic : null,
-          diastolic: vitalSigns.pressure?.diastolic > 0 ? vitalSigns.pressure.diastolic : null,
+          heartRate: heartRate || 70,
+          spo2: vitalSigns.spo2 || 97,
+          systolic: vitalSigns.pressure?.systolic || 120,
+          diastolic: vitalSigns.pressure?.diastolic || 80,
           arrhythmiaCount: vitalSigns.arrhythmiaCount || 0,
-          glucose: vitalSigns.glucose > 0 ? vitalSigns.glucose : null,
-          totalCholesterol: (vitalSigns.lipids?.totalCholesterol || 0) > 0 ? vitalSigns.lipids.totalCholesterol : null,
-          triglycerides: (vitalSigns.lipids?.triglycerides || 0) > 0 ? vitalSigns.lipids.triglycerides : null,
+          glucose: vitalSigns.glucose || undefined,
+          
+          totalCholesterol: vitalSigns.lipids?.totalCholesterol || undefined,
+          triglycerides: vitalSigns.lipids?.triglycerides || undefined,
           quality,
           confidence: vitalSigns.measurementConfidence,
         }

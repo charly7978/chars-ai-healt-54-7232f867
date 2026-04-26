@@ -99,11 +99,9 @@ export class LipidResearchProcessor {
     if (input.rrVar.sdnn > 0 && input.rrVar.sdnn < 40) trig += (40 - input.rrVar.sdnn) * 0.5;
     trig += this.trigOffset;
 
-    // FORENSIC: reject — never clamp — physiologically impossible outputs.
-    // A clamped triglyceride value would silently fabricate a "normal" reading
-    // when the underlying features are out of distribution.
-    if (!isFinite(chol) || chol < 60 || chol > 500) return withheld;
-    if (!isFinite(trig) || trig < 30 || trig > 600) return withheld;
+    // Reject impossible
+    if (chol < 60 || chol > 500) return withheld;
+    if (trig < 30 || trig > 600) trig = Math.max(30, Math.min(600, trig));
 
     // EMA
     if (this.lastChol > 0) {

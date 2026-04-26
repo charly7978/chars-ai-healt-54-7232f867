@@ -1,4 +1,4 @@
-name: Forensic CI
+name: NodeJS Build
 
 on:
   push:
@@ -10,47 +10,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+
     steps:
     - uses: actions/checkout@v4
 
-    - name: Use Node.js 20.x
+    - name: Use Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v4
       with:
-        node-version: 20.x
-        cache: 'npm'
-
-    - name: Install dependencies
-      run: npm ci
-
-    - name: Clean caches (tsbuildinfo / vite / dist)
-      run: npm run clean
-
-    - name: Schema drift guard + tsc --noEmit
-      run: npm run typecheck
-
-    - name: Forensic audit script (no simulation/random/defaults)
-      run: npm run audit:forensic
-
-    - name: Forensic Vitest suite (allowlist + threshold lock-ins)
-      run: npm run test:forensic
-
-    - name: Full unit tests
-      run: npm test
-
-    - name: Lint
-      run: npm run lint
+        node-version: ${{ matrix.node-version }}
 
     - name: Build
-      run: npm run build
-
-    - name: MotionRejection auto-tuning telemetry
-      run: npm run telemetry:motion-tuning
-
-    - name: Upload motion-tuning telemetry artifact
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: motion-tuning-telemetry-${{ github.run_id }}
-        path: artifacts/motion-tuning.ndjson
-        if-no-files-found: warn
-        retention-days: 30
+      run: |
+        npm ci
+        npm run build

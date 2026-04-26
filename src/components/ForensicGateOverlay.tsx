@@ -9,24 +9,6 @@ export interface ForensicGateSnapshot {
   spectralPeakHz: number;
   spectralConcentration: number;
   livenessReason: string;
-  // Optical Evidence Gate (físico, independiente de morfología).
-  opticalEvidence?: boolean;
-  opticalReason?: string;
-  opticalReasonText?: string;
-  opticalMetrics?: {
-    acDc: number; rOverGB: number; texture: number;
-    clipHigh: number; clipLow: number; pi: number; meanR: number;
-  } | null;
-  publicationGate?: boolean;
-  effectiveSampleRate?: number;
-  bufferedSeconds?: number;
-  // Raw Gate-1 telemetry (mirrors the values driving the liveness decision).
-  livenessRaw?: {
-    rawR: number; rawG: number; rawB: number;
-    totalI: number; absorption: number; redDom: number;
-    texture: number; coverage: number;
-    confirmCount: number; lostCount: number;
-  };
 }
 
 export const FORENSIC_CADENCE_OPTIONS = [100, 150, 300, 500, 1000] as const;
@@ -39,8 +21,6 @@ interface Props {
   sampleCount?: number;
   cadenceMs?: ForensicCadenceMs;
   onCadenceChange?: (ms: ForensicCadenceMs) => void;
-  validSamples?: number;
-  noiseSamples?: number;
 }
 
 const pillBase =
@@ -60,7 +40,6 @@ function snrClass(db: number): string {
 
 const ForensicGateOverlay: React.FC<Props> = ({
   gate, visible, onExport, sampleCount, cadenceMs, onCadenceChange,
-  validSamples = 0, noiseSamples = 0,
 }) => {
   if (!visible) return null;
 
@@ -72,30 +51,8 @@ const ForensicGateOverlay: React.FC<Props> = ({
   const peakHz = gate?.spectralPeakHz ?? 0;
   const conc = gate?.spectralConcentration ?? 0;
   const reason = gate?.livenessReason ?? "ESPERANDO SEÑAL";
-  // OpticalEvidenceGate (gate físico independiente de morfología).
-  const opticalOk = gate?.opticalEvidence ?? null;
-  const opticalText = gate?.opticalReasonText ?? '—';
-  const om = gate?.opticalMetrics ?? null;
-  const effSr = gate?.effectiveSampleRate ?? 0;
-  const bufSec = gate?.bufferedSeconds ?? 0;
-  const lr = gate?.livenessRaw;
-  // Make the failing gate explicit so the operator never wonders why pulse
-  // is not being shown. (Gate 1 = optical, Gate 2 = spectral, Gate 3 = morph.)
-  let prefix = '';
-  if (g1 === false) prefix = 'G1 ÓPTICA · ';
-  else if (g2 === false) prefix = 'G2 ESPECTRAL · ';
-  else if (g3 === false) prefix = 'G3 MORFOLOGÍA · ';
-  const fullReason = prefix + reason;
-  const reasonShort = fullReason.length > 60 ? fullReason.slice(0, 59) + "…" : fullReason;
+  const reasonShort = reason.length > 48 ? reason.slice(0, 47) + "…" : reason;
   const bpmEstimate = peakHz > 0 ? Math.round(peakHz * 60) : 0;
-  const totalSamples = validSamples + noiseSamples;
-  const validPct = totalSamples > 0 ? (validSamples / totalSamples) * 100 : 0;
-  const validPctStr = totalSamples > 0 ? validPct.toFixed(1) + '%' : '—';
-  const validPctClass =
-    totalSamples === 0 ? 'text-zinc-400'
-    : validPct >= 60 ? 'text-emerald-300'
-    : validPct >= 25 ? 'text-amber-300'
-    : 'text-red-300';
 
   return (
     <div
@@ -132,7 +89,7 @@ const ForensicGateOverlay: React.FC<Props> = ({
             : "bg-red-700/20 text-red-200")
         }
       >
-        {passAll ? "PULSO REAL DETECTADO" : "NO PUBLICAR VALORES — SIN PULSO VÁLIDO"}
+        {passAll ? "PULSO REAL DETECTADO" : "SIN PULSO VÁLIDO"}
       </div>
 
       <div className="space-y-0.5 px-0.5">
@@ -150,21 +107,9 @@ const ForensicGateOverlay: React.FC<Props> = ({
           <span className="text-zinc-400">Concentración</span>
           <span className="text-zinc-100">{Math.round(conc * 100)}%</span>
         </div>
-        <div className="flex justify-between pt-1 mt-1 border-t border-zinc-700/60">
-          <span className="text-zinc-400">Válidas / Ruido</span>
-          <span className="text-zinc-100">
-            <span className="text-emerald-300">{validSamples}</span>
-            <span className="text-zinc-500"> / </span>
-            <span className="text-red-300">{noiseSamples}</span>
-          </span>
-        </div>
-        <div className="flex justify-between" title="Porcentaje de muestras con triple-gate (G1+G2+G3) completo durante la sesión">
-          <span className="text-zinc-400">Triple-gate %</span>
-          <span className={validPctClass + ' font-bold'}>{validPctStr}</span>
-        </div>
         <div
           className="flex justify-between gap-2 pt-0.5 border-t border-zinc-700/60 mt-1"
-          title={fullReason}
+          title={reason}
         >
           <span className="text-zinc-400 shrink-0">Razón</span>
           <span className="text-zinc-200 truncate text-right">{reasonShort}</span>
@@ -174,55 +119,6 @@ const ForensicGateOverlay: React.FC<Props> = ({
       <div className="mt-1.5 pt-1 border-t border-zinc-700/60 text-[9px] text-zinc-500 leading-tight">
         G1 firma hemoglobina · G2 SNR ≥ 6 dB · G3 morfología 4/4
       </div>
-
-      {/* ─── OpticalEvidenceGate (físico, sin morfología) ────────── */}
-      <div className="mt-1.5 pt-1 border-t border-zinc-700/60">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-[10px] font-bold tracking-widest text-zinc-300">EVIDENCIA ÓPTICA</span>
-          <span className={
-            "text-[9px] font-bold px-1 py-0.5 rounded " +
-            (opticalOk === true ? "bg-emerald-500/20 text-emerald-200"
-             : opticalOk === false ? "bg-red-500/20 text-red-200"
-             : "bg-zinc-600/20 text-zinc-300")
-          }>
-            {opticalOk === true ? "ACEPTADA" : opticalOk === false ? "RECHAZADA" : "—"}
-          </span>
-        </div>
-        <div className="text-[10px] text-zinc-300 truncate" title={opticalText}>{opticalText}</div>
-        {om && (
-          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 mt-1 text-[9px] text-zinc-400">
-            <div className="flex justify-between"><span>AC/DC</span><span className="text-zinc-100">{om.acDc.toFixed(4)}</span></div>
-            <div className="flex justify-between"><span>R/(G+B)</span><span className="text-zinc-100">{om.rOverGB.toFixed(2)}</span></div>
-            <div className="flex justify-between"><span>Textura</span><span className="text-zinc-100">{om.texture.toFixed(3)}</span></div>
-            <div className="flex justify-between"><span>PI</span><span className="text-zinc-100">{(om.pi * 100).toFixed(2)}%</span></div>
-            <div className="flex justify-between"><span>Clip↑</span><span className="text-zinc-100">{(om.clipHigh * 100).toFixed(1)}%</span></div>
-            <div className="flex justify-between"><span>Clip↓</span><span className="text-zinc-100">{(om.clipLow * 100).toFixed(1)}%</span></div>
-            <div className="flex justify-between"><span>meanR</span><span className="text-zinc-100">{om.meanR.toFixed(0)}</span></div>
-            <div className="flex justify-between"><span>SR ef.</span><span className="text-zinc-100">{effSr.toFixed(1)}Hz</span></div>
-          </div>
-        )}
-        <div className="text-[9px] text-zinc-500 mt-1">Buffer real: {bufSec.toFixed(1)}s / 10.0s</div>
-      </div>
-
-      {/* ─── Gate 1 raw telemetry (why liveness opens/closes) ─── */}
-      {lr && (
-        <div className="mt-1.5 pt-1 border-t border-zinc-700/60">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] font-bold tracking-widest text-zinc-300">CRUDO G1</span>
-            <span className="text-[9px] text-zinc-500">{lr.confirmCount}↑ / {lr.lostCount}↓</span>
-          </div>
-          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] text-zinc-400">
-            <div className="flex justify-between"><span>R</span><span className="text-zinc-100">{lr.rawR.toFixed(0)}</span></div>
-            <div className="flex justify-between"><span>G</span><span className="text-zinc-100">{lr.rawG.toFixed(0)}</span></div>
-            <div className="flex justify-between"><span>B</span><span className="text-zinc-100">{lr.rawB.toFixed(0)}</span></div>
-            <div className="flex justify-between"><span>ΣI</span><span className="text-zinc-100">{lr.totalI.toFixed(0)}</span></div>
-            <div className="flex justify-between" title="R/(G+B) — firma de hemoglobina (≥1.30)"><span>R/(G+B)</span><span className={lr.absorption >= 1.30 ? 'text-emerald-300' : 'text-red-300'}>{lr.absorption.toFixed(2)}</span></div>
-            <div className="flex justify-between" title="redDom = R - (G+B)/2 (≥16)"><span>redDom</span><span className={lr.redDom >= 16 ? 'text-emerald-300' : 'text-red-300'}>{lr.redDom.toFixed(0)}</span></div>
-            <div className="flex justify-between" title="textura sub-tile (banda 0.0015–0.15)"><span>texture</span><span className={lr.texture >= 0.0015 && lr.texture <= 0.15 ? 'text-emerald-300' : 'text-red-300'}>{lr.texture.toFixed(3)}</span></div>
-            <div className="flex justify-between" title="cobertura (≥0.20)"><span>cover</span><span className={lr.coverage >= 0.20 ? 'text-emerald-300' : 'text-red-300'}>{(lr.coverage * 100).toFixed(0)}%</span></div>
-          </div>
-        </div>
-      )}
 
       {onCadenceChange && (
         <div className="pointer-events-auto mt-2 flex items-center justify-between gap-1">

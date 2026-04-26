@@ -78,19 +78,11 @@ export const useHeartBeatProcessor = () => {
       activeSource?: string;
       perfusionIndex?: number;
       positionDrifting?: boolean;
-      // Forense: triple-gate + evidencia óptica. SOLO con esto en true se
-      // permiten beep, vibración y publicación de waveform/BPM.
-      publicationGate?: boolean;
     }
   ): HeartBeatResult => {
     if (!processorRef.current || processingStateRef.current !== 'ACTIVE') {
       return emptyResult(currentBPMRef.current);
     }
-
-    // Propaga la verdad de publicación al núcleo del beat processor para
-    // que el feedback sensorial (beep + vibrate) NUNCA se dispare sin
-    // evidencia óptica + 3 gates.
-    processorRef.current.setPublicationGate(!!upstreamContext?.publicationGate);
 
     const currentTime = timestamp ?? performance.now();
 
@@ -118,43 +110,17 @@ export const useHeartBeatProcessor = () => {
 
     setSignalQuality(roundedSQI);
 
-    // FORENSIC GATE #3 (morphology): only authorise pulse if the last 4
-    // accepted beats are morphologically valid AND the fused confidence is
-    // high enough AND the inter-beat-interval is physiologically stable.
-    // This is the gate that prevents the app from "finding a heart rate" in
-    // pure noise or in weak optical signals.
+    // FORENSIC GATE #3 (morphology): only publish BPM if the last 4 accepted
+    // beats are morphologically valid AND fused confidence is high enough.
+    // 0.12 was noise-prone; 0.45 forces real, periodic, well-shaped beats.
     const recent = result.debug.recentAcceptedBeats || [];
     const last4 = recent.slice(-4);
-    const morphologyShapesOk =
+    const morphologyOk =
       last4.length >= 4 &&
-      last4.every(b => {
-        const morphology = (b.morphologyScore || 0);
-        const rise = b.fiducials?.riseTimeMs;
-        const validity = b.fiducials?.morphologyValidity;
-        const detector = b.detectorAgreement || 0;
-        // morphologyScore is on a 0..100 scale upstream — accept ≥35.
-        const morphOk = morphology >= 35;
-        // If fiducials were computable, demand human rise time + validity.
-        // If not yet computed (rare on first 4 beats), don't reject for that.
-        const riseOk = rise == null ? true : (rise >= 60 && rise <= 350);
-        const validityOk = validity == null ? true : validity >= 0.30;
-        const detectorOk = detector >= 0.5;
-        return morphOk && riseOk && validityOk && detectorOk;
-      });
-    // RR stability: coefficient of variation of last 4 IBIs must be < 0.30
-    // (real human pulse ≈ 0.02–0.15; pure noise is wildly higher).
-    let rrStableOk = false;
-    if (last4.length >= 4) {
-      const ibis = last4.map(b => b.ibiMs).filter(v => v > 0);
-      if (ibis.length >= 4) {
-        const mean = ibis.reduce((a, b) => a + b, 0) / ibis.length;
-        const variance = ibis.reduce((s, v) => s + (v - mean) * (v - mean), 0) / ibis.length;
-        const cv = mean > 0 ? Math.sqrt(variance) / mean : 9;
-        rrStableOk = cv < 0.30 && mean >= 300 && mean <= 1800;
-      }
-    }
-    const morphologyOk = morphologyShapesOk && rrStableOk;
-    const bpmOk = result.bpm > 0 && result.bpmConfidence >= 0.40 && morphologyOk;
+      last4.every(b => (b.morphologyScore || 0) >= 0.55 &&
+                       (b.fiducials?.riseTimeMs ?? 0) >= 60 &&
+                       (b.fiducials?.riseTimeMs ?? 9999) <= 350);
+    const bpmOk = result.bpm > 0 && result.bpmConfidence >= 0.45 && morphologyOk;
 
     if (bpmOk) {
       setCurrentBPM(Math.round(result.bpm));

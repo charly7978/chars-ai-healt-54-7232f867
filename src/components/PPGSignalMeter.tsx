@@ -21,15 +21,6 @@ interface PPGSignalMeterProps {
   bpm?: number;
   spo2?: number;
   rrIntervals?: number[];
-  /**
-   * FORENSIC: AND duro de los 3 gates + OpticalEvidenceGate. Cuando es
-   * false, el monitor NO dibuja la onda recibida — empuja 0 al buffer y
-   * muestra el motivo exacto del rechazo. Garantiza que ninguna onda
-   * "fantasma" se pinte sobre aire / ruido / saturación.
-   */
-  publicationGate?: boolean;
-  /** Texto humano del motivo (livenessReason / opticalReasonText). */
-  rejectionReason?: string;
 }
 
 const CONFIG = {
@@ -100,16 +91,14 @@ const PPGSignalMeter = ({
   isPeak = false,
   bpm = 0,
   spo2 = 0,
-  rrIntervals = [],
-  publicationGate = true,
-  rejectionReason,
+  rrIntervals = []
 }: PPGSignalMeterProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number | null>(null);
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, publicationGate, rejectionReason });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -121,7 +110,7 @@ const PPGSignalMeter = ({
   const hrvDisplayRef = useRef<{ sdnn: number; rmssd: number }>({ sdnn: 0, rmssd: 0 });
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, publicationGate, rejectionReason };
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData };
     if (rrIntervals && rrIntervals.length >= 2) {
       const last = rrIntervals[rrIntervals.length - 1];
       ibiDisplayRef.current = Math.round(last);
@@ -132,7 +121,7 @@ const PPGSignalMeter = ({
       for (let i = 1; i < rrIntervals.length; i++) sumSqDiffs += (rrIntervals[i] - rrIntervals[i - 1]) ** 2;
       hrvDisplayRef.current.rmssd = Math.round(Math.sqrt(sumSqDiffs / (rrIntervals.length - 1)));
     }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, publicationGate, rejectionReason]);
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
@@ -269,49 +258,84 @@ const PPGSignalMeter = ({
     const { CANVAS_WIDTH: W, COLORS } = CONFIG;
     const { bpm, spo2, arrhythmiaStatus, quality, rrIntervals, rawArrhythmiaData } = propsRef.current;
     const rhythm = parseRhythmStatus(arrhythmiaStatus);
-    const plot = getPlotArea();
-    
-    // Información forense completa - panel superior
-    const panelY = 5;
-    const panelH = 85;
+    const panelH = 95;
+    const panelW = 160;
+    const panelY = 2;
     const fontSize = {
-      label: 'bold 11px "SF Mono", Consolas, monospace',
-      value: 'bold 28px "SF Mono", Consolas, monospace',
-      unit: '12px "SF Mono", Consolas, monospace',
-      small: '9px "SF Mono", Consolas, monospace',
+      label: 'bold 14px "SF Mono", Consolas, monospace',
+      value: 'bold 48px "SF Mono", Consolas, monospace',
+      unit: '16px "SF Mono", Consolas, monospace',
+      class: '11px "SF Mono", Consolas, monospace',
+      small: '10px "SF Mono", Consolas, monospace',
     };
     
-    // Panel izquierdo - BPM
-    ctx.fillStyle = 'rgba(0, 20, 40, 0.85)';
-    ctx.fillRect(5, panelY, 140, panelH);
+    ctx.fillStyle = 'rgba(0, 30, 15, 0.9)';
+    ctx.fillRect(3, panelY, panelW, panelH);
     ctx.strokeStyle = COLORS.TEXT_PRIMARY;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(5, panelY, 140, panelH);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(3, panelY, panelW, panelH);
     ctx.font = fontSize.label;
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
     ctx.textAlign = 'left';
-    ctx.fillText('FRECUENCIA', 12, panelY + 18);
+    ctx.fillText('♥ FRECUENCIA', 10, panelY + 18);
     ctx.font = fontSize.value;
     ctx.fillStyle = bpm > 0 ? COLORS.TEXT_PRIMARY : COLORS.TEXT_SECONDARY;
-    ctx.fillText(bpm > 0 ? bpm.toFixed(0) : '--', 12, panelY + 52);
+    ctx.fillText(bpm > 0 ? bpm.toString() : '--', 10, panelY + 66);
     ctx.font = fontSize.unit;
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText('BPM', 12, panelY + 72);
+    ctx.fillText('BPM', panelW - 40, panelY + 66);
+    if (bpm > 0) {
+      ctx.font = fontSize.class;
+      let hrLabel = '';
+      let hrColor = COLORS.TEXT_PRIMARY;
+      if (bpm < 60) { hrLabel = 'BRADICARDIA'; hrColor = COLORS.TEXT_WARNING; }
+      else if (bpm <= 100) { hrLabel = 'NORMAL'; hrColor = COLORS.TEXT_PRIMARY; }
+      else { hrLabel = 'TAQUICARDIA'; hrColor = COLORS.TEXT_WARNING; }
+      ctx.fillStyle = hrColor;
+      ctx.fillText(hrLabel, 10, panelY + 86);
+    }
     
-    // Panel central - Calidad y HRV
-    const centerX = W / 2;
-    const centerW = 220;
-    ctx.fillStyle = 'rgba(20, 20, 30, 0.85)';
-    ctx.fillRect(centerX - centerW / 2, panelY, centerW, panelH);
-    ctx.strokeStyle = quality > 60 ? COLORS.TEXT_PRIMARY : quality > 30 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(centerX - centerW / 2, panelY, centerW, panelH);
+    ctx.fillStyle = 'rgba(0, 15, 30, 0.9)';
+    ctx.fillRect(W - panelW - 3, panelY, panelW, panelH);
+    const spo2Border = spo2 >= 95 ? COLORS.TEXT_PRIMARY : spo2 >= 90 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
+    ctx.strokeStyle = spo2Border;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(W - panelW - 3, panelY, panelW, panelH);
     ctx.font = fontSize.label;
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    ctx.fillText('O₂ SATURACIÓN', W - panelW + 4, panelY + 18);
+    ctx.font = fontSize.value;
+    const spo2Color = spo2 >= 95 ? COLORS.TEXT_PRIMARY : spo2 >= 90 ? COLORS.TEXT_WARNING : spo2 > 0 ? COLORS.TEXT_DANGER : COLORS.TEXT_SECONDARY;
+    ctx.fillStyle = spo2Color;
+    ctx.fillText(spo2 > 0 ? spo2.toFixed(0) : '--', W - panelW + 4, panelY + 66);
+    ctx.font = fontSize.unit;
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText('%', W - 20, panelY + 66);
+    if (spo2 > 0) {
+      ctx.font = fontSize.class;
+      let spLabel = '';
+      let spColor = COLORS.TEXT_PRIMARY;
+      if (spo2 >= 95) { spLabel = 'NORMAL'; spColor = COLORS.TEXT_PRIMARY; }
+      else if (spo2 >= 90) { spLabel = 'HIPOXEMIA LEVE'; spColor = COLORS.TEXT_WARNING; }
+      else { spLabel = 'HIPOXEMIA'; spColor = COLORS.TEXT_DANGER; }
+      ctx.fillStyle = spColor;
+      ctx.fillText(spLabel, W - panelW + 4, panelY + 86);
+    }
+    
+    const centerX = W / 2;
+    const centerW = 260;
+    ctx.fillStyle = 'rgba(20, 20, 30, 0.9)';
+    ctx.fillRect(centerX - centerW / 2, panelY, centerW, panelH);
+    ctx.strokeStyle = quality > 60 ? COLORS.TEXT_PRIMARY : quality > 30 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(centerX - centerW / 2, panelY, centerW, panelH);
+    ctx.font = '12px "SF Mono", Consolas, monospace';
     ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
     ctx.fillText('CALIDAD SEÑAL', centerX, panelY + 18);
-    const barWidth = 180;
-    const barHeight = 8;
+    const barWidth = 220;
+    const barHeight = 10;
     const barX = centerX - barWidth / 2;
     const barY = panelY + 24;
     ctx.fillStyle = 'rgba(255,255,255,0.1)';
@@ -322,93 +346,41 @@ const PPGSignalMeter = ({
     else { qGrad.addColorStop(0, '#991b1b'); qGrad.addColorStop(1, '#ef4444'); }
     ctx.fillStyle = qGrad;
     ctx.fillRect(barX, barY, (quality / 100) * barWidth, barHeight);
-    ctx.font = 'bold 12px "SF Mono", Consolas, monospace';
+    ctx.font = 'bold 13px "SF Mono", Consolas, monospace';
     ctx.fillStyle = quality > 60 ? COLORS.TEXT_PRIMARY : quality > 30 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
-    ctx.fillText(`${quality.toFixed(0)}%`, centerX, panelY + 42);
-    
-    // HRV metrics
+    ctx.fillText(`${quality.toFixed(0)}%`, centerX, panelY + 52);
+    const ibi = ibiDisplayRef.current;
     const hrv = hrvDisplayRef.current;
     ctx.font = fontSize.small;
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
     ctx.textAlign = 'left';
-    ctx.fillText(`SDNN: ${hrv.sdnn > 0 ? hrv.sdnn.toFixed(0) + 'ms' : '--'}`, centerX - centerW / 2 + 10, panelY + 58);
-    ctx.textAlign = 'right';
-    ctx.fillText(`RMSSD: ${hrv.rmssd > 0 ? hrv.rmssd.toFixed(0) + 'ms' : '--'}`, centerX + centerW / 2 - 10, panelY + 58);
-    ctx.textAlign = 'center';
+    ctx.fillStyle = COLORS.IBI_TEXT;
+    ctx.fillText(`IBI: ${ibi > 0 ? ibi + 'ms' : '--'}`, centerX - centerW / 2 + 8, panelY + 68);
     ctx.fillStyle = rhythm.color;
-    ctx.fillText(rhythm.display, centerX, panelY + 78);
-    
-    // Panel derecho - SpO2
-    ctx.fillStyle = 'rgba(0, 15, 30, 0.85)';
-    ctx.fillRect(W - 145, panelY, 140, panelH);
-    const spo2Border = spo2 >= 95 ? COLORS.TEXT_PRIMARY : spo2 >= 90 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
-    ctx.strokeStyle = spo2Border;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(W - 145, panelY, 140, panelH);
-    ctx.font = fontSize.label;
+    ctx.fillText(`RITMO: ${rhythm.display}`, centerX - centerW / 2 + 8, panelY + 84);
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.textAlign = 'left';
-    ctx.fillText('SATURACIÓN', W - 137, panelY + 18);
-    ctx.font = fontSize.value;
-    const spo2Color = spo2 >= 95 ? COLORS.TEXT_PRIMARY : spo2 >= 90 ? COLORS.TEXT_WARNING : spo2 > 0 ? COLORS.TEXT_DANGER : COLORS.TEXT_SECONDARY;
-    ctx.fillStyle = spo2Color;
-    ctx.fillText(spo2 > 0 ? spo2.toFixed(0) : '--', W - 137, panelY + 52);
-    ctx.font = fontSize.unit;
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText('%', W - 25, panelY + 72);
+    ctx.textAlign = 'right';
+    ctx.fillText(`SDNN: ${hrv.sdnn > 0 ? hrv.sdnn + 'ms' : '--'}`, centerX + centerW / 2 - 8, panelY + 68);
+    ctx.fillText(`RMSSD: ${hrv.rmssd > 0 ? hrv.rmssd + 'ms' : '--'}`, centerX + centerW / 2 - 8, panelY + 84);
     
-    // Alerta de arritmia - bajo la gráfica
     if (rhythm.isAlert) {
       const pulse = (Math.sin(now / 100) + 1) / 2;
       ctx.fillStyle = `rgba(239, 68, 68, ${0.3 + pulse * 0.4})`;
-      ctx.fillRect(W / 2 - 100, plot.y + plot.height + 15, 200, 28);
+      ctx.fillRect(W - panelW - 3, panelY + panelH + 4, panelW, 30);
       ctx.strokeStyle = COLORS.TEXT_DANGER;
       ctx.lineWidth = 2;
-      ctx.strokeRect(W / 2 - 100, plot.y + plot.height + 15, 200, 28);
+      ctx.strokeRect(W - panelW - 3, panelY + panelH + 4, panelW, 30);
       ctx.font = 'bold 12px "SF Mono", Consolas, monospace';
       ctx.fillStyle = COLORS.TEXT_DANGER;
       ctx.textAlign = 'center';
       const label = rhythm.count > 0 ? `${rhythm.display} x${rhythm.count}` : rhythm.display;
-      ctx.fillText(`⚠ ${label}`, W / 2, plot.y + plot.height + 34);
+      ctx.fillText(`⚠ ${label}`, W - panelW / 2 - 3, panelY + panelH + 22);
       if (rawArrhythmiaData && rawArrhythmiaData.rmssd > 0) {
         ctx.font = '10px "SF Mono", Consolas, monospace';
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.9)';
-        ctx.fillText(`RMSSD: ${rawArrhythmiaData.rmssd.toFixed(0)}ms`, W / 2, plot.y + plot.height + 50);
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.8)';
+        ctx.fillText(`RMSSD: ${rawArrhythmiaData.rmssd.toFixed(0)}ms`, W - panelW / 2 - 3, panelY + panelH + 42);
       }
     }
-    
-    // Panel de morfología PPG - información forense avanzada
-    const morphY = plot.y + plot.height + 60;
-    ctx.fillStyle = 'rgba(10, 25, 40, 0.9)';
-    ctx.fillRect(5, morphY, W - 10, 45);
-    ctx.strokeStyle = 'rgba(59, 130, 246, 0.5)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(5, morphY, W - 10, 45);
-    
-    ctx.font = 'bold 10px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = '#60a5fa';
-    ctx.textAlign = 'left';
-    ctx.fillText('MORFOLOGÍA PPG', 12, morphY + 14);
-    
-    // Métricas morfológicas
-    const ibi = ibiDisplayRef.current;
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.textAlign = 'left';
-    ctx.fillText(`IBI: ${ibi > 0 ? ibi + 'ms' : '--'}`, 12, morphY + 28);
-    ctx.fillText(`RR: ${rrIntervals && rrIntervals.length > 0 ? rrIntervals[rrIntervals.length - 1].toFixed(0) + 'ms' : '--'}`, 12, morphY + 40);
-    
-    ctx.textAlign = 'center';
-    ctx.fillText(`BEATS: ${beatHistoryRef.current.length}`, W / 2, morphY + 28);
-    ctx.fillText(`RANGO: ${amplitudeStatsRef.current.range.toFixed(1)}`, W / 2, morphY + 40);
-    
-    ctx.textAlign = 'right';
-    const avgRR = rrIntervals && rrIntervals.length > 0 
-      ? (rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length).toFixed(0) 
-      : '--';
-    ctx.fillText(`RR PROM: ${avgRR}ms`, W - 12, morphY + 28);
-    ctx.fillText(`HRV: ${hrv.sdnn > 0 ? hrv.sdnn.toFixed(1) + 'ms' : '--'}`, W - 12, morphY + 40);
-  }, [getPlotArea]);
+  }, []);
 
   useEffect(() => {
     if (isRunningRef.current) return;
@@ -436,12 +408,7 @@ const PPGSignalMeter = ({
       }
       lastRenderTime = now;
       
-      const { value: signalValueRaw, isFingerDetected: detected, arrhythmiaStatus: arrStatus, preserveResults: preserve, isPeak: peakRaw, publicationGate: pubGate, rejectionReason: rejReason } = propsRef.current;
-      // FORENSIC: si la cadena triple-gate + evidencia óptica no autoriza
-      // publicación, el monitor pinta línea plana (valor=0) y suprime el
-      // marcador de peak. Nunca dibujamos una "onda" sobre aire/ruido.
-      const signalValue = pubGate ? signalValueRaw : 0;
-      const peak = pubGate ? peakRaw : false;
+      const { value: signalValue, isFingerDetected: detected, arrhythmiaStatus: arrStatus, preserveResults: preserve, isPeak: peak } = propsRef.current;
       const rhythm = parseRhythmStatus(arrStatus);
       const plot = getPlotArea();
       const { WINDOW_MS, COLORS } = CONFIG;
@@ -450,32 +417,12 @@ const PPGSignalMeter = ({
       drawAmplitudeScale(ctx);
       drawTimeScale(ctx);
       drawVitalInfo(ctx, now);
-
-      // Banner forense superior cuando no hay autorización de publicación.
-      if (!pubGate && rejReason) {
-        const bannerW = Math.min(900, CONFIG.CANVAS_WIDTH - 40);
-        const bx = (CONFIG.CANVAS_WIDTH - bannerW) / 2;
-        ctx.save();
-        ctx.fillStyle = 'rgba(153, 27, 27, 0.92)';
-        ctx.fillRect(bx, 8, bannerW, 56);
-        ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(bx, 8, bannerW, 56);
-        ctx.font = 'bold 18px "SF Mono", Consolas, monospace';
-        ctx.fillStyle = '#fee2e2';
-        ctx.textAlign = 'center';
-        ctx.fillText('NO PUBLICAR — SIN EVIDENCIA ÓPTICA', CONFIG.CANVAS_WIDTH / 2, 30);
-        ctx.font = '14px "SF Mono", Consolas, monospace';
-        ctx.fillStyle = '#fecaca';
-        ctx.fillText(rejReason, CONFIG.CANVAS_WIDTH / 2, 52);
-        ctx.restore();
-      }
       
       if (preserve && !detected) {
         animationRef.current = requestAnimationFrame(render);
         return;
       }
-      const scaledValue = signalValue * 3; // Amplificar para mejor visualización morfológica
+      const scaledValue = signalValue * 2;
       
       if (peak) {
         const currentCount = rhythm.count;

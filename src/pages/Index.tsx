@@ -13,15 +13,9 @@ import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
 import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
 import { SRDiagnostics } from "@/components/SRDiagnostics";
-import { toast } from "@/hooks/use-toast";
+import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
-import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
-import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
-import { CameraQualityGate, type CameraSignalHealth } from "@/modules/signal-processing/CameraQualityGate";
-import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
-import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
-import { usePpgCamera } from "@/hooks/usePpgCamera";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -40,6 +34,7 @@ const FORENSIC_MODE = !CIVIL_MODE;
 
 const Index = () => {
   const [isMonitoring, setIsMonitoring] = useState(false);
+  const [isCameraOn, setIsCameraOn] = useState(false);
   const [vitalSigns, setVitalSigns] = useState<VitalSignsResult>({
     spo2: 0,
     glucose: 0,
@@ -63,12 +58,7 @@ const Index = () => {
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [rrIntervals, setRRIntervals] = useState<number[]>([]);
-  const monitoringStartedAtRef = useRef<number>(0);
-  // Pin overlays whenever the operator likely needs status:
-  // - not yet monitoring, no finger contact, low quality, or after results
-  // Otherwise auto-hide after a few seconds so the waveform stays clean.
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
-  const [signalHealth, setSignalHealth] = useState<CameraSignalHealth | null>(null);
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
     arrhythmiaBeats: number;
@@ -81,26 +71,6 @@ const Index = () => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("tuner") === "1";
   });
-  // Clinical calibration wizard. Opened on demand (?calibrate=1 or button).
-  const [showCalibration, setShowCalibration] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("calibrate") === "1";
-  });
-  const [calibrationBaseline, setCalibrationBaseline] = useState<CalibrationBaseline | null>(() => {
-    if (typeof window === 'undefined') return null;
-    try {
-      const raw = localStorage.getItem('ppg.calibration.baseline');
-      return raw ? (JSON.parse(raw) as CalibrationBaseline) : null;
-    } catch { return null; }
-  });
-  // Highlight the CAL button briefly when the watchdog fires a prompt.
-  const [calPromptHighlight, setCalPromptHighlight] = useState(false);
-  const calPromptTimerRef = useRef<number | null>(null);
-  const triggerCalPromptHighlight = useCallback(() => {
-    setCalPromptHighlight(true);
-    if (calPromptTimerRef.current) window.clearTimeout(calPromptTimerRef.current);
-    calPromptTimerRef.current = window.setTimeout(() => setCalPromptHighlight(false), 6000);
-  }, []);
   // Independent toggle for the SR diagnostics panel: ?srDiag=1
   const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -142,10 +112,6 @@ const Index = () => {
   });
   const lastAlertAtRef = useRef<Record<string, number>>({});
   const ALERT_COOLDOWN_MS = 2500;
-  // Last frame's publicationGate verdict — used to authorise beep/vibrate
-  // inside HeartBeatProcessor on the NEXT frame (one-frame lag, ~30 ms).
-  // Avoids the deadlock of needing morphology to allow morphology.
-  const lastPublicationGateRef = useRef<boolean>(false);
 
   // ── Forensic session log (rolling ring buffer of overlay snapshots) ──
   // Each entry mirrors the overlay payload + a timestamp + a session ID, so
@@ -168,62 +134,6 @@ const Index = () => {
   const sessionIdRef = useRef<string>("");
   const SESSION_LOG_MAX = 4000; // ~10 min @ 1 sample / 150 ms
   const [sessionLogSize, setSessionLogSize] = useState(0);
-  // Session-wide counters: a "valid sample" is one where the triple gate
-  // passed at the moment we sampled it; a "noise sample" is everything
-  // else (any gate closed). The percentage tells the operator whether
-  // the device is truly measuring or staring at noise.
-  const validSamplesRef = useRef(0);
-  const noiseSamplesRef = useRef(0);
-  const [validSamples, setValidSamples] = useState(0);
-  const [noiseSamples, setNoiseSamples] = useState(0);
-
-  // Runtime-tunable safeguard thresholds for the beat-detection gate.
-  // Persisted in localStorage so calibration survives reloads.
-  const [acceptedRatioMin, setAcceptedRatioMin] = useState<number>(() => {
-    if (typeof window === 'undefined') return 0.15;
-    const v = parseFloat(localStorage.getItem('forensic.acceptedRatioMin') || '');
-    return Number.isFinite(v) && v >= 0.10 && v <= 0.30 ? v : 0.15;
-  });
-  const [warmupSamples, setWarmupSamples] = useState<number>(() => {
-    if (typeof window === 'undefined') return 60;
-    const v = parseInt(localStorage.getItem('forensic.warmupSamples') || '', 10);
-    return Number.isFinite(v) && v >= 30 && v <= 150 ? v : 60;
-  });
-  const [showThresholdPanel, setShowThresholdPanel] = useState(false);
-  const acceptedRatioMinRef = useRef(acceptedRatioMin);
-  const warmupSamplesRef = useRef(warmupSamples);
-
-  // Auto-relax: after N consecutive accepted frames, soften the thresholds
-  // so the operator doesn't have to fight the safeguard once a stable
-  // signal has been established. Toggle + N persisted in localStorage.
-  const [autoRelaxEnabled, setAutoRelaxEnabled] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem('forensic.autoRelaxEnabled') === '1';
-  });
-  const [autoRelaxN, setAutoRelaxN] = useState<number>(() => {
-    if (typeof window === 'undefined') return 90;
-    const v = parseInt(localStorage.getItem('forensic.autoRelaxN') || '', 10);
-    return Number.isFinite(v) && v >= 30 && v <= 300 ? v : 90;
-  });
-  const consecutiveAcceptedRef = useRef(0);
-  const autoRelaxAppliedRef = useRef(false);
-  const preRelaxRef = useRef<{ ratio: number; warmup: number } | null>(null);
-  const [autoRelaxActive, setAutoRelaxActive] = useState(false);
-  useEffect(() => {
-    try { localStorage.setItem('forensic.autoRelaxEnabled', autoRelaxEnabled ? '1' : '0'); } catch {}
-  }, [autoRelaxEnabled]);
-  useEffect(() => {
-    try { localStorage.setItem('forensic.autoRelaxN', String(autoRelaxN)); } catch {}
-  }, [autoRelaxN]);
-
-  useEffect(() => {
-    acceptedRatioMinRef.current = acceptedRatioMin;
-    try { localStorage.setItem('forensic.acceptedRatioMin', String(acceptedRatioMin)); } catch {}
-  }, [acceptedRatioMin]);
-  useEffect(() => {
-    warmupSamplesRef.current = warmupSamples;
-    try { localStorage.setItem('forensic.warmupSamples', String(warmupSamples)); } catch {}
-  }, [warmupSamples]);
 
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
@@ -364,23 +274,11 @@ const Index = () => {
   const arrhythmiaDetectedRef = useRef(false);
   const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
   const cameraRef = useRef<CameraViewHandle>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const frameLoopRef = useRef<number | null>(null);
+  const isProcessingRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
-  // Motion classifier: drops frames during sustained SEVERE motion with a
-  // hard 50% drop-rate cap so the operator never loses the live trace.
-  const motionClassifierRef = useRef<MotionClassifier>(new MotionClassifier());
-  // V9.4 — Camera data-quality watchdog. Inspects G1 (greenDC), G2 (greenAC)
-  // and G3 (red/green ratio) every CIVIL_MODE vitals tick. If the camera
-  // delivers black / saturated / frozen / no-finger frames for ≥ 1 s, the
-  // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
-  const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
-  const cameraReinitInFlightRef = useRef<boolean>(false);
-  const lastSignalHealthCommitAtRef = useRef<number>(0);
-  // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const verbose = new URLSearchParams(window.location.search).get('gateLog') === '1';
-    cameraQualityRef.current.setVerbose(verbose);
-  }, []);
   // Cached/last-trusted sample rate, used to keep delineation stable when
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
@@ -480,16 +378,17 @@ const Index = () => {
   const { analysis, isAnalyzing, analyzeVitals, clearAnalysis } = useHealthAnalysis();
   const [showAIAnalysis, setShowAIAnalysis] = useState(false);
 
-  // Single source of truth for camera + torch + frame loop. Owns the
-  // capture canvas, the rVFC chain with stall detection, the event-driven
-  // dead-stream watchdog and the cameraOn React state bound to <CameraView/>.
-  const ppgCamera = usePpgCamera({
-    cameraRef,
-    onFrame: (imageData, frameTimestamp) => processFrame(imageData, frameTimestamp),
-    shouldDropFrame: (nowMs) => motionClassifierRef.current.shouldDropFrame(nowMs),
-    onFrameDecision: (nowMs, dropped) => motionClassifierRef.current.markFrame(nowMs, dropped),
-  });
-  const isCameraOn = ppgCamera.cameraOn;
+  useEffect(() => {
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+      canvasRef.current.width = 320;
+      canvasRef.current.height = 240;
+      ctxRef.current = canvasRef.current.getContext('2d', { 
+        willReadFrequently: true,
+        alpha: false 
+      });
+    }
+  }, []);
 
   const enterFullScreen = async () => {
     if (isFullscreen) return;
@@ -553,9 +452,65 @@ const Index = () => {
     }
   }, [lastValidResults, isMonitoring]);
 
+  const startFrameLoop = useCallback(() => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    
+    const canvas = canvasRef.current;
+    const ctx = ctxRef.current;
+    if (!canvas || !ctx) {
+      isProcessingRef.current = false;
+      return;
+    }
+
+    const captureOneFrame = (nowOrMetadata?: number | any) => {
+      if (!isProcessingRef.current) return;
+      const video = cameraRef.current?.getVideoElement();
+      if (!video || video.readyState < 2 || video.videoWidth === 0) {
+        frameLoopRef.current = requestAnimationFrame(() => captureOneFrame());
+        return;
+      }
+
+      let frameTimestamp: number | undefined;
+      if (typeof nowOrMetadata === 'object' && nowOrMetadata?.mediaTime != null) {
+        frameTimestamp = performance.now();
+      } else if (typeof nowOrMetadata === 'number') {
+        frameTimestamp = nowOrMetadata;
+      } else {
+        frameTimestamp = performance.now();
+      }
+
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        processFrame(imageData, frameTimestamp);
+      } catch {}
+      scheduleNext(video);
+    };
+
+    const scheduleNext = (video: HTMLVideoElement) => {
+      if (!isProcessingRef.current) return;
+      if ('requestVideoFrameCallback' in video) {
+        (video as any).requestVideoFrameCallback((now: number, metadata: any) => captureOneFrame(metadata?.presentationTime ?? now));
+      } else {
+        frameLoopRef.current = requestAnimationFrame(() => captureOneFrame(performance.now()));
+      }
+    };
+    
+    console.log('🎬 Capture started (rVFC with real timestamps)');
+    captureOneFrame(performance.now());
+  }, [processFrame]);
+
+  const stopFrameLoop = useCallback(() => {
+    isProcessingRef.current = false;
+    if (frameLoopRef.current) {
+      cancelAnimationFrame(frameLoopRef.current);
+      frameLoopRef.current = null;
+    }
+  }, []);
+
   const startMonitoring = useCallback(() => {
     if (isMonitoring) return;
-    monitoringStartedAtRef.current = performance.now();
     console.log('🚀 Iniciando monitoreo...');
     if (navigator.vibrate) navigator.vibrate([200]);
     enterFullScreen();
@@ -574,33 +529,11 @@ const Index = () => {
     // Reset session log for a fresh forensic export.
     sessionLogRef.current = [];
     setSessionLogSize(0);
-    validSamplesRef.current = 0;
-    noiseSamplesRef.current = 0;
-    setValidSamples(0);
-    setNoiseSamples(0);
-    // Reset auto-relax tracking each new session.
-    consecutiveAcceptedRef.current = 0;
-    if (autoRelaxAppliedRef.current && preRelaxRef.current) {
-      // Restore user-set thresholds before next session.
-      setAcceptedRatioMin(preRelaxRef.current.ratio);
-      setWarmupSamples(preRelaxRef.current.warmup);
-    }
-    autoRelaxAppliedRef.current = false;
-    preRelaxRef.current = null;
-    setAutoRelaxActive(false);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
-    // Iniciar procesamiento de señal primero
     startProcessing();
-    // Start the IMU motion classifier (no-op on platforms without devicemotion).
-    motionClassifierRef.current.start().catch(() => {});
-    // V9.4 — reset camera quality watchdog for the new session.
-    cameraQualityRef.current.reset();
-    cameraReinitInFlightRef.current = false;
-    // Hand camera + frame-loop ownership to the dedicated hook.
-    ppgCamera.start();
-    // Activar monitoreo
+    setIsCameraOn(true);
     setIsMonitoring(true);
     if (measurementTimerRef.current) clearInterval(measurementTimerRef.current);
     measurementTimerRef.current = window.setInterval(() => setElapsedTime(prev => prev + 1), 1000);
@@ -610,15 +543,36 @@ const Index = () => {
     // the first morphology-validated beat. CIVIL keeps the legacy 3s window.
     if (FORENSIC_MODE) setIsCalibrating(false);
     else setTimeout(() => setIsCalibrating(false), 3000);
-  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen, ppgCamera]);
+  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
+
+  const handleStreamReady = useCallback((stream: MediaStream) => {
+    console.log('📹 Stream recibido');
+    setCameraStream(stream);
+    setTimeout(() => {
+      const video = cameraRef.current?.getVideoElement();
+      if (video && video.readyState >= 2) {
+        console.log('✅ Video listo:', video.videoWidth, 'x', video.videoHeight);
+        startFrameLoop();
+      } else {
+        const checkReady = setInterval(() => {
+          const v = cameraRef.current?.getVideoElement();
+          if (v && v.readyState >= 2 && v.videoWidth > 0) {
+            clearInterval(checkReady);
+            console.log('✅ Video listo (retry):', v.videoWidth, 'x', v.videoHeight);
+            startFrameLoop();
+          }
+        }, 100);
+        setTimeout(() => clearInterval(checkReady), 5000);
+      }
+    }, 500);
+  }, [startFrameLoop]);
 
   const finalizeMeasurement = useCallback(async () => {
     if (!isMonitoring) return;
     console.log('🛑 Finalizando medición...');
     playCompletionSound();
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
-    ppgCamera.stop();
-    motionClassifierRef.current.stop();
+    stopFrameLoop();
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
       measurementTimerRef.current = null;
@@ -626,15 +580,18 @@ const Index = () => {
     stopProcessing();
     if (isCalibrating) forceCalibrationCompletion();
     const savedResults = resetVitalSigns();
-    // FORENSIC: never persist vital-signs records that include SpO2/BP/etc.
-    // when running in forensic mode — those numbers are only valid in CIVIL.
-    if (CIVIL_MODE && (savedResults || vitalSigns.spo2 > 0)) {
+    if (savedResults || vitalSigns.spo2 > 0) {
       const dataToSave = savedResults || vitalSigns;
       await saveMeasurement({
         heartRate,
         vitalSigns: dataToSave,
         signalQuality: lastSignal?.quality || 0
       });
+    }
+    setIsCameraOn(false);
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
     }
     setIsMonitoring(false);
     setIsCalibrating(false);
@@ -651,12 +608,11 @@ const Index = () => {
     setElapsedTime(0);
     setCalibrationProgress(0);
     console.log('✅ Medición finalizada y guardada');
-  }, [isMonitoring, isCalibrating, ppgCamera, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
+  }, [isMonitoring, isCalibrating, cameraStream, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
 
   const handleReset = useCallback(() => {
     console.log('🔄 Reset completo...');
-    ppgCamera.stop();
-    motionClassifierRef.current.stop();
+    stopFrameLoop();
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
       measurementTimerRef.current = null;
@@ -666,6 +622,11 @@ const Index = () => {
     resetHeartBeat();
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    setIsCameraOn(false);
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
     setIsMonitoring(false);
     setShowResults(false);
     setMeasurementSummary(null);
@@ -697,7 +658,7 @@ const Index = () => {
     setCalibrationProgress(0);
     arrhythmiaDetectedRef.current = false;
     console.log('✅ Reset completado');
-  }, [ppgCamera, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
+  }, [cameraStream, stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
 
   const vitalSignsFrameCounter = useRef<number>(0);
   const unstableFrameCounter = useRef<number>(0);
@@ -713,21 +674,6 @@ const Index = () => {
     const goodPerfusion = contactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' || contactState === 'STABLE_CONTACT';
     const positionQuality = getPositionQuality();
     const motionInfo = getMotionInfo();
-
-    // Per-frame camera/extraction health: records full G1/G2/G3 evidence even
-    // when downstream gates return early, but updates UI only once per second.
-    const rgbStatsForHealth = getRGBStats();
-    cameraQualityRef.current.inspect({
-      redDC: rgbStatsForHealth.redDC,
-      greenDC: rgbStatsForHealth.greenDC,
-      redAC: rgbStatsForHealth.redAC,
-      greenAC: rgbStatsForHealth.greenAC,
-    });
-    const healthNow = performance.now();
-    if (healthNow - lastSignalHealthCommitAtRef.current >= 1000) {
-      lastSignalHealthCommitAtRef.current = healthNow;
-      setSignalHealth(cameraQualityRef.current.getSignalHealth(healthNow));
-    }
 
     // ════════════════════════════════════════════════════════════
     //  FORENSIC TRIPLE GATE — single source of truth for the UI.
@@ -753,13 +699,6 @@ const Index = () => {
         spectralPeakHz: fg.spectralPeakHz,
         spectralConcentration: (fg as any).spectralConcentration ?? 0,
         livenessReason: fg.livenessReason,
-        opticalEvidence: (fg as any).opticalEvidence,
-        opticalReason: (fg as any).opticalReason,
-        opticalReasonText: (fg as any).opticalReasonText,
-        opticalMetrics: (fg as any).opticalMetrics,
-        publicationGate: (fg as any).publicationGate,
-        effectiveSampleRate: (fg as any).effectiveSampleRate,
-        bufferedSeconds: (fg as any).bufferedSeconds,
       };
       forensicGateRef.current = snap;
       const nowMs = performance.now();
@@ -791,18 +730,9 @@ const Index = () => {
           reason: snap.livenessReason,
         });
         if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
-        // Increment session-wide valid/noise counters at the same throttled
-        // cadence. These drive the "Válidas / Ruido" + "Triple-gate %"
-        // display in the forensic overlay.
-        if (snap.passAll) validSamplesRef.current += 1;
-        else noiseSamplesRef.current += 1;
         // Cheap state ping (only when buckets of 25 rounds elapse) so the
-        // overlay counters update without spamming React.
-        if (log.length % 25 === 0) {
-          setSessionLogSize(log.length);
-          setValidSamples(validSamplesRef.current);
-          setNoiseSamples(noiseSamplesRef.current);
-        }
+        // export button counter updates without spamming React.
+        if (log.length % 25 === 0) setSessionLogSize(log.length);
       }
 
       // ── Gate transition alerts (haptic + toast) ──
@@ -847,9 +777,8 @@ const Index = () => {
     // → we early-return below with everything zeroed.
     const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
 
-    // MODO FORENSE POLICIAL: permitir procesamiento incluso con contacto subóptimo
-    // Solo bloquear si hay evidencia clara de NO ser tejido humano
-    if (noOpticalContact && (lastSignal as any)?.contactState === 'NO_OPTICAL_CONTACT') {
+    if (noOpticalContact || !fg?.gate1_optical) {
+      // Hard forensic zero — never invent waveforms or numbers from air.
       setHeartbeatSignal(0);
       setHeartRate(0);
       setBeatMarker(0);
@@ -870,104 +799,11 @@ const Index = () => {
       }
       return;
     }
-    
+
     const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
-    // ── SAFEGUARD ratio: gates PUBLICATION only. NEVER blocks the detector
-    // feed (that would create the historical deadlock where gate3 can't
-    // open because the detector never runs). The detector keeps consuming
-    // candidate OD samples so morphology can build up over time.
-    const ACCEPTED_RATIO_MIN = acceptedRatioMinRef.current;
-    const ACCEPTED_RATIO_WARMUP_SAMPLES = warmupSamplesRef.current;
-    const totalSeen = validSamplesRef.current + noiseSamplesRef.current;
-    const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
-    const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
-
-    // ════════════════════════════════════════════════════════════════
-    //  PROCESSING_GATE — MODO FORENSE POLICIAL: procesar siempre que haya señal
-    //  Eliminamos restricciones estrictas para permitir análisis en condiciones
-    //  subóptimas (víctimas en shock, mala iluminación, movimiento).
-    // ════════════════════════════════════════════════════════════════
-    const om = (fg as any)?.opticalMetrics;
-    const bufferedSeconds = (fg as any)?.bufferedSeconds ?? 0;
-    const opticalOk = !!(fg as any)?.opticalEvidence;
-    
-    // MODO FORENSE: permitir procesamiento con condiciones mínimas
-    const processingAllowed =
-      Number.isFinite(signalValue) &&
-      (opticalOk || lastSignal.quality > 0); // Permitir si hay calidad mínima
-
-    // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
-    // independiente de la publicación. Permite suavizar umbrales cuando hay
-    // contacto óptico estable, aunque la morfología aún no se haya validado.
-    if (opticalOk) {
-      consecutiveAcceptedRef.current += 1;
-      if (
-        autoRelaxEnabled &&
-        !autoRelaxAppliedRef.current &&
-        consecutiveAcceptedRef.current >= autoRelaxN
-      ) {
-        preRelaxRef.current = {
-          ratio: acceptedRatioMinRef.current,
-          warmup: warmupSamplesRef.current,
-        };
-        const relaxedRatio = Math.max(0.10, acceptedRatioMinRef.current * 0.5);
-        const relaxedWarmup = Math.max(30, Math.round(warmupSamplesRef.current * 0.5));
-        setAcceptedRatioMin(relaxedRatio);
-        setWarmupSamples(relaxedWarmup);
-        autoRelaxAppliedRef.current = true;
-        setAutoRelaxActive(true);
-        toast({
-          title: 'Umbrales auto-relajados',
-          description: `Señal estable (${autoRelaxN} frames). Ratio ${Math.round(relaxedRatio*100)}% · warm-up ${relaxedWarmup}.`,
-        });
-      }
-    } else {
-      consecutiveAcceptedRef.current = 0;
-    }
-
-    // MODO FORENSE: solo bloquear si no hay señal válida absolutamente
-    if (!processingAllowed) {
-      console.log('🚫 Processing gate cerrado - señal inválida');
-      setHeartbeatSignal(0);
-      unstableFrameCounter.current++;
-      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
-        setHeartRate(0);
-        vitalSignsFrameCounter.current = 0;
-        setBeatMarker(0);
-        setRRIntervals([]);
-        setArrhythmiaCount("--");
-        if (arrhythmiaDetectedRef.current) {
-          arrhythmiaDetectedRef.current = false;
-          setArrhythmiaState(false);
-        }
-        setVitalSigns(prev => (
-          prev.measurementConfidence === 'INVALID' && prev.spo2 === 0 && prev.glucose === 0 && prev.pressure.systolic === 0 && prev.pressure.diastolic === 0
-            ? prev
-            : {
-                ...prev,
-                spo2: 0,
-                glucose: 0,
-                pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
-                arrhythmiaCount: 0,
-                arrhythmiaStatus: "SIN ARRITMIAS|0",
-                lipids: { totalCholesterol: 0, triglycerides: 0 },
-                lastArrhythmiaData: undefined,
-                signalQuality: 0,
-                measurementConfidence: 'INVALID'
-              }
-        ));
-      }
-      return;
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  ALIMENTACIÓN INCONDICIONAL DEL DETECTOR
-    //  El detector procesa SIEMPRE (analiza, aprende morfología, abre gate3)
-    //  independientemente del estado de publicación.
-    // ════════════════════════════════════════════════════════════════
     const heartBeatResult = processHeartBeat(
       signalValue,
       contactState,
@@ -977,37 +813,23 @@ const Index = () => {
         contactState,
         motionArtifact: lastSignal.motionArtifact || motionInfo.motionArtifact,
         pressureState: pressureOptimal ? 'OPTIMAL_PRESSURE' : 'LOW_PRESSURE',
-        clipHigh: om?.clipHigh ?? 0,
-        clipLow:  om?.clipLow  ?? 0,
+        clipHigh: 0,
+        clipLow: 0,
         perfusionIndex: lastSignal.perfusionIndex,
         positionDrifting: positionQuality.drifting,
-        // Permitir que el detector corra sin restricción de publicación
-        // para que pueda aprender morfología y abrir gate3.
-        // La publicación (beep/vibrate/UI) se controla después.
-        publicationGate: true,
       }
     );
-    
-    // Cerrar gate3_morphology con la verdad del detector — SIEMPRE que el
-    // detector haya corrido. Esto es lo que permite que forensicPass pueda
-    // llegar a true en el próximo frame.
+
+    // Gate #2 (spectral) must be open for the waveform to be drawn at all.
+    setHeartbeatSignal(forensicPass ? heartBeatResult.filteredValue : 0);
+
+    // Push Gate #3 (morphology) verdict back into the processor so the next
+    // emitted signal frame carries the truthful triple-gate state.
     const morphPass = !!(heartBeatResult as any).morphologyGatePass;
+    // Typed feedback path through the signal-processor hook — no globals.
     setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
 
-    // ════════════════════════════════════════════════════════════════
-    //  PUBLICATION_GATE — MODO FORENSE POLICIAL: publicar siempre que haya
-    //  datos válidos para análisis. No bloquear por gates estrictos.
-    // ════════════════════════════════════════════════════════════════
-    const spectralPass = !!fg?.gate2_spectral;
-    // MODO FORENSE: publicar si hay señal cardíaca detectada, sin restricciones de gates
-    const publicationGate =
-      heartBeatResult.bpm > 0 &&
-      heartBeatResult.bpmConfidence >= 0.10; // Mínimo muy bajo para modo forense
-    lastPublicationGateRef.current = publicationGate;
-
-    if (!publicationGate) {
-      // MODO FORENSE: mostrar señal cruda incluso sin BPM alto
-      setHeartbeatSignal(heartBeatResult.filteredValue);
+    if (!forensicPass) {
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
         setHeartRate(0);
@@ -1039,8 +861,6 @@ const Index = () => {
       return;
     }
 
-    // PUBLICATION_GATE = true → autorizamos onda + BPM + beep/vibración.
-    setHeartbeatSignal(heartBeatResult.filteredValue);
     unstableFrameCounter.current = 0;
     // FORENSIC: report the real instantaneous BPM (no EMA), but only when
     // the heartbeat processor has enough morphology-validated confidence.
@@ -1187,11 +1007,7 @@ const Index = () => {
             setArrhythmiaState(isArrhythmiaDetected);
 
             if (isArrhythmiaDetected) {
-              // FORENSIC: vibración de arritmia SOLO si triple-gate + evidencia
-              // óptica autorizan publicación. Evita falsas alarmas en aire/ruido.
-              if (publicationGate && navigator.vibrate) {
-                navigator.vibrate([200, 100, 200]);
-              }
+              if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
               toast({
                 title: `⚠️ ${rhythmLabel.split('_').join(' ')}`,
                 description: count > 0 ? `Eventos detectados: ${count}` : 'Ritmo irregular detectado',
@@ -1227,46 +1043,12 @@ const Index = () => {
   }, [isCalibrating, getCalibrationProgress]);
 
   const handleToggleMonitoring = () => {
-    if (isMonitoring) {
-      // Mobile tap/preview layers can emit duplicate clicks right after
-      // starting. Ignore stop toggles during camera warm-up so the stream is
-      // not immediately torn down, which appears as "abre y cierra".
-      if (performance.now() - monitoringStartedAtRef.current < 8000) return;
-      finalizeMeasurement();
-    }
+    if (isMonitoring) finalizeMeasurement();
     else startMonitoring();
   };
 
-  // Auto-hide overlays unless we need the operator's attention.
-  const overlayPinned = !isMonitoring
-    || !lastSignal?.fingerDetected
-    || (lastSignal?.quality ?? 0) < 40
-    || showResults;
-  const { visible: overlaysVisible, reveal: revealOverlays } =
-    useAutoHideOverlays({ idleMs: 4000, initialMs: 4000, pinned: overlayPinned });
-
-  // Confidence watchdog — fires a recalibration toast (and flashes the CAL
-  // chip) when quality, motion, or BPM/SpO₂ drift sustain past hold windows.
-  // Suppressed while the wizard is open or when not actively monitoring.
-  useRecalibrationWatchdog(
-    {
-      enabled: isMonitoring && !showCalibration,
-      quality: lastSignal?.quality ?? 0,
-      bpm: heartRate,
-      spo2: vitalSigns.spo2,
-      motionLevel: motionClassifierRef.current.classify(),
-      baseline: calibrationBaseline,
-    },
-    { onPrompt: triggerCalPromptHighlight },
-  );
-
   return (
-    <>
-    <div
-      data-overlay-visible={overlaysVisible}
-      onPointerDown={revealOverlays}
-      className="fixed inset-0 flex flex-col bg-black"
-      style={{ 
+    <div className="fixed inset-0 flex flex-col bg-black" style={{ 
       height: '100svh',
       width: '100vw',
       maxWidth: '100vw',
@@ -1290,106 +1072,9 @@ const Index = () => {
 
       <div className="flex-1 relative">
         <div className="absolute inset-0">
-          <CameraView ref={cameraRef} onStreamReady={ppgCamera.onStreamReady} isMonitoring={isCameraOn} />
+          <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
 
-        {isMonitoring && signalHealth && signalHealth.reason !== 'OK' && (
-          <div className="auto-hide absolute left-3 top-3 z-30 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background/90 p-3 font-mono text-[11px] text-foreground shadow-lg backdrop-blur-sm">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <span className="font-bold tracking-wide text-primary">SIGNAL HEALTH</span>
-              <span className={signalHealth.shouldReinitialize ? 'font-bold text-destructive' : 'text-muted-foreground'}>
-                {signalHealth.shouldReinitialize ? 'REINIT PENDIENTE' : 'STREAM ACTIVO'}
-              </span>
-            </div>
-            <div className="mb-2 text-muted-foreground">{signalHealth.message}</div>
-            <div className="grid grid-cols-3 gap-2">
-              {[signalHealth.g1, signalHealth.g2, signalHealth.g3].map((g) => (
-                <div key={g.label} className="rounded border border-border/70 bg-muted/40 px-2 py-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-bold">{g.label}</span>
-                    <span className={g.ok ? 'text-primary' : 'text-destructive'}>{g.ok ? 'OK' : g.failure}</span>
-                  </div>
-                  <div className="mt-1 text-muted-foreground">
-                    {g.label === 'G3' ? g.value.toFixed(2) : g.value.toFixed(3)}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 flex justify-between gap-3 text-muted-foreground">
-              <span>streak {signalHealth.badStreak}</span>
-              <span>warmup {Math.ceil(signalHealth.warmupRemainingMs / 1000)}s</span>
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 text-[10px]">
-              {(() => {
-                const s = cameraQualityRef.current.getDecisionSummary();
-                return (
-                  <span className="text-muted-foreground">
-                    OK {s.OK} · WARM {s.BAD_BUT_WARMUP} · STR {s.BAD_BUT_STREAK_SHORT} · CD {s.BAD_BUT_COOLDOWN} · NH {s.BAD_BUT_NON_HARD} · RE {s.REINIT}
-                  </span>
-                );
-              })()}
-              <button
-                type="button"
-                onClick={() => cameraQualityRef.current.downloadDecisionLog()}
-                className="ml-auto rounded border border-border bg-muted/50 px-2 py-0.5 text-foreground hover:bg-muted"
-              >
-                Descargar log
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ════════════════════════════════════════════════════════════
-            PPGSignalMeter - FULL SCREEN 100% - MONITOR CARDÍACO FORENSE
-            ════════════════════════════════════════════════════════════ */}
-        <div className="absolute inset-0 z-10">
-          <PPGSignalMeter 
-            value={heartbeatSignal}
-            quality={lastSignal?.quality || 0}
-            isFingerDetected={lastSignal?.fingerDetected || false}
-            onStartMeasurement={handleToggleMonitoring}
-            onReset={handleReset}
-            isMonitoring={isMonitoring}
-            arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
-            rawArrhythmiaData={lastArrhythmiaData.current}
-            preserveResults={showResults}
-            diagnosticMessage={lastSignal?.diagnostics?.message || 'MONITOR CARDÍACO ACTIVO'}
-            isPeak={beatMarker === 1}
-            bpm={heartRate}
-            spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
-            rrIntervals={rrIntervals}
-            publicationGate={true}
-            rejectionReason={forensicGate?.livenessReason || ''}
-          />
-        </div>
-
-        {/* ════════════════════════════════════════════════════════════
-            FLOATING OVERLAYS - ELEMENTOS FLOTANTES SOBRE EL MONITOR
-            ════════════════════════════════════════════════════════════ */}
-        
-        {/* Position guidance - top center compact pill */}
-        {isMonitoring && (() => {
-          const pq = getPositionQuality();
-          const isDrifting = pq.drifting;
-          const isLocked = pq.locked && !isDrifting;
-          return (
-            <div className="auto-hide safe-top absolute top-0 left-0 right-0 z-30 flex justify-center pointer-events-none">
-              <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider shadow-md backdrop-blur-md border ${
-                isLocked ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300' :
-                isDrifting ? 'bg-red-500/15 border-red-500/30 text-red-300 animate-pulse' :
-                pq.qualityScore > 0.4 ? 'bg-amber-500/15 border-amber-500/30 text-amber-300' :
-                'bg-red-500/15 border-red-500/30 text-red-300'
-              }`}>
-                <span className="flex items-center gap-1.5">
-                  {isLocked ? <Shield className="w-2.5 h-2.5" /> : isDrifting ? <AlertTriangle className="w-2.5 h-2.5" /> : <Activity className="w-2.5 h-2.5 animate-pulse" />}
-                  {pq.guidance}
-                </span>
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Forensic overlay - top right */}
         <ForensicGateOverlay
           gate={forensicGate}
           visible={showForensicOverlay && isMonitoring}
@@ -1397,153 +1082,138 @@ const Index = () => {
           sampleCount={sessionLogSize}
           cadenceMs={overlayCadenceMs}
           onCadenceChange={setOverlayCadenceMs}
-          validSamples={validSamples}
-          noiseSamples={noiseSamples}
         />
 
-        {/* Threshold calibration - floating panel */}
-        {showForensicOverlay && isMonitoring && (
-          <div className="auto-hide fixed top-0 right-0 z-40 font-mono safe-top safe-right">
-            <button
-              type="button"
-              onClick={() => setShowThresholdPanel(v => !v)}
-              className="rounded-md border border-zinc-700/70 bg-black/75 backdrop-blur-sm px-3 py-1.5 text-[10px] font-bold tracking-wide text-zinc-200 hover:bg-zinc-800/80"
-              title="Calibrar umbrales del safeguard"
-            >
-              {showThresholdPanel ? 'CERRAR ⚙' : 'UMBRALES ⚙'}
-            </button>
-            {showThresholdPanel && (
-              <div className="mt-2 w-[260px] rounded-lg border border-zinc-700/70 bg-black/90 backdrop-blur-sm p-3 text-[11px] text-zinc-100 shadow-2xl space-y-2">
-                <div className="text-[10px] font-bold tracking-widest text-zinc-300 border-b border-zinc-700/60 pb-2">
-                  CALIBRACIÓN SAFEGUARD
-                </div>
-                <div>
-                  <div className="flex justify-between mb-1">
-                    <span className="text-zinc-400">Ratio mínimo aceptado</span>
-                    <span className="text-emerald-300 font-bold">{Math.round(acceptedRatioMin * 100)}%</span>
-                  </div>
-                  <input
-                    type="range" min={0.10} max={0.30} step={0.01}
-                    value={acceptedRatioMin}
-                    onChange={(e) => setAcceptedRatioMin(parseFloat(e.target.value))}
-                    className="w-full accent-emerald-500"
-                  />
-                  <div className="flex justify-between text-[9px] text-zinc-500">
-                    <span>10%</span><span>30%</span>
-                  </div>
-                </div>
-                <div>
-                  <div className="flex justify-between mb-1">
-                    <span className="text-zinc-400">Warm-up (muestras)</span>
-                    <span className="text-emerald-300 font-bold">{warmupSamples}</span>
-                  </div>
-                  <input
-                    type="range" min={30} max={150} step={5}
-                    value={warmupSamples}
-                    onChange={(e) => setWarmupSamples(parseInt(e.target.value, 10))}
-                    className="w-full accent-emerald-500"
-                  />
-                  <div className="flex justify-between text-[9px] text-zinc-500">
-                    <span>30</span><span>150</span>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { setAcceptedRatioMin(0.15); setWarmupSamples(60); }}
-                  className="w-full rounded-md border border-zinc-600/60 bg-zinc-800/60 hover:bg-zinc-700/60 text-[10px] font-bold tracking-wide py-1.5"
-                >
-                  RESET (15% / 60)
-                </button>
-                <div className="border-t border-zinc-700/60 pt-2 space-y-1.5">
-                  <label className="flex items-center justify-between cursor-pointer">
-                    <span className="text-zinc-400">Auto-relax tras N frames</span>
-                    <input
-                      type="checkbox"
-                      checked={autoRelaxEnabled}
-                      onChange={(e) => setAutoRelaxEnabled(e.target.checked)}
-                      className="accent-emerald-500"
-                    />
-                  </label>
-                  <div>
-                    <div className="flex justify-between mb-1">
-                      <span className="text-zinc-400">N consecutivos</span>
-                      <span className="text-emerald-300 font-bold">{autoRelaxN}</span>
-                    </div>
-                    <input
-                      type="range" min={30} max={300} step={10}
-                      value={autoRelaxN}
-                      onChange={(e) => setAutoRelaxN(parseInt(e.target.value, 10))}
-                      disabled={!autoRelaxEnabled}
-                      className="w-full accent-emerald-500 disabled:opacity-40"
-                    />
-                    <div className="flex justify-between text-[9px] text-zinc-500">
-                      <span>30</span><span>300</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between text-[9px]">
-                    <span className="text-zinc-500">Racha actual</span>
-                    <span className="text-zinc-200 font-bold">{consecutiveAcceptedRef.current}</span>
-                  </div>
-                  {autoRelaxActive && (
-                    <div className="text-[9px] text-emerald-300 font-bold">⚡ Umbrales relajados activos</div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Pulse status - compact floating chip top-left */}
         {isMonitoring && (() => {
-          const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
-          const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
-          const triplePass = !!forensicGate?.passAll;
-          const pulsePresent = isMonitoring && triplePass && heartRate > 0;
-          const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
-          const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
-          return (
-            <div className="auto-hide safe-top safe-left absolute top-8 left-0 z-30 pointer-events-none">
-              <div className={`rounded-lg px-2.5 py-1.5 border backdrop-blur-md shadow-lg ${
-                pulsePresent
-                  ? 'bg-emerald-500/10 border-emerald-400/50'
-                  : 'bg-red-500/10 border-red-400/40'
+          const pq = getPositionQuality();
+          const isDrifting = pq.drifting;
+          const isLocked = pq.locked && !isDrifting;
+          const showGuidance = !isLocked || isDrifting;
+          return showGuidance || isLocked ? (
+            <div className="absolute top-1 left-0 right-0 z-20 flex justify-center pointer-events-none">
+              <div className={`px-3 py-1.5 rounded-full text-[11px] font-bold tracking-wider shadow-lg backdrop-blur-md border ${
+                isLocked ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' :
+                isDrifting ? 'bg-red-500/20 border-red-500/40 text-red-300 animate-pulse' :
+                pq.qualityScore > 0.4 ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' :
+                'bg-red-500/20 border-red-500/40 text-red-300'
               }`}>
-                <div className="flex items-baseline gap-2">
-                  <span className={`text-2xl font-bold leading-none tabular-nums ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
-                    {pulsePresent ? Math.round(heartRate) : '--'}
-                  </span>
-                  <span className="text-[9px] text-slate-400 tracking-wider">BPM</span>
-                </div>
-                <div className={`text-[8px] font-bold tracking-wider mt-0.5 ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
-                  {pulsePresent ? '● PULSO' : '○ ' + blockedReason.slice(0, 22)}
-                </div>
-                <div className="flex gap-2 mt-1 text-[8px] text-slate-400 font-mono">
-                  <span>PI {pi > 0 ? pi.toFixed(2) : '--'}</span>
-                  <span>SQI {lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}%</span>
-                  <span>{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</span>
-                </div>
+                <span className="flex items-center gap-1.5">
+                  {isLocked ? <Shield className="w-3 h-3" /> : isDrifting ? <AlertTriangle className="w-3 h-3" /> : <Activity className="w-3 h-3 animate-pulse" />}
+                  {pq.guidance}
+                </span>
               </div>
             </div>
-          );
+          ) : null;
         })()}
 
-        {/* CIVIL MODE - compact bottom-right chip */}
-        {CIVIL_MODE && (
-          <div className="auto-hide safe-bottom safe-right absolute bottom-0 right-0 z-30 pointer-events-none">
-            <div className="bg-black/70 backdrop-blur-md border border-slate-700/50 rounded-lg px-2 py-1.5">
-              <div className="text-[7px] text-amber-400/80 mb-0.5 tracking-widest">⚠ CIVIL · NO CLÍNICO</div>
-              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] font-mono">
-                <span className="text-slate-400">FC <span className="text-white">{heartRate > 0 ? Math.round(heartRate) : "--"}</span></span>
-                <span className="text-slate-400">O₂ <span className="text-white">{vitalSigns.spo2 > 0 ? vitalSigns.spo2.toFixed(0) : "--"}%</span></span>
-                <span className="text-slate-400">PA <span className="text-white">{vitalSigns.pressure?.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}</span></span>
-                <span className="text-slate-400">GL <span className="text-white">{vitalSigns.glucose > 0 ? vitalSigns.glucose.toFixed(0) : "--"}</span></span>
+        <div className="relative z-10 h-full">
+          <div className="flex-1 h-full">
+            <PPGSignalMeter 
+              value={heartbeatSignal}
+              quality={lastSignal?.quality || 0}
+              isFingerDetected={lastSignal?.fingerDetected || false}
+              onStartMeasurement={handleToggleMonitoring}
+              onReset={handleReset}
+              isMonitoring={isMonitoring}
+              arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
+              rawArrhythmiaData={lastArrhythmiaData.current}
+              preserveResults={showResults}
+              diagnosticMessage={lastSignal?.diagnostics?.message}
+              isPeak={beatMarker === 1}
+              bpm={heartRate}
+              spo2={vitalSigns.spo2}
+              rrIntervals={rrIntervals}
+            />
+          </div>
+
+          {/* ════════════════════════════════════════════════════════════
+              FORENSIC PULSE PANEL — the only thing the operator sees by
+              default. Shows: PULSO DETECTADO / SIN PULSO + BPM + PI.
+              No SpO2/BP/glucose/lipids unless ?civil=1 is passed.
+              ════════════════════════════════════════════════════════════ */}
+          {(() => {
+            const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
+            const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
+            const pulsePresent = isMonitoring && !noOptical && heartRate > 0;
+            const pi = lastSignal?.perfusionIndex || 0;
+            return (
+              <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
+                {/* Forensic banner — always visible while monitoring */}
+                {isMonitoring && (
+                  <div className="px-3 py-1 rounded-md bg-slate-900/80 border border-slate-700 text-[10px] text-slate-300 tracking-wider text-center max-w-[95%]">
+                    MODO FORENSE — DETECTOR DE PULSO PPG. NO MIDE SPO₂ / PRESIÓN / GLUCOSA / LÍPIDOS.
+                  </div>
+                )}
+                <div className={`w-[92%] rounded-xl px-4 py-3 border-2 backdrop-blur-sm ${
+                  pulsePresent
+                    ? 'bg-emerald-500/10 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.35)]'
+                    : 'bg-red-500/10 border-red-400'
+                }`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className={`text-xs font-bold tracking-widest ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
+                        {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {noOptical
+                          ? (lastSignal?.diagnostics?.message || 'SIN CONTACTO ÓPTICO')
+                          : (cs === 'OPTICAL_CONTACT_LOW_PERFUSION' ? 'CONTACTO — BAJA PERFUSIÓN' : 'CONTACTO ESTABLE')}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
+                        {heartRate > 0 ? Math.round(heartRate) : '--'}
+                      </div>
+                      <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50">
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">ÍNDICE DE PERFUSIÓN</div>
+                      <div className="text-sm font-mono text-slate-200">{pi > 0 ? pi.toFixed(2) : '--'}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">CALIDAD SEÑAL</div>
+                      <div className="text-sm font-mono text-slate-200">{lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">TIEMPO</div>
+                      <div className="text-sm font-mono text-slate-200">{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</div>
+                    </div>
+                  </div>
+                </div>
               </div>
+            );
+          })()}
+
+          {/* CIVIL MODE — legacy clinical-style vitals (research only). */}
+          {CIVIL_MODE && (
+          <div className="absolute inset-x-0 top-[70%] bottom-[60px] bg-black/10 px-4 py-3">
+            <div className="text-[9px] text-amber-400 mb-1 tracking-widest text-center">⚠ CIVIL — ESTIMACIONES NO CLÍNICAS</div>
+            <div className="grid grid-cols-3 gap-2 place-items-center">
+              <VitalSign label="FRECUENCIA CARDÍACA" value={heartRate > 0 ? Math.round(heartRate) : "--"} unit="BPM" highlighted={showResults} />
+              <VitalSign label="SPO2" value={vitalSigns.spo2 > 0 ? vitalSigns.spo2 : "--"} unit="%" highlighted={showResults} />
+              <VitalSign 
+                label="PRESIÓN ARTERIAL"
+                value={vitalSigns.pressure && vitalSigns.pressure.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}
+                unit="mmHg"
+                highlighted={showResults}
+                confidenceLevel={vitalSigns.pressure?.confidence}
+                featureQuality={vitalSigns.pressure?.featureQuality}
+              />
+              <VitalSign label="GLUCOSA (EST.)" value={vitalSigns.glucose > 0 ? vitalSigns.glucose : "--"} unit="mg/dL" highlighted={showResults} />
+              <VitalSign 
+                label="COLEST./TRIGL. (EST.)"
+                value={vitalSigns.lipids?.totalCholesterol > 0 || vitalSigns.lipids?.triglycerides > 0 ? `${vitalSigns.lipids?.totalCholesterol || "--"}/${vitalSigns.lipids?.triglycerides || "--"}` : "--/--"}
+                unit="mg/dL"
+                highlighted={showResults}
+              />
+              <VitalSign label="ARRITMIAS" value={vitalSigns.arrhythmiaStatus || "SIN ARRITMIAS|0"} highlighted={showResults} />
             </div>
           </div>
-        )}
+          )}
 
-        {/* Measurement summary modal */}
-        {showResults && measurementSummary && (() => {
+          {showResults && measurementSummary && (() => {
             const { totalBeats, arrhythmiaBeats, normalPercent } = measurementSummary;
             const normalBeats = totalBeats - arrhythmiaBeats;
             const avgBpm = heartRate > 0 ? Math.round(heartRate) : '--';
@@ -1577,7 +1247,6 @@ const Index = () => {
                         <div className="text-white text-2xl font-bold leading-none">{avgBpm}</div>
                         <div className="text-slate-500 text-[9px] mt-1 font-medium">BPM PROMEDIO</div>
                       </div>
-                      {CIVIL_MODE && (
                       <div className="bg-slate-900/80 rounded-xl p-3 text-center border border-slate-800/50">
                         <Activity className="w-4 h-4 text-cyan-400 mx-auto mb-1" />
                         <div className="text-white text-2xl font-bold leading-none">
@@ -1586,10 +1255,9 @@ const Index = () => {
                         </div>
                         <div className="text-slate-500 text-[9px] mt-1 font-medium">SpO₂</div>
                       </div>
-                      )}
                     </div>
 
-                    {CIVIL_MODE && vitalSigns.pressure?.systolic > 0 && (
+                    {vitalSigns.pressure?.systolic > 0 && (
                       <div className="bg-slate-900/80 rounded-xl p-3 border border-slate-800/50 flex items-center gap-3">
                         <Shield className="w-5 h-5 text-blue-400" />
                         <div className="flex-1">
@@ -1657,18 +1325,16 @@ const Index = () => {
                         <div className={`text-[10px] font-semibold mt-0.5 ${statusColor === 'emerald' ? 'text-emerald-400' : statusColor === 'yellow' ? 'text-yellow-400' : 'text-red-400'}`}>{statusText}</div>
                       </div>
                     </div>
-                    {CIVIL_MODE && (
-                      <button
-                        onClick={() => {
-                          analyzeVitals({ heartRate, vitalSigns, quality: lastSignal?.quality || 0 });
-                          setShowAIAnalysis(true);
-                        }}
-                        disabled={isAnalyzing}
-                        className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm transition-all disabled:opacity-50"
-                      >
-                        {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
-                      </button>
-                    )}
+                    <button
+                      onClick={() => {
+                        analyzeVitals({ heartRate, vitalSigns, quality: lastSignal?.quality || 0 });
+                        setShowAIAnalysis(true);
+                      }}
+                      disabled={isAnalyzing}
+                      className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm transition-all disabled:opacity-50"
+                    >
+                      {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1714,42 +1380,6 @@ const Index = () => {
         className="fixed bottom-1 left-1 z-40 w-6 h-6 rounded-full bg-muted/40 hover:bg-muted text-[10px] text-muted-foreground"
       >·</button>
 
-      {/* Clinical calibration trigger — only available while monitoring. */}
-      {isMonitoring && (
-        <button
-          type="button"
-          onClick={() => { setShowCalibration(true); setCalPromptHighlight(false); }}
-          className={
-            "fixed bottom-1 left-9 z-40 h-6 px-2 rounded-full text-[10px] font-medium text-primary border " +
-            (calPromptHighlight
-              ? "bg-primary/30 border-primary animate-pulse ring-2 ring-primary/50"
-              : "bg-primary/15 hover:bg-primary/25 border-primary/30")
-          }
-          aria-label="Calibración clínica"
-        >
-          CAL
-        </button>
-      )}
-
-      <CalibrationWizard
-        open={showCalibration}
-        live={{
-          fingerDetected: !!lastSignal?.fingerDetected,
-          quality: lastSignal?.quality ?? 0,
-          bpm: heartRate,
-          spo2: vitalSigns.spo2,
-          motionLevel: motionClassifierRef.current.classify(),
-        }}
-        onCancel={() => setShowCalibration(false)}
-        onComplete={(baseline) => {
-          setCalibrationBaseline(baseline);
-          toast({
-            title: 'Calibración completa',
-            description: `BPM ${baseline.bpmMean.toFixed(1)} ± ${baseline.bpmSd.toFixed(1)} (n=${baseline.bpmSamples}) · SpO₂ ${baseline.spo2Mean.toFixed(1)} ± ${baseline.spo2Sd.toFixed(1)} (n=${baseline.spo2Samples})`,
-          });
-        }}
-      />
-
       <FiducialTuner
         open={showFiducialTuner}
         onClose={() => setShowFiducialTuner(false)}
@@ -1764,7 +1394,7 @@ const Index = () => {
         estimator={srEstimatorRef.current}
         hidden={!showFiducialTuner && !showSRDiag}
       />
-    </>
+    </div>
   );
 };
 

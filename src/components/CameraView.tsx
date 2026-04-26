@@ -3,15 +3,6 @@ import React, { useRef, useEffect, forwardRef, useImperativeHandle } from "react
 export interface CameraViewHandle {
   getVideoElement: () => HTMLVideoElement | null;
   getDiagnostics: () => CameraDiagnostics;
-  getStreamStatus: () => CameraStreamStatus;
-}
-
-export interface CameraStreamStatus {
-  active: boolean;
-  starting: boolean;
-  stoppingPending: boolean;
-  liveVideoTracks: number;
-  endedVideoTracks: number;
 }
 
 export interface CameraDiagnostics {
@@ -25,12 +16,6 @@ export interface CameraDiagnostics {
   focusLocked: boolean;
   isoValue: number;
   supportedConstraints: string[];
-  /** Profile rung the negotiator finally settled on (e.g. "1280x720@30"). */
-  activeProfile: string;
-  /** Number of rungs we had to descend before the stream stayed within FPS floor. */
-  fallbacksApplied: number;
-  /** True if a measured-FPS downshift happened after the initial open. */
-  downshiftedForFps: boolean;
 }
 
 interface CameraViewProps {
@@ -54,19 +39,6 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isStartingRef = useRef(false);
-  const stopTimerRef = useRef<number | null>(null);
-  // Keep the latest onStreamReady in a ref so the main start/stop effect
-  // does NOT re-run every time the parent re-renders with a new callback
-  // identity. Re-running the effect tears down the MediaStream mid-probe,
-  // which is exactly what was causing the camera to "open and close" and
-  // corrupt the G1/G2/G3 extraction during the first seconds of capture.
-  const onStreamReadyRef = useRef<typeof onStreamReady>(onStreamReady);
-  useEffect(() => { onStreamReadyRef.current = onStreamReady; }, [onStreamReady]);
-  // Continuous FPS watchdog — updates diagnostics.realFrameRate every ~2 s
-  // so the diagnostics overlay reflects what the camera is actually delivering.
-  const fpsWatchdogRef = useRef<{ frames: number; t0: number; rafId: number | null }>({
-    frames: 0, t0: 0, rafId: null,
-  });
   const diagnosticsRef = useRef<CameraDiagnostics>({
     deviceLabel: '',
     hasTorch: false,
@@ -78,59 +50,17 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     focusLocked: false,
     isoValue: 0,
     supportedConstraints: [],
-    activeProfile: '',
-    fallbacksApplied: 0,
-    downshiftedForFps: false,
   });
 
   useImperativeHandle(ref, () => ({
     getVideoElement: () => videoRef.current,
     getDiagnostics: () => ({ ...diagnosticsRef.current }),
-    getStreamStatus: () => {
-      const tracks = streamRef.current?.getVideoTracks() ?? [];
-      return {
-        active: streamRef.current?.active ?? false,
-        starting: isStartingRef.current,
-        stoppingPending: stopTimerRef.current !== null,
-        liveVideoTracks: tracks.filter(track => track.readyState === 'live' && track.enabled).length,
-        endedVideoTracks: tracks.filter(track => track.readyState === 'ended').length,
-      };
-    },
   }), []);
-
-  useEffect(() => {
-    return () => {
-      if (stopTimerRef.current !== null) {
-        window.clearTimeout(stopTimerRef.current);
-        stopTimerRef.current = null;
-      }
-      if (fpsWatchdogRef.current.rafId !== null) {
-        cancelAnimationFrame(fpsWatchdogRef.current.rafId);
-        fpsWatchdogRef.current.rafId = null;
-      }
-      streamRef.current?.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-      if (videoRef.current) videoRef.current.srcObject = null;
-      isStartingRef.current = false;
-    };
-  }, []);
 
   useEffect(() => {
     let mounted = true;
 
-    const cancelScheduledStop = () => {
-      if (stopTimerRef.current !== null) {
-        window.clearTimeout(stopTimerRef.current);
-        stopTimerRef.current = null;
-      }
-    };
-
     const stopCamera = async () => {
-      // Stop the FPS watchdog first so it doesn't keep referencing a dead video.
-      if (fpsWatchdogRef.current.rafId !== null) {
-        cancelAnimationFrame(fpsWatchdogRef.current.rafId);
-        fpsWatchdogRef.current.rafId = null;
-      }
       if (streamRef.current) {
         for (const track of streamRef.current.getVideoTracks()) {
           try {
@@ -143,7 +73,6 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         }
         streamRef.current = null;
       }
-      diagnosticsRef.current.torchActive = false;
       if (videoRef.current) videoRef.current.srcObject = null;
       isStartingRef.current = false;
     };
@@ -204,38 +133,54 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     };
 
     const startCamera = async () => {
-      cancelScheduledStop();
       if (isStartingRef.current) return;
-      if (streamRef.current?.active) {
-        onStreamReadyRef.current?.(streamRef.current);
-        return;
-      }
       isStartingRef.current = true;
+      await stopCamera();
       if (!mounted) { isStartingRef.current = false; return; }
 
       try {
-        // Single-open path: no camera scanning, no profile probing, no
-        // stop/start ladder. Those probes made mobile browsers visibly open
-        // and close the camera before G1/G2/G3 could stabilize.
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30, max: 30 },
-          },
-        });
+        // PHASE 1
+        const cameraId = await findMainBackCamera();
 
-        diagnosticsRef.current.activeProfile = 'environment@ideal-1280x720@30';
-        diagnosticsRef.current.fallbacksApplied = 0;
-        diagnosticsRef.current.downshiftedForFps = false;
+        // PHASE 2: Open stream with stable base
+        const baseConstraints: MediaTrackConstraints = cameraId
+          ? {
+              deviceId: { exact: cameraId },
+              width: { ideal: 640, max: 960 },
+              height: { ideal: 480, max: 720 },
+              frameRate: { ideal: 30, min: 24, max: 30 }
+            }
+          : {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 640, max: 960 },
+              height: { ideal: 480, max: 720 },
+              frameRate: { ideal: 30, min: 24, max: 30 }
+            };
+
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: baseConstraints });
+        } catch {
+          console.warn('Fallback to simple constraints');
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } }
+          });
+        }
 
         if (!mounted) { stream.getTracks().forEach(t => t.stop()); isStartingRef.current = false; return; }
         streamRef.current = stream;
 
-        if (videoRef.current && videoRef.current.srcObject !== stream) {
+        // Connect video
+        if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          await new Promise<void>((resolve) => {
+            const video = videoRef.current!;
+            video.onloadedmetadata = async () => {
+              try { await video.play(); } catch {}
+              resolve();
+            };
+          });
         }
 
         const track = stream.getVideoTracks()[0];
@@ -271,18 +216,6 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
             }
           }
           if (!torchOk) console.warn('⚠️ Torch failed after 5 attempts');
-        }
-
-        const video = videoRef.current;
-        if (video) {
-          try { await video.play(); } catch {}
-          if (!video.videoWidth) {
-            await new Promise<void>((resolve) => {
-              const done = () => resolve();
-              video.addEventListener('loadedmetadata', done, { once: true });
-              window.setTimeout(done, 800);
-            });
-          }
         }
 
         // PHASE 4: Fine lock — apply each independently, log what succeeds
@@ -345,32 +278,8 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
           '| WB:', diagnosticsRef.current.wbLocked,
           '| ISO:', diagnosticsRef.current.isoValue);
 
-        onStreamReadyRef.current?.(stream);
+        onStreamReady?.(stream);
         isStartingRef.current = false;
-
-        // Live FPS watchdog: count rVFC ticks over rolling 2 s windows and
-        // store the rate in diagnostics.realFrameRate. Read-only — never
-        // re-negotiates constraints mid-stream (too risky for the torch).
-        const v = videoRef.current;
-        if (v && 'requestVideoFrameCallback' in v) {
-          fpsWatchdogRef.current = { frames: 0, t0: performance.now(), rafId: 0 };
-          const tick = () => {
-            if (!streamRef.current || !videoRef.current) return;
-            fpsWatchdogRef.current.frames++;
-            const elapsed = performance.now() - fpsWatchdogRef.current.t0;
-            if (elapsed >= 2000) {
-              const fps = (fpsWatchdogRef.current.frames * 1000) / elapsed;
-              diagnosticsRef.current.realFrameRate = fps;
-              fpsWatchdogRef.current.frames = 0;
-              fpsWatchdogRef.current.t0 = performance.now();
-            }
-            (videoRef.current as any).requestVideoFrameCallback(tick);
-          };
-          (v as any).requestVideoFrameCallback(tick);
-          // Stash a sentinel so stopCamera() knows to clear it; rAF id is
-          // unused but kept for symmetry.
-          fpsWatchdogRef.current.rafId = 1 as any;
-        }
       } catch (err) {
         console.error('❌ Camera error:', err);
         isStartingRef.current = false;
@@ -380,20 +289,14 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     if (isMonitoring) {
       startCamera();
     } else {
-      cancelScheduledStop();
-      stopTimerRef.current = window.setTimeout(() => {
-        stopTimerRef.current = null;
-        stopCamera();
-      }, 2500);
+      stopCamera();
     }
 
     return () => {
       mounted = false;
+      stopCamera();
     };
-  // Intentionally depend ONLY on isMonitoring. onStreamReady is read via
-  // ref so changing parent callbacks never restarts the camera mid-stream.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMonitoring]);
+  }, [isMonitoring, onStreamReady]);
 
   return (
     <video

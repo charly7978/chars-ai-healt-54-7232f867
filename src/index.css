@@ -111,28 +111,3 @@
     @apply bg-background text-foreground;
   }
 }
-
-@layer utilities {
-  /* Safe-area insets for iOS notches, Android nav/system bars and
-     fullscreen browser controls. Use viewport-fit=cover (already set). */
-  .safe-top    { padding-top: max(0.5rem, env(safe-area-inset-top)); }
-  .safe-bottom { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
-  .safe-left   { padding-left: max(0.5rem, env(safe-area-inset-left)); }
-  .safe-right  { padding-right: max(0.5rem, env(safe-area-inset-right)); }
-  .safe-x      { padding-left: max(0.5rem, env(safe-area-inset-left)); padding-right: max(0.5rem, env(safe-area-inset-right)); }
-  .safe-y      { padding-top: max(0.5rem, env(safe-area-inset-top));   padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
-  .safe-all    { padding: max(0.5rem, env(safe-area-inset-top)) max(0.5rem, env(safe-area-inset-right)) max(0.5rem, env(safe-area-inset-bottom)) max(0.5rem, env(safe-area-inset-left)); }
-
-  /* Auto-hide fade for overlay chips. Toggled by `data-overlay-visible`
-     on a parent (see Index.tsx). Pointer-events stay off so the canvas
-     remains tappable underneath. */
-  .auto-hide {
-    transition: opacity 400ms ease, transform 400ms ease;
-    opacity: 1;
-  }
-  [data-overlay-visible="false"] .auto-hide {
-    opacity: 0;
-    transform: translateY(-4px);
-    pointer-events: none;
-  }
-}

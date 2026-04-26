@@ -160,22 +160,6 @@ export const useSignalProcessor = () => {
     processorRef.current?.setMorphologyGate(pass, reason);
   }, []);
 
-  // V6: structured ROI/Liveness telemetry — accessor + one-click NDJSON
-  // download so the operator can export the trace when the app says it
-  // isn't detecting pulses.
-  const getROITelemetrySummary = useCallback(() => {
-    const t = processorRef.current?.getROITelemetry();
-    return t ? t.summary() : { samples: 0, pass: 0, fail: 0, passRate: 0, topReasons: [] };
-  }, []);
-
-  const downloadROITelemetry = useCallback(() => {
-    processorRef.current?.getROITelemetry().download();
-  }, []);
-
-  const clearROITelemetry = useCallback(() => {
-    processorRef.current?.getROITelemetry().clear();
-  }, []);
-
   return {
     isProcessing,
     lastSignal,
@@ -189,9 +173,6 @@ export const useSignalProcessor = () => {
     getPositionQuality,
     getMotionInfo,
     setMorphologyGate,
-    getROITelemetrySummary,
-    downloadROITelemetry,
-    clearROITelemetry,
     debugInfo: {
       sessionId: sessionIdRef.current,
       initializationState: initializationState.current,
