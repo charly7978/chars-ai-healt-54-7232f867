@@ -815,6 +815,10 @@ const Index = () => {
     playCompletionSound();
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
     stopFrameLoop();
+    if (watchdogTimerRef.current !== null) {
+      window.clearInterval(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
       measurementTimerRef.current = null;
@@ -857,6 +861,10 @@ const Index = () => {
   const handleReset = useCallback(() => {
     console.log('🔄 Reset completo...');
     stopFrameLoop();
+    if (watchdogTimerRef.current !== null) {
+      window.clearInterval(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
       measurementTimerRef.current = null;
