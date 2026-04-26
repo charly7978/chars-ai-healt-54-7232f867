@@ -29,16 +29,19 @@ const CFG = {
   weightSmoothingAlphaLow: 0.10,
   autoTuneSigmaTrigger: 1.0,
   autoTuneSigmaSaturate: 4.0,
+  autoTuneImuTrigger: 0.15,
+  autoTuneImuSaturate: 0.80,
   autoTuneWindow: 30,
 };
 
 function makeReplay() {
-  const buf = new Float64Array(CFG.autoTuneWindow);
-  let idx = 0, count = 0;
+  const sBuf = new Float64Array(CFG.autoTuneWindow);
+  const iBuf = new Float64Array(CFG.autoTuneWindow);
+  let sIdx = 0, sCount = 0, iIdx = 0, iCount = 0;
   let effFrames = CFG.upgradeConfirmFrames;
   let effAlpha = CFG.weightSmoothingAlpha;
 
-  const std = () => {
+  const std = (buf, count) => {
     if (count < 4) return 0;
     let s = 0;
     for (let i = 0; i < count; i++) s += buf[i];
@@ -49,43 +52,59 @@ function makeReplay() {
   };
 
   const recompute = () => {
-    const s = std();
-    const lo = CFG.autoTuneSigmaTrigger;
-    const hi = Math.max(lo + 1e-3, CFG.autoTuneSigmaSaturate);
-    const t = Math.max(0, Math.min(1, (s - lo) / (hi - lo)));
+    const sOpt = std(sBuf, sCount);
+    const loO = CFG.autoTuneSigmaTrigger;
+    const hiO = Math.max(loO + 1e-3, CFG.autoTuneSigmaSaturate);
+    const tOpt = Math.max(0, Math.min(1, (sOpt - loO) / (hiO - loO)));
+    const sImu = std(iBuf, iCount);
+    const loI = CFG.autoTuneImuTrigger;
+    const hiI = Math.max(loI + 1e-3, CFG.autoTuneImuSaturate);
+    const tImu = Math.max(0, Math.min(1, (sImu - loI) / (hiI - loI)));
+    const t = Math.max(tOpt, tImu);
     const baseF = CFG.upgradeConfirmFrames;
     const highF = Math.max(baseF, CFG.upgradeConfirmFramesHigh);
     effFrames = Math.round(baseF + (highF - baseF) * t);
     const baseA = CFG.weightSmoothingAlpha;
     const lowA = Math.min(baseA, CFG.weightSmoothingAlphaLow);
     effAlpha = baseA + (lowA - baseA) * t;
-    return s;
+    return { sigmaStd: sOpt, imuStd: sImu };
   };
 
-  return (sigma) => {
-    buf[idx] = sigma;
-    idx = (idx + 1) % buf.length;
-    if (count < buf.length) count++;
-    const sigmaStd = recompute();
-    return { effUpgradeFrames: effFrames, effAlpha, sigmaStd };
+  return (sigma, imu = 0) => {
+    sBuf[sIdx] = sigma;
+    sIdx = (sIdx + 1) % sBuf.length;
+    if (sCount < sBuf.length) sCount++;
+    iBuf[iIdx] = imu;
+    iIdx = (iIdx + 1) % iBuf.length;
+    if (iCount < iBuf.length) iCount++;
+    const { sigmaStd, imuStd } = recompute();
+    return { effUpgradeFrames: effFrames, effAlpha, sigmaStd, imuStd };
   };
 }
 
 // --- Synthetic trajectories ------------------------------------------------
 function* trajectories() {
-  // Each trajectory is 120 frames (~4 s @ 30 fps).
+  // Each trajectory is 120 frames (~4 s @ 30 fps). `imu` is optional; if
+  // omitted the IMU channel stays quiet so only the optical tuner reacts.
   const N = 120;
-  yield { name: 'still',       seq: Array.from({ length: N }, () => 0.4) };
-  yield { name: 'micro_drift', seq: Array.from({ length: N }, (_, i) => 1.5 + Math.sin(i / 6) * 0.6) };
-  yield { name: 'sliding',     seq: Array.from({ length: N }, (_, i) => 4 + Math.sin(i / 4) * 1.5) };
-  yield { name: 'burst',       seq: Array.from({ length: N }, (_, i) => (i % 25 === 0 ? 9 : 0.5)) };
+  yield { name: 'still',       seq: Array.from({ length: N }, () => ({ s: 0.4, i: 0.05 })) };
+  yield { name: 'micro_drift', seq: Array.from({ length: N }, (_, k) => ({ s: 1.5 + Math.sin(k / 6) * 0.6, i: 0.10 })) };
+  yield { name: 'sliding',     seq: Array.from({ length: N }, (_, k) => ({ s: 4 + Math.sin(k / 4) * 1.5, i: 0.30 })) };
+  yield { name: 'burst',       seq: Array.from({ length: N }, (_, k) => ({ s: (k % 25 === 0 ? 9 : 0.5), i: (k % 25 === 0 ? 1.8 : 0.05) })) };
+  // V9.3 — finger optically still, hand-held jitter only.
+  yield { name: 'imu_only',    seq: Array.from({ length: N }, (_, k) => ({ s: 0.4, i: 0.4 + Math.sin(k / 5) * 0.5 })) };
   yield {
     name: 'mixed',
-    seq: Array.from({ length: N }, (_, i) =>
-      i < 30 ? 0.4 :
-      i < 60 ? 1.5 + Math.sin(i / 5) * 0.6 :
-      i < 90 ? 3.5 + Math.sin(i / 3) * 1.2 :
-               0.6),
+    seq: Array.from({ length: N }, (_, k) => ({
+      s: k < 30 ? 0.4 :
+         k < 60 ? 1.5 + Math.sin(k / 5) * 0.6 :
+         k < 90 ? 3.5 + Math.sin(k / 3) * 1.2 :
+                  0.6,
+      i: k < 30 ? 0.05 :
+         k < 60 ? 0.20 :
+         k < 90 ? 0.55 :
+                  0.05,
+    })),
   };
 }
 
@@ -108,10 +127,11 @@ for (const { name, seq } of trajectories()) {
   const step = makeReplay();
   let lastFrames = -1, lastAlpha = -1;
   let stateChanges = 0;
-  let maxFrames = 0, minAlpha = Infinity, maxSigmaStd = 0;
+  let maxFrames = 0, minAlpha = Infinity, maxSigmaStd = 0, maxImuStd = 0;
 
   for (let i = 0; i < seq.length; i++) {
-    const out = step(seq[i]);
+    const { s, i: imu } = seq[i];
+    const out = step(s, imu);
     if (out.effUpgradeFrames !== lastFrames || Math.abs(out.effAlpha - lastAlpha) > 1e-6) {
       stateChanges++;
       lastFrames = out.effUpgradeFrames;
@@ -120,14 +140,17 @@ for (const { name, seq } of trajectories()) {
     if (out.effUpgradeFrames > maxFrames) maxFrames = out.effUpgradeFrames;
     if (out.effAlpha < minAlpha) minAlpha = out.effAlpha;
     if (out.sigmaStd > maxSigmaStd) maxSigmaStd = out.sigmaStd;
+    if (out.imuStd  > maxImuStd)   maxImuStd   = out.imuStd;
     lines.push(JSON.stringify({
       type: 'sample',
       trajectory: name,
       frame: i,
-      trackerSigma: +seq[i].toFixed(4),
+      trackerSigma: +s.toFixed(4),
+      imuScore: +imu.toFixed(4),
       effUpgradeFrames: out.effUpgradeFrames,
       effAlpha: +out.effAlpha.toFixed(4),
       sigmaStd: +out.sigmaStd.toFixed(4),
+      imuStd:   +out.imuStd.toFixed(4),
     }));
   }
   lines.push(JSON.stringify({
@@ -138,6 +161,7 @@ for (const { name, seq } of trajectories()) {
     maxEffUpgradeFrames: maxFrames,
     minEffAlpha: +minAlpha.toFixed(4),
     maxSigmaStd: +maxSigmaStd.toFixed(4),
+    maxImuStd:   +maxImuStd.toFixed(4),
   }));
 }
 
