@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { toast } from '@/hooks/use-toast';
 import { ToastAction } from '@/components/ui/toast';
+import type { ToastActionElement } from '@/components/ui/toast';
 import React from 'react';
 import type { CalibrationBaseline } from '@/components/CalibrationWizard';
 import type { MotionLevel } from '@/modules/signal-processing/MotionClassifier';
@@ -170,14 +171,14 @@ export function useRecalibrationWatchdog(
         description: `${reasonLabel[fired]}. Toque CAL para recalibrar.`,
         duration: 6000,
         action: onOpenWizardRef.current
-          ? React.createElement(
+          ? (React.createElement(
               ToastAction,
               {
                 altText: 'Abrir asistente de calibración',
                 onClick: () => onOpenWizardRef.current?.(),
               },
               'Recalibrar ahora',
-            )
+            ) as unknown as ToastActionElement)
           : undefined,
       });
       // Light haptic so the operator notices on a noisy scene.
