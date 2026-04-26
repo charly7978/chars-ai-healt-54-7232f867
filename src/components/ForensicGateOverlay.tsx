@@ -20,6 +20,13 @@ export interface ForensicGateSnapshot {
   publicationGate?: boolean;
   effectiveSampleRate?: number;
   bufferedSeconds?: number;
+  // Raw Gate-1 telemetry (mirrors the values driving the liveness decision).
+  livenessRaw?: {
+    rawR: number; rawG: number; rawB: number;
+    totalI: number; absorption: number; redDom: number;
+    texture: number; coverage: number;
+    confirmCount: number; lostCount: number;
+  };
 }
 
 export const FORENSIC_CADENCE_OPTIONS = [100, 150, 300, 500, 1000] as const;
@@ -71,6 +78,7 @@ const ForensicGateOverlay: React.FC<Props> = ({
   const om = gate?.opticalMetrics ?? null;
   const effSr = gate?.effectiveSampleRate ?? 0;
   const bufSec = gate?.bufferedSeconds ?? 0;
+  const lr = gate?.livenessRaw;
   // Make the failing gate explicit so the operator never wonders why pulse
   // is not being shown. (Gate 1 = optical, Gate 2 = spectral, Gate 3 = morph.)
   let prefix = '';
@@ -195,6 +203,26 @@ const ForensicGateOverlay: React.FC<Props> = ({
         )}
         <div className="text-[9px] text-zinc-500 mt-1">Buffer real: {bufSec.toFixed(1)}s / 10.0s</div>
       </div>
+
+      {/* ─── Gate 1 raw telemetry (why liveness opens/closes) ─── */}
+      {lr && (
+        <div className="mt-1.5 pt-1 border-t border-zinc-700/60">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-bold tracking-widest text-zinc-300">CRUDO G1</span>
+            <span className="text-[9px] text-zinc-500">{lr.confirmCount}↑ / {lr.lostCount}↓</span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] text-zinc-400">
+            <div className="flex justify-between"><span>R</span><span className="text-zinc-100">{lr.rawR.toFixed(0)}</span></div>
+            <div className="flex justify-between"><span>G</span><span className="text-zinc-100">{lr.rawG.toFixed(0)}</span></div>
+            <div className="flex justify-between"><span>B</span><span className="text-zinc-100">{lr.rawB.toFixed(0)}</span></div>
+            <div className="flex justify-between"><span>ΣI</span><span className="text-zinc-100">{lr.totalI.toFixed(0)}</span></div>
+            <div className="flex justify-between" title="R/(G+B) — firma de hemoglobina (≥1.30)"><span>R/(G+B)</span><span className={lr.absorption >= 1.30 ? 'text-emerald-300' : 'text-red-300'}>{lr.absorption.toFixed(2)}</span></div>
+            <div className="flex justify-between" title="redDom = R - (G+B)/2 (≥16)"><span>redDom</span><span className={lr.redDom >= 16 ? 'text-emerald-300' : 'text-red-300'}>{lr.redDom.toFixed(0)}</span></div>
+            <div className="flex justify-between" title="textura sub-tile (banda 0.0015–0.15)"><span>texture</span><span className={lr.texture >= 0.0015 && lr.texture <= 0.15 ? 'text-emerald-300' : 'text-red-300'}>{lr.texture.toFixed(3)}</span></div>
+            <div className="flex justify-between" title="cobertura (≥0.20)"><span>cover</span><span className={lr.coverage >= 0.20 ? 'text-emerald-300' : 'text-red-300'}>{(lr.coverage * 100).toFixed(0)}%</span></div>
+          </div>
+        </div>
+      )}
 
       {onCadenceChange && (
         <div className="pointer-events-auto mt-2 flex items-center justify-between gap-1">
