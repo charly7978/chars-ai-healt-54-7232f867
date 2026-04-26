@@ -240,6 +240,13 @@ export class AdaptiveROIMask {
   private readonly ROI_CENTER_ALPHA = 0.35; // EMA on centroid
   private readonly ROI_SIZE_ALPHA = 0.25;   // EMA on size
 
+  // --- V8: residual EMA of |observation − smoothed_state| as σ proxy ---
+  // Cheap online estimate: lo usamos como motion proxy óptico que no depende
+  // del IMU. EMA con α=0.2 → ~5-frame time constant (≈170 ms @30 fps).
+  private trackerResidualEMA = 0;
+  private trackerSigmaPx = 0;
+  private readonly TRACKER_RES_ALPHA = 0.2;
+
   // --- V6: auto-tuned pre-pass thresholds ---
   // The 32×32 coarse pass used to require redDom≥12 and r≥70 for every skin
   // tone and lighting condition. That fails for darker skin (lower red
