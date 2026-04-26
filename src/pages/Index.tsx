@@ -77,6 +77,18 @@ const Index = () => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("tuner") === "1";
   });
+  // Clinical calibration wizard. Opened on demand (?calibrate=1 or button).
+  const [showCalibration, setShowCalibration] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("calibrate") === "1";
+  });
+  const [calibrationBaseline, setCalibrationBaseline] = useState<CalibrationBaseline | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = localStorage.getItem('ppg.calibration.baseline');
+      return raw ? (JSON.parse(raw) as CalibrationBaseline) : null;
+    } catch { return null; }
+  });
   // Independent toggle for the SR diagnostics panel: ?srDiag=1
   const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
