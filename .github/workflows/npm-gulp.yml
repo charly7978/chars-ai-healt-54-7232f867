@@ -42,3 +42,15 @@ jobs:
 
     - name: Build
       run: npm run build
+
+    - name: MotionRejection auto-tuning telemetry
+      run: npm run telemetry:motion-tuning
+
+    - name: Upload motion-tuning telemetry artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: motion-tuning-telemetry-${{ github.run_id }}
+        path: artifacts/motion-tuning.ndjson
+        if-no-files-found: warn
+        retention-days: 30
