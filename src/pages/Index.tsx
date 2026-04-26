@@ -16,6 +16,7 @@ import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
+import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
