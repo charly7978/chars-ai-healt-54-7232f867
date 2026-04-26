@@ -558,9 +558,10 @@ export class AdaptiveROIMask {
       this.kfSeed(this.kfSz, targetSizeFrac);
       this.lastCentroidJumpPx = 0;
     } else if (box.mass > 0) {
-      // V9 — Kalman 1D update per dimension. Observation noise scales with
-      // clipping (glare degrades centroid precision).
-      const r = this.KF_R_BASE * (1 + Math.min(1, totalPixels === 0 ? 0 : 0));
+      // V9 — Kalman 1D update per dimension. Observation noise = base
+      // (clip-aware noise injection happens later via the per-frame
+      // clipHighRatio surfaced through PPGSignalProcessor's SQI).
+      const r = this.KF_R_BASE;
       const stepCx = this.kfStep(this.kfCx, box.cx, this.KF_Q, r);
       const stepCy = this.kfStep(this.kfCy, box.cy, this.KF_Q, r);
       this.kfStep(this.kfSz, targetSizeFrac, this.KF_Q * 0.001, 0.01);
