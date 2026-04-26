@@ -1377,6 +1377,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.odDcMovingAvg = 0;
     this.publicationGate = false;
     this.lastOpticalEvidence = null;
+    // Deliberately preserve diagnosticRed/Green/Blue buffers: they are the
+    // persistent G1/G2/G3 evidence stream used to debug camera/extraction.
   }
 
   reset(): void {
@@ -1384,6 +1386,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.frameTimeBuf.clear();
     this.roiMask.reset();
     this.pressureEstimator.reset();
+    this.diagnosticRedBuf.clear();
+    this.diagnosticGreenBuf.clear();
+    this.diagnosticBlueBuf.clear();
     this.frameCount = 0;
     this.lastLogTime = 0;
     this.lastFrameTime = 0;
