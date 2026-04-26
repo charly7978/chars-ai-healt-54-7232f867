@@ -49,6 +49,17 @@ export class BandpassFilter {
   private lastComputedRate = 0;
   private initialized = false;
 
+  /**
+   * V5 — modo dual conmutable.
+   *   NORMAL  : HPF 0.4 Hz, LPF 10 Hz (preserva morfología, harmonics).
+   *   RESCUE  : HPF 0.5 Hz, LPF  8 Hz (banda más estrecha → SNR cuando
+   *             el ranker degrada a CHROM/POS porque la señal R/G/RG ya
+   *             está dominada por ruido).
+   * El switch es O(1): coeficientes de ambos modos precomputados.
+   * Estado del biquad NO se resetea al cambiar de modo (continuidad).
+   */
+  private mode: 'NORMAL' | 'RESCUE' = 'NORMAL';
+
   constructor(sampleRate: number = 30) {
     this.sampleRate = sampleRate;
     this.computeCoefficients();
@@ -58,8 +69,9 @@ export class BandpassFilter {
     const fs = this.sampleRate;
     this.lastComputedRate = fs;
 
-    // HPF at 0.4Hz — removes DC + slow drift, preserves very low cardiac frequencies
-    const fcHp = 0.4;
+    // V5 — fc según modo. NORMAL preserva morfología; RESCUE comprime banda
+    // para maximizar SNR cuando el ranker ya delegó en proyecciones.
+    const fcHp = this.mode === 'RESCUE' ? 0.5 : 0.4;
     const kHp = Math.tan(Math.PI * fcHp / fs);
     const normHp = 1 / (1 + Math.sqrt(2) * kHp + kHp * kHp);
     this.hpfB[0] = normHp;
@@ -69,8 +81,7 @@ export class BandpassFilter {
     this.hpfA[1] = 2 * (kHp * kHp - 1) * normHp;
     this.hpfA[2] = (1 - Math.sqrt(2) * kHp + kHp * kHp) * normHp;
 
-    // LPF at 10Hz — removes HF noise, preserves morphology up to 300 BPM + harmonics
-    const fcLp = 10.0;
+    const fcLp = this.mode === 'RESCUE' ? 8.0 : 10.0;
     const kLp = Math.tan(Math.PI * fcLp / fs);
     const normLp = 1 / (1 + Math.sqrt(2) * kLp + kLp * kLp);
     this.lpfB[0] = kLp * kLp * normLp;
@@ -178,4 +189,18 @@ export class BandpassFilter {
     this.computeCoefficients();
     // Do NOT reset filter state for small rate changes — preserves continuity
   }
+
+  /**
+   * V5 — conmutar modo de filtrado. Recomputa coeficientes pero PRESERVA
+   * el estado del biquad para evitar transitorios. Llamado por
+   * PPGSignalProcessor cuando el SignalSourceRanker delega en CHROM/POS
+   * de forma sostenida (≥5 s) o cuando vuelve a R/G/RG.
+   */
+  setMode(mode: 'NORMAL' | 'RESCUE'): void {
+    if (mode === this.mode) return;
+    this.mode = mode;
+    this.computeCoefficients();
+  }
+
+  getMode(): 'NORMAL' | 'RESCUE' { return this.mode; }
 }
