@@ -144,6 +144,106 @@ const Index = () => {
       toast({ title: '⚠ ' + message, description: 'Mantén el dedo firme y quieto.', variant: 'destructive', duration: 2400 });
     }
   }, [vibrate]);
+
+  // Build and download both a JSON and a CSV with the forensic session log.
+  const exportForensicSession = useCallback(() => {
+    const log = sessionLogRef.current;
+    if (log.length === 0) {
+      toast({
+        title: 'No hay datos para exportar',
+        description: 'Inicia una medición para registrar la sesión forense.',
+        duration: 2400,
+      });
+      return;
+    }
+
+    const sessionId = sessionIdRef.current || `forensic_${Date.now().toString(36)}`;
+    const startIso = sessionStartIsoRef.current || log[0].t_iso;
+    const endIso = log[log.length - 1].t_iso;
+
+    // Aggregate stats for the export header.
+    const passCount = log.reduce((n, e) => n + (e.pass_all ? 1 : 0), 0);
+    const snrValues = log.filter(e => e.snr_db !== 0).map(e => e.snr_db);
+    const snrAvg = snrValues.length ? snrValues.reduce((a, b) => a + b, 0) / snrValues.length : 0;
+    const snrMax = snrValues.length ? Math.max(...snrValues) : 0;
+    const peakValues = log.filter(e => e.peak_hz > 0).map(e => e.peak_hz);
+    const peakAvg = peakValues.length ? peakValues.reduce((a, b) => a + b, 0) / peakValues.length : 0;
+
+    const summary = {
+      session_id: sessionId,
+      started_at: startIso,
+      ended_at: endIso,
+      sample_count: log.length,
+      pass_all_samples: passCount,
+      pass_all_ratio: +(passCount / log.length).toFixed(3),
+      avg_cardiac_snr_db: +snrAvg.toFixed(2),
+      max_cardiac_snr_db: +snrMax.toFixed(2),
+      avg_peak_hz: +peakAvg.toFixed(3),
+      avg_bpm_estimate: peakAvg > 0 ? Math.round(peakAvg * 60) : 0,
+      schema: 'forensic_overlay_log/v1',
+    };
+
+    // Build JSON
+    const jsonBlob = new Blob(
+      [JSON.stringify({ summary, samples: log }, null, 2)],
+      { type: 'application/json' }
+    );
+
+    // Build CSV
+    const header = [
+      't_iso','t_ms','g1_optical','g2_spectral','g3_morphology','pass_all',
+      'snr_db','peak_hz','bpm_estimate','concentration','reason',
+    ];
+    const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const csvRows = [
+      header.join(','),
+      ...log.map(e => [
+        e.t_iso, e.t_ms,
+        e.g1_optical ? 1 : 0,
+        e.g2_spectral ? 1 : 0,
+        e.g3_morphology ? 1 : 0,
+        e.pass_all ? 1 : 0,
+        e.snr_db, e.peak_hz, e.bpm_estimate, e.concentration,
+        escape(e.reason || ''),
+      ].join(',')),
+    ];
+    const csvBlob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+
+    const stamp = (sessionStartIsoRef.current || endIso).replace(/[:.]/g, '-');
+    const downloadBlob = (blob: Blob, filename: string) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    };
+    downloadBlob(jsonBlob, `forensic-session-${stamp}.json`);
+    downloadBlob(csvBlob,  `forensic-session-${stamp}.csv`);
+
+    // Try the Web Share API too (mobile-first), best-effort.
+    try {
+      const csvFile = new File([csvBlob], `forensic-session-${stamp}.csv`, { type: 'text/csv' });
+      const navAny = navigator as any;
+      if (navAny.canShare && navAny.canShare({ files: [csvFile] })) {
+        navAny.share({
+          files: [csvFile],
+          title: 'Sesión Forense PPG',
+          text: `Sesión ${sessionId} · ${log.length} muestras`,
+        }).catch(() => {});
+      }
+    } catch {}
+
+    vibrate(60);
+    toast({
+      title: '✓ Sesión forense exportada',
+      description: `${log.length} muestras · JSON + CSV descargados`,
+      duration: 2600,
+    });
+    setSessionLogSize(log.length);
+  }, [vibrate]);
   const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
     morphologyScore: 0,
     morphologyValidity: 0,
@@ -963,7 +1063,12 @@ const Index = () => {
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
 
-        <ForensicGateOverlay gate={forensicGate} visible={showForensicOverlay && isMonitoring} />
+        <ForensicGateOverlay
+          gate={forensicGate}
+          visible={showForensicOverlay && isMonitoring}
+          onExport={exportForensicSession}
+          sampleCount={sessionLogSize}
+        />
 
         {isMonitoring && (() => {
           const pq = getPositionQuality();
