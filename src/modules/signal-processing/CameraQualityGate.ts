@@ -40,12 +40,19 @@ export interface CameraQualityConfig {
 }
 
 const DEFAULT: CameraQualityConfig = {
-  badFrameStreak: 30,         // ~1 s @ 30 fps
-  reinitCooldownMs: 8000,
-  greenDcMin: 8,
-  greenDcMax: 248,
-  greenAcMin: 0.05,
-  rgRatioMin: 0.20,
+  // V9.5 — Forensic gate must be permissive enough to NOT fight the rest
+  // of the pipeline. The previous defaults (1 s streak, greenAC ≥ 0.05)
+  // were re-initing the camera in a loop on perfectly valid finger
+  // contact, which is why "no signal" was reported. We now require a
+  // 4 s sustained bad streak and only flag truly degenerate cases
+  // (BLACK / SATURATED / NO_FINGER). Frozen-frame detection keeps a
+  // very low AC threshold so short stalls don't trigger reinit.
+  badFrameStreak: 120,        // ~4 s @ 30 fps
+  reinitCooldownMs: 15000,
+  greenDcMin: 4,
+  greenDcMax: 252,
+  greenAcMin: 0.005,
+  rgRatioMin: 0.15,
 };
 
 export type CameraQualityVerdict =
@@ -59,6 +66,10 @@ export class CameraQualityGate {
   private framesSeen = 0;
   private framesBad = 0;
   private lastVerdict: CameraQualityVerdict = { ok: true, reason: 'OK' };
+  /** Wall-clock of the most recent reset() — used as warm-up anchor. */
+  private warmupStart = performance.now();
+  /** No reinit recommendations during the first warmupMs after reset. */
+  private warmupMs = 5000;
 
   setConfig(patch: Partial<CameraQualityConfig>): void {
     this.cfg = { ...this.cfg, ...patch };
@@ -76,6 +87,10 @@ export class CameraQualityGate {
     }
     this.badStreak++;
     this.framesBad++;
+
+    // Warm-up window after reset/reinit: never recommend another reinit,
+    // just keep classifying so telemetry is honest.
+    if (nowMs - this.warmupStart < this.warmupMs) return false;
 
     if (this.badStreak < this.cfg.badFrameStreak) return false;
     if (nowMs - this.lastReinitAt < this.cfg.reinitCooldownMs) return false;
@@ -123,6 +138,7 @@ export class CameraQualityGate {
     this.framesSeen = 0;
     this.framesBad = 0;
     this.lastVerdict = { ok: true, reason: 'OK' };
+    this.warmupStart = performance.now();
     // lastReinitAt is intentionally preserved so the cooldown still applies
     // across short-lived reset() calls (e.g. between sessions).
   }
