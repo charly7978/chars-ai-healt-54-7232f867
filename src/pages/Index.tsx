@@ -688,6 +688,7 @@ const Index = () => {
     console.log('🚀 Iniciando monitoreo...');
     if (navigator.vibrate) navigator.vibrate([200]);
     enterFullScreen();
+    monitoringIntentRef.current = true;
     setShowResults(false);
     setMeasurementSummary(null);
     setElapsedTime(0);
@@ -755,7 +756,7 @@ const Index = () => {
       if (!stream || !hasLiveTrack) {
         console.warn('🎥 Watchdog: stream dead — bouncing camera (last frame', sinceLast.toFixed(0), 'ms ago)');
         setIsCameraOn(false);
-        window.setTimeout(() => { if (isProcessingRef.current) setIsCameraOn(true); }, 300);
+        window.setTimeout(() => { if (monitoringIntentRef.current && isProcessingRef.current) setIsCameraOn(true); }, 2800);
         lastFrameAtRef.current = now;
         return;
       }
