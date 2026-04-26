@@ -34,6 +34,15 @@ export interface ProcessedSignal {
   perfusionIndex?: number;
   rawRed?: number;
   rawGreen?: number;
+  rawBlue?: number;
+  rgbStats?: {
+    redDC: number;
+    redAC: number;
+    greenDC: number;
+    greenAC: number;
+    blueDC: number;
+    blueAC: number;
+  };
   diagnostics?: {
     message: string;
     hasPulsatility: boolean;

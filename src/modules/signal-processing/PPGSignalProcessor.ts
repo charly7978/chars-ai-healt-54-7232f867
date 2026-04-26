@@ -443,6 +443,10 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.g1RedDom = lRedDom;
     this.g1Texture = textureProxy;
     this.g1Coverage = roi.coverageRatio;
+    this.redBuf.push(lr);
+    this.greenBuf.push(lg);
+    this.blueBuf.push(lb);
+    if (this.redBuf.length >= 6) this.calculateACDC();
     const livenessInstant =
       lAbsorption >= absorptionMin &&
       lRedDom >= redOverGbMin &&
@@ -522,6 +526,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         perfusionIndex: 0,
         rawRed: lr,
         rawGreen: lg,
+        rawBlue: lb,
+        rgbStats: this.getRGBStats(),
         diagnostics: {
           message: `SIN PULSO — ${this.lastLivenessReason}`,
           hasPulsatility: false,
@@ -598,6 +604,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         perfusionIndex: 0,
         rawRed: roi.rawRed,
         rawGreen: roi.rawGreen,
+        rawBlue: roi.rawBlue,
+        rgbStats: this.getRGBStats(),
         diagnostics: {
           message: `BUSCANDO DEDO C:${(roi.coverageRatio * 100).toFixed(0)}% P:${pressure.state}${motionArtifact ? ' MOV' : ''}`,
           hasPulsatility: false,
@@ -628,6 +636,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         perfusionIndex: 0,
         rawRed: roi.rawRed,
         rawGreen: roi.rawGreen,
+        rawBlue: roi.rawBlue,
+        rgbStats: this.getRGBStats(),
         diagnostics: {
           message: `MOV ALTO m=${this.motionScore.toFixed(2)} - SOSTENGA EL TELÉFONO QUIETO`,
           hasPulsatility: false,
@@ -660,10 +670,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         this.blueBaseline = this.blueDcMedianBuf.percentile(0.5);
       }
     }
-    this.redBuf.push(roi.rawRed);
-    this.greenBuf.push(roi.rawGreen);
-    this.blueBuf.push(roi.rawBlue);
-
     // V8: bloqueo por contigüidad — parches dispersos no son un dedo.
     if (roi.coverageContiguity < 0.55) {
       this.lowContiguityStreak++;
@@ -879,6 +885,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       perfusionIndex,
       rawRed: roi.rawRed,
       rawGreen: roi.rawGreen,
+      rawBlue: roi.rawBlue,
+      rgbStats: this.getRGBStats(),
       diagnostics: {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
@@ -1234,7 +1242,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
   private calculateACDC(): void {
     const n = Math.min(180, this.redBuf.length);
-    if (n < 36) return;
+    if (n < 8) return;
 
     this.redDC = this.redBuf.mean(n);
     this.greenDC = this.greenBuf.mean(n);
@@ -1446,12 +1454,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // ══════════════════════════════════════════════════════
 
   getRGBStats() {
+    const redDC = this.redDC || this.g1RawR;
+    const greenDC = this.greenDC || this.g1RawG;
+    const blueDC = this.blueDC || this.g1RawB;
     return {
-      redAC: this.redAC, redDC: this.redDC,
-      greenAC: this.greenAC, greenDC: this.greenDC,
-      rgRatio: this.greenDC > 0 ? this.redDC / this.greenDC : 0,
-      ratioOfRatios: this.greenDC > 0 && this.greenAC > 0 && this.redDC > 0
-        ? (this.redAC / this.redDC) / (this.greenAC / this.greenDC) : 0,
+      redAC: this.redAC, redDC,
+      greenAC: this.greenAC, greenDC,
+      blueAC: this.blueAC, blueDC,
+      rgRatio: greenDC > 0 ? redDC / greenDC : 0,
+      ratioOfRatios: greenDC > 0 && this.greenAC > 0 && redDC > 0
+        ? (this.redAC / redDC) / (this.greenAC / greenDC) : 0,
     };
   }
 
