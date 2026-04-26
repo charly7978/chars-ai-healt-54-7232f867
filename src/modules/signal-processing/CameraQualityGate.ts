@@ -40,12 +40,19 @@ export interface CameraQualityConfig {
 }
 
 const DEFAULT: CameraQualityConfig = {
-  badFrameStreak: 30,         // ~1 s @ 30 fps
-  reinitCooldownMs: 8000,
-  greenDcMin: 8,
-  greenDcMax: 248,
-  greenAcMin: 0.05,
-  rgRatioMin: 0.20,
+  // V9.5 — Forensic gate must be permissive enough to NOT fight the rest
+  // of the pipeline. The previous defaults (1 s streak, greenAC ≥ 0.05)
+  // were re-initing the camera in a loop on perfectly valid finger
+  // contact, which is why "no signal" was reported. We now require a
+  // 4 s sustained bad streak and only flag truly degenerate cases
+  // (BLACK / SATURATED / NO_FINGER). Frozen-frame detection keeps a
+  // very low AC threshold so short stalls don't trigger reinit.
+  badFrameStreak: 120,        // ~4 s @ 30 fps
+  reinitCooldownMs: 15000,
+  greenDcMin: 4,
+  greenDcMax: 252,
+  greenAcMin: 0.005,
+  rgRatioMin: 0.15,
 };
 
 export type CameraQualityVerdict =
