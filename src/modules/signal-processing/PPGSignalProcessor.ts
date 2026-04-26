@@ -7,6 +7,7 @@ import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
 import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
+import { ROITelemetryLogger } from './ROITelemetryLogger';
 
 /**
  * Conversión sRGB (0..255) → intensidad lineal [0..1] según IEC 61966-2-1.
@@ -76,6 +77,41 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // Independiente de morfología, no bloquea por "forma de dedo".
   private opticalGate = new OpticalEvidenceGate();
   private lastOpticalEvidence: OpticalEvidence | null = null;
+
+  // V6: structured per-frame telemetry — exported on demand so the operator
+  // can audit ROI position/size, coverage and Liveness reasons after a
+  // session where the app says it isn't detecting pulses.
+  private roiTelemetry = new ROITelemetryLogger();
+
+  /**
+   * V6: emit one structured telemetry record per processed frame so the
+   * operator can export ROI/Liveness traces and audit failures offline.
+   */
+  private logRoiTelemetry(
+    timestamp: number,
+    roi: ROIMaskResult,
+    livenessPass: boolean,
+    livenessReason: string,
+  ): void {
+    this.roiTelemetry.record({
+      t: timestamp,
+      frame: this.frameCount,
+      cx: roi.roiBox.cx,
+      cy: roi.roiBox.cy,
+      sizePx: roi.roiBox.sizePx,
+      sizeFrac: roi.roiBox.sizeFrac,
+      coverage: roi.coverageRatio,
+      livenessPass,
+      livenessReason,
+      prepassRedDomMin: roi.prepassThresholds.redDomMin,
+      prepassRedMin: roi.prepassThresholds.redMin,
+      prepassSuccessRate: roi.prepassSuccessRate,
+      prepassMass: roi.roiBox.mass,
+    });
+  }
+
+  /** Public accessors for the telemetry logger (used by hook + UI export). */
+  public getROITelemetry(): ROITelemetryLogger { return this.roiTelemetry; }
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
@@ -402,6 +438,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           livenessReason: this.lastLivenessReason,
         },
       });
+      // V6: rejection path → log so the operator can see *why* the gate
+      // never opened (no finger / wrong illumination / no hemoglobin).
+      this.logRoiTelemetry(timestamp, roi, false, this.lastLivenessReason);
       this.processingTimeMs = performance.now() - t0;
       return;
     }
@@ -449,6 +488,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           pulsatilityValue: 0,
         },
       });
+      this.logRoiTelemetry(timestamp, roi, false, `BUSCANDO DEDO (${this.exportedContactState})`);
       this.processingTimeMs = performance.now() - t0;
       return;
     }
@@ -478,6 +518,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           pulsatilityValue: 0,
         },
       });
+      this.logRoiTelemetry(timestamp, roi, false, 'MOV ALTO');
       this.processingTimeMs = performance.now() - t0;
       return;
     }
@@ -638,7 +679,12 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
         pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
       },
-      forensicGate: this.computeForensicGate(roi.rawRed, timestamp),
+      forensicGate: (() => {
+        const fg = this.computeForensicGate(roi.rawRed, timestamp);
+        // V6: log final liveness verdict (passAll vs reason) on success path.
+        this.logRoiTelemetry(timestamp, roi, fg.passAll, fg.livenessReason);
+        return fg;
+      })(),
     });
   }
 

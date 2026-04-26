@@ -51,6 +51,12 @@ export interface ROIMaskResult {
   // V3: percentile-derived adaptive thresholds for transparency
   adaptiveRedFloor: number;
   adaptiveDominanceFloor: number;
+  // V6: adaptive ROI box geometry (px in source frame coords) + auto-tuned
+  // thresholds used by the 32×32 pre-pass. Exposed so the host can record
+  // structured telemetry per frame and verify finger coverage in real time.
+  roiBox: { cx: number; cy: number; sizePx: number; sizeFrac: number; mass: number };
+  prepassThresholds: { redDomMin: number; redMin: number };
+  prepassSuccessRate: number;
 }
 
 const GRID = 9; // V3: 9x9 grid for finer adaptive ROI
@@ -125,6 +131,29 @@ export class AdaptiveROIMask {
   private readonly ROI_CENTER_ALPHA = 0.35; // EMA on centroid
   private readonly ROI_SIZE_ALPHA = 0.25;   // EMA on size
 
+  // --- V6: auto-tuned pre-pass thresholds ---
+  // The 32×32 coarse pass used to require redDom≥12 and r≥70 for every skin
+  // tone and lighting condition. That fails for darker skin (lower red
+  // dominance) and for under-illuminated rear cameras. We now adapt both
+  // thresholds based on the recent success rate of the pre-pass (fraction
+  // of last N frames where we found ANY finger-likely pixel). When success
+  // is too low we loosen, when too high we tighten — bounded to safe range.
+  private prepassRedDomMin = 12;
+  private prepassRedMin = 70;
+  private prepassRecent = new Uint8Array(60); // rolling window of last 60 frames
+  private prepassRecentIdx = 0;
+  private prepassRecentFilled = 0;
+  private prepassSuccessRate = 0;
+  private readonly PREPASS_REDDOM_MIN_LO = 4;
+  private readonly PREPASS_REDDOM_MIN_HI = 20;
+  private readonly PREPASS_RED_MIN_LO = 35;
+  private readonly PREPASS_RED_MIN_HI = 100;
+  private readonly PREPASS_TARGET_LO = 0.35; // below → loosen
+  private readonly PREPASS_TARGET_HI = 0.85; // above → tighten
+  private lastBox: { cx: number; cy: number; sizePx: number; mass: number } = {
+    cx: 0, cy: 0, sizePx: 0, mass: 0,
+  };
+
   /**
    * Coarse 32×32 pre-pass that returns the centroid of the red-dominant
    * region and an estimate of its bounding extent (used to size the ROI).
@@ -138,6 +167,8 @@ export class AdaptiveROIMask {
     const stepY = Math.max(1, (h / N) | 0);
     let sumW = 0, sumWX = 0, sumWY = 0;
     let minX = w, maxX = 0, minY = h, maxY = 0;
+    const redDomMin = this.prepassRedDomMin;
+    const redMin = this.prepassRedMin;
     for (let y = 0; y < h; y += stepY) {
       const rowOff = y * w;
       for (let x = 0; x < w; x += stepX) {
@@ -147,7 +178,7 @@ export class AdaptiveROIMask {
         if (r + g + b < 60) continue;
         // "Finger-likely" pixel: red dominates AND luminance is meaningful.
         const redDom = r - (g + b) * 0.5;
-        if (redDom < 12 || r < 70) continue;
+        if (redDom < redDomMin || r < redMin) continue;
         // Weight by red dominance × luminance band (favour 100..240).
         const lum = (r + g + b) / 3;
         const lumW = lum < 100 ? lum / 100 : lum > 240 ? Math.max(0, 1 - (lum - 240) / 30) : 1;
@@ -175,6 +206,33 @@ export class AdaptiveROIMask {
     return { cx, cy, sizePx, mass: sumW };
   }
 
+  /**
+   * V6: feed the most recent pre-pass outcome into the rolling success
+   * window and gently adapt the thresholds once the window is full enough
+   * to be statistically meaningful (≥30 frames).
+   */
+  private updatePrepassAutoTune(success: boolean): void {
+    this.prepassRecent[this.prepassRecentIdx] = success ? 1 : 0;
+    this.prepassRecentIdx = (this.prepassRecentIdx + 1) % this.prepassRecent.length;
+    if (this.prepassRecentFilled < this.prepassRecent.length) this.prepassRecentFilled++;
+    if (this.prepassRecentFilled < 30) return;
+    let s = 0;
+    for (let i = 0; i < this.prepassRecentFilled; i++) s += this.prepassRecent[i];
+    const rate = s / this.prepassRecentFilled;
+    this.prepassSuccessRate = rate;
+    // Adapt every 10 frames to avoid over-reacting.
+    if (this.frameCount % 10 !== 0) return;
+    if (rate < this.PREPASS_TARGET_LO) {
+      // Too few finger-likely pixels — loosen (allow darker / less red).
+      this.prepassRedDomMin = Math.max(this.PREPASS_REDDOM_MIN_LO, this.prepassRedDomMin - 1);
+      this.prepassRedMin = Math.max(this.PREPASS_RED_MIN_LO, this.prepassRedMin - 4);
+    } else if (rate > this.PREPASS_TARGET_HI) {
+      // Plenty of "finger-likely" hits — tighten to reject ambient red.
+      this.prepassRedDomMin = Math.min(this.PREPASS_REDDOM_MIN_HI, this.prepassRedDomMin + 1);
+      this.prepassRedMin = Math.min(this.PREPASS_RED_MIN_HI, this.prepassRedMin + 4);
+    }
+  }
+
   process(imageData: ImageData): ROIMaskResult {
     this.frameCount++;
     const data = imageData.data;
@@ -186,6 +244,8 @@ export class AdaptiveROIMask {
     // center when no red-dominant pixels are found (no finger / pure noise).
     const minDim = Math.min(w, h);
     const box = this.estimateFingerBox(data, w, h);
+    this.lastBox = box;
+    this.updatePrepassAutoTune(box.mass > 0);
     const targetSizeFrac = Math.max(0.5, Math.min(0.95, box.sizePx / minDim));
     if (this.roiCenterX < 0) {
       // first frame seed
@@ -505,6 +565,18 @@ export class AdaptiveROIMask {
       maskStability,
       adaptiveRedFloor,
       adaptiveDominanceFloor,
+      roiBox: {
+        cx: cxC,
+        cy: cyC,
+        sizePx: roiSize,
+        sizeFrac: this.roiSizeFrac,
+        mass: this.lastBox.mass,
+      },
+      prepassThresholds: {
+        redDomMin: this.prepassRedDomMin,
+        redMin: this.prepassRedMin,
+      },
+      prepassSuccessRate: this.prepassSuccessRate,
     };
   }
 
@@ -520,5 +592,13 @@ export class AdaptiveROIMask {
     this.roiCenterX = -1;
     this.roiCenterY = -1;
     this.roiSizeFrac = 0.85;
+    // V6: reset auto-tuner so a new session starts from neutral defaults.
+    this.prepassRedDomMin = 12;
+    this.prepassRedMin = 70;
+    this.prepassRecent.fill(0);
+    this.prepassRecentIdx = 0;
+    this.prepassRecentFilled = 0;
+    this.prepassSuccessRate = 0;
+    this.lastBox = { cx: 0, cy: 0, sizePx: 0, mass: 0 };
   }
 }
