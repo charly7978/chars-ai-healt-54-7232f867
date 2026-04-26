@@ -834,6 +834,29 @@ const Index = () => {
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
+    // ── SAFEGUARD: refuse beat computation if the session-wide accepted
+    // sample ratio is too low. Below this threshold the signal is dominated
+    // by noise and any IBI/BPM extracted would be artefactual. Requires a
+    // minimum number of samples before activating to avoid blocking the
+    // initial acquisition window.
+    const ACCEPTED_RATIO_MIN = 0.15;          // 15% of samples must be triple-gate valid
+    const ACCEPTED_RATIO_WARMUP_SAMPLES = 60; // ~2s @ 30fps before enforcement
+    const totalSeen = validSamplesRef.current + noiseSamplesRef.current;
+    const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
+    const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
+    const odAccepted = forensicPass && !!(fg as any)?.opticalEvidence;
+    if (ratioGuardActive || !odAccepted) {
+      // Do NOT feed the beat detector with non-OD / rejected samples.
+      setHeartbeatSignal(0);
+      unstableFrameCounter.current++;
+      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
+        setHeartRate(0);
+        vitalSignsFrameCounter.current = 0;
+        setBeatMarker(0);
+      }
+      return;
+    }
+
     const heartBeatResult = processHeartBeat(
       signalValue,
       contactState,
