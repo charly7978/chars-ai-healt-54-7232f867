@@ -1109,20 +1109,24 @@ const Index = () => {
         <div className="relative z-10 h-full">
           <div className="flex-1 h-full">
             <PPGSignalMeter 
-              value={heartbeatSignal}
-              quality={lastSignal?.quality || 0}
-              isFingerDetected={lastSignal?.fingerDetected || false}
+              value={forensicGate?.passAll ? heartbeatSignal : 0}
+              quality={forensicGate?.passAll ? (lastSignal?.quality || 0) : 0}
+              isFingerDetected={!!forensicGate?.passAll}
               onStartMeasurement={handleToggleMonitoring}
               onReset={handleReset}
               isMonitoring={isMonitoring}
-              arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
-              rawArrhythmiaData={lastArrhythmiaData.current}
+              arrhythmiaStatus={forensicGate?.passAll ? vitalSigns.arrhythmiaStatus : 'SIN ARRITMIAS|0'}
+              rawArrhythmiaData={forensicGate?.passAll ? lastArrhythmiaData.current : null}
               preserveResults={showResults}
-              diagnosticMessage={lastSignal?.diagnostics?.message}
-              isPeak={beatMarker === 1}
-              bpm={heartRate}
-              spo2={vitalSigns.spo2}
-              rrIntervals={rrIntervals}
+              diagnosticMessage={
+                forensicGate?.passAll
+                  ? (lastSignal?.diagnostics?.message || 'PULSO REAL DETECTADO')
+                  : (forensicGate?.livenessReason || 'SIN PULSO VALIDADO — TRIPLE GATE BLOQUEADO')
+              }
+              isPeak={!!forensicGate?.passAll && beatMarker === 1}
+              bpm={forensicGate?.passAll ? heartRate : 0}
+              spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
+              rrIntervals={forensicGate?.passAll ? rrIntervals : []}
             />
           </div>
 
