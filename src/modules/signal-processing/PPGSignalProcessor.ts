@@ -456,12 +456,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       // Build forensic reason string for the diagnostic banner
       if (lTotalI < LIVENESS.TOTAL_I_MIN) this.lastLivenessReason = 'OSCURO / SIN CONTACTO';
       else if (lTotalI > LIVENESS.TOTAL_I_MAX) this.lastLivenessReason = 'LUZ DIRECTA / NO ES TEJIDO';
-      else if (lAbsorption < LIVENESS.ABSORPTION_MIN) this.lastLivenessReason = `SIN FIRMA DE HEMOGLOBINA (R/(G+B)=${lAbsorption.toFixed(2)})`;
-      else if (lRedDom < LIVENESS.RED_OVER_GB_MIN) this.lastLivenessReason = 'ROJO INSUFICIENTE — NO ES TEJIDO';
+      else if (lAbsorption < absorptionMin) this.lastLivenessReason = `SIN FIRMA DE HEMOGLOBINA (R/(G+B)=${lAbsorption.toFixed(2)})`;
+      else if (lRedDom < redOverGbMin) this.lastLivenessReason = 'ROJO INSUFICIENTE — NO ES TEJIDO';
       else if (roi.coverageRatio < LIVENESS.COVERAGE_MIN) this.lastLivenessReason = 'CUBRA EL LENTE CON EL DEDO';
-      else if (!textureOk) this.lastLivenessReason = textureProxy < LIVENESS.TEXTURE_MIN
-        ? 'SUPERFICIE PLANA — NO ES PIEL'
-        : 'TEXTURA INESTABLE — REFLEJO/MOVIMIENTO';
+      else if (!textureOk) {
+        if (useEntropy) {
+          this.lastLivenessReason = entropy < 1.6
+            ? `SUPERFICIE PLANA — entropy=${entropy.toFixed(2)} bits`
+            : `TEXTURA INESTABLE — entropy=${entropy.toFixed(2)} bits`;
+        } else {
+          this.lastLivenessReason = textureProxy < LIVENESS.TEXTURE_MIN
+            ? 'SUPERFICIE PLANA — NO ES PIEL'
+            : 'TEXTURA INESTABLE — REFLEJO/MOVIMIENTO';
+        }
+      }
       else this.lastLivenessReason = 'SIN CONTACTO ÓPTICO';
     }
 
