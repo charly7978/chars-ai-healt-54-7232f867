@@ -1159,6 +1159,8 @@ const Index = () => {
               bpm={forensicGate?.passAll ? heartRate : 0}
               spo2={CIVIL_MODE ? vitalSigns.spo2 : 0}
               rrIntervals={forensicGate?.passAll ? rrIntervals : []}
+              publicationGate={!!forensicGate?.passAll}
+              rejectionReason={forensicGate?.livenessReason || 'SIN EVIDENCIA ÓPTICA'}
             />
           </div>
 
