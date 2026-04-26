@@ -101,6 +101,24 @@ export interface MotionRejectionConfig {
    */
   autoTuneImuTrigger: number;        // imuScore std-dev that starts blending
   autoTuneImuSaturate: number;       // imuScore std-dev where blend reaches 1.0
+  /**
+   * V9.4 — input validation.
+   * Hard physical bounds on `imuScore` before it enters the σ buffer.
+   * Anything NaN / Infinity / outside [min,max] is rejected (the buffer
+   * keeps its previous value), so a single bad sensor frame can't blow up
+   * the std and force effUpgradeFrames → 8 / effAlpha → 0.10.
+   */
+  imuScoreMin: number;
+  imuScoreMax: number;
+  /**
+   * V9.4 — percentile-based blending.
+   * Linear σ-std blending is sensitive to outliers (a single 9 px tracker
+   * jump dominates a 30-frame window). When `usePercentileBlend=true` we
+   * compute the 50th and 90th percentile of the buffered σ instead, and
+   * blend between them using an interpolation factor where p50 ≈ trigger
+   * and p90 ≈ saturate. Outliers can't pull the blend past p90.
+   */
+  usePercentileBlend: boolean;
 }
 
 const DEFAULT_CONFIG: MotionRejectionConfig = {
@@ -121,6 +139,9 @@ const DEFAULT_CONFIG: MotionRejectionConfig = {
   weightSmoothingAlphaLow: 0.10,
   autoTuneImuTrigger: 0.15,
   autoTuneImuSaturate: 0.80,
+  imuScoreMin: 0,
+  imuScoreMax: 4,
+  usePercentileBlend: true,
 };
 
 export class MotionRejection {
@@ -165,12 +186,23 @@ export class MotionRejection {
   }
 
   /** Telemetry — what the auto-tuner is currently using. */
-  getTuning(): { upgradeConfirmFrames: number; weightSmoothingAlpha: number; sigmaStd: number; imuStd: number } {
+  getTuning(): {
+    upgradeConfirmFrames: number;
+    weightSmoothingAlpha: number;
+    sigmaStd: number;
+    imuStd: number;
+    sigmaP50: number;
+    sigmaP90: number;
+    rejectedImu: number;
+  } {
     return {
       upgradeConfirmFrames: this.effUpgradeFrames,
       weightSmoothingAlpha: this.effAlpha,
       sigmaStd: this.computeStd(this.sigmaBuf, this.sigmaCount),
       imuStd:   this.computeStd(this.imuBuf,   this.imuCount),
+      sigmaP50: this.percentile(this.sigmaBuf, this.sigmaCount, 0.50),
+      sigmaP90: this.percentile(this.sigmaBuf, this.sigmaCount, 0.90),
+      rejectedImu: this.rejectedImuCount,
     };
   }
 
@@ -191,6 +223,23 @@ export class MotionRejection {
   private computeSigmaStd(): number {
     return this.computeStd(this.sigmaBuf, this.sigmaCount);
   }
+  /**
+   * V9.4 — percentile via in-place copy + sort. Cheap for the small
+   * windows we use (≤ 256 samples) and avoids dragging in a quickselect.
+   * Returns 0 when there isn't enough data to be meaningful.
+   */
+  private percentile(buf: Float64Array, count: number, p: number): number {
+    if (count < 4) return 0;
+    const tmp = new Float64Array(count);
+    for (let i = 0; i < count; i++) tmp[i] = buf[i];
+    tmp.sort();
+    const rank = Math.max(0, Math.min(count - 1, p * (count - 1)));
+    const lo = Math.floor(rank);
+    const hi = Math.ceil(rank);
+    if (lo === hi) return tmp[lo];
+    const frac = rank - lo;
+    return tmp[lo] * (1 - frac) + tmp[hi] * frac;
+  }
 
   private recomputeTuning(): void {
     if (!this.cfg.autoTune) {
@@ -201,12 +250,29 @@ export class MotionRejection {
     // Two independent jitter channels — optical (trackerSigma) and IMU
     // (imuScore). Each is mapped through its own [trigger, saturate] band
     // into a [0,1] blend factor; we take the max so whichever channel is
-    // most chaotic governs the tuning. This catches "still finger but
-    // shaky hand" cases the optical-only V9.2 tuner missed.
-    const sOpt = this.computeStd(this.sigmaBuf, this.sigmaCount);
-    const loO = this.cfg.autoTuneSigmaTrigger;
-    const hiO = Math.max(loO + 1e-3, this.cfg.autoTuneSigmaSaturate);
-    const tOpt = Math.max(0, Math.min(1, (sOpt - loO) / (hiO - loO)));
+    // most chaotic governs the tuning.
+    //
+    // V9.4: optical channel can use percentile-based blending (robust to
+    // outliers) instead of std-based. p50 ≈ trigger maps to t=0; p90 ≈
+    // saturate maps to t=1. A single 9 px outlier can't push p90 around.
+    let tOpt: number;
+    if (this.cfg.usePercentileBlend) {
+      const p50 = this.percentile(this.sigmaBuf, this.sigmaCount, 0.50);
+      const p90 = this.percentile(this.sigmaBuf, this.sigmaCount, 0.90);
+      const loO = this.cfg.autoTuneSigmaTrigger;
+      const hiO = Math.max(loO + 1e-3, this.cfg.autoTuneSigmaSaturate);
+      // p50 below trigger → quiet; p90 above saturate → noisy. Map the
+      // distance of (p90 − p50) past (hi − lo) as the blend factor.
+      const span = Math.max(1e-3, hiO - loO);
+      const drift = Math.max(0, p50 - loO) / span;     // bulk drift
+      const tail  = Math.max(0, p90 - hiO) / span;     // outlier tail
+      tOpt = Math.max(0, Math.min(1, drift + 0.5 * tail));
+    } else {
+      const sOpt = this.computeStd(this.sigmaBuf, this.sigmaCount);
+      const loO = this.cfg.autoTuneSigmaTrigger;
+      const hiO = Math.max(loO + 1e-3, this.cfg.autoTuneSigmaSaturate);
+      tOpt = Math.max(0, Math.min(1, (sOpt - loO) / (hiO - loO)));
+    }
 
     const sImu = this.computeStd(this.imuBuf, this.imuCount);
     const loI = this.cfg.autoTuneImuTrigger;
@@ -228,12 +294,26 @@ export class MotionRejection {
 
     // Push the new observations into both circular buffers and recompute the
     // effective tuning BEFORE applying hysteresis this frame.
-    this.sigmaBuf[this.sigmaIdx] = trackerSigma;
-    this.sigmaIdx = (this.sigmaIdx + 1) % this.sigmaBuf.length;
-    if (this.sigmaCount < this.sigmaBuf.length) this.sigmaCount++;
-    this.imuBuf[this.imuIdx] = imuScore;
-    this.imuIdx = (this.imuIdx + 1) % this.imuBuf.length;
-    if (this.imuCount < this.imuBuf.length) this.imuCount++;
+    // V9.4 — input validation: trackerSigma must be a finite non-negative
+    // number, imuScore must be finite and inside the configured physical
+    // band. Bad samples are dropped (buffer index does not advance) so a
+    // single garbage frame can't pollute the std / percentile estimates.
+    if (Number.isFinite(trackerSigma) && trackerSigma >= 0) {
+      this.sigmaBuf[this.sigmaIdx] = trackerSigma;
+      this.sigmaIdx = (this.sigmaIdx + 1) % this.sigmaBuf.length;
+      if (this.sigmaCount < this.sigmaBuf.length) this.sigmaCount++;
+    }
+    const imuOk =
+      Number.isFinite(imuScore) &&
+      imuScore >= this.cfg.imuScoreMin &&
+      imuScore <= this.cfg.imuScoreMax;
+    if (imuOk) {
+      this.imuBuf[this.imuIdx] = imuScore;
+      this.imuIdx = (this.imuIdx + 1) % this.imuBuf.length;
+      if (this.imuCount < this.imuBuf.length) this.imuCount++;
+    } else {
+      this.rejectedImuCount++;
+    }
     this.recomputeTuning();
 
     // Detección instantánea (antes de aplicar hysteresis).
