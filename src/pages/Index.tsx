@@ -824,8 +824,71 @@ const Index = () => {
             />
           </div>
 
-          <div className="absolute inset-x-0 top-[55%] bottom-[60px] bg-black/10 px-4 py-6">
-            <div className="grid grid-cols-3 gap-4 place-items-center">
+          {/* ════════════════════════════════════════════════════════════
+              FORENSIC PULSE PANEL — the only thing the operator sees by
+              default. Shows: PULSO DETECTADO / SIN PULSO + BPM + PI.
+              No SpO2/BP/glucose/lipids unless ?civil=1 is passed.
+              ════════════════════════════════════════════════════════════ */}
+          {(() => {
+            const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
+            const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
+            const pulsePresent = isMonitoring && !noOptical && heartRate > 0;
+            const pi = lastSignal?.perfusionIndex || 0;
+            return (
+              <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
+                {/* Forensic banner — always visible while monitoring */}
+                {isMonitoring && (
+                  <div className="px-3 py-1 rounded-md bg-slate-900/80 border border-slate-700 text-[10px] text-slate-300 tracking-wider text-center max-w-[95%]">
+                    MODO FORENSE — DETECTOR DE PULSO PPG. NO MIDE SPO₂ / PRESIÓN / GLUCOSA / LÍPIDOS.
+                  </div>
+                )}
+                <div className={`w-[92%] rounded-xl px-4 py-3 border-2 backdrop-blur-sm ${
+                  pulsePresent
+                    ? 'bg-emerald-500/10 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.35)]'
+                    : 'bg-red-500/10 border-red-400'
+                }`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className={`text-xs font-bold tracking-widest ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
+                        {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {noOptical
+                          ? (lastSignal?.diagnostics?.message || 'SIN CONTACTO ÓPTICO')
+                          : (cs === 'OPTICAL_CONTACT_LOW_PERFUSION' ? 'CONTACTO — BAJA PERFUSIÓN' : 'CONTACTO ESTABLE')}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
+                        {heartRate > 0 ? Math.round(heartRate) : '--'}
+                      </div>
+                      <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50">
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">ÍNDICE DE PERFUSIÓN</div>
+                      <div className="text-sm font-mono text-slate-200">{pi > 0 ? pi.toFixed(2) : '--'}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">CALIDAD SEÑAL</div>
+                      <div className="text-sm font-mono text-slate-200">{lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">TIEMPO</div>
+                      <div className="text-sm font-mono text-slate-200">{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* CIVIL MODE — legacy clinical-style vitals (research only). */}
+          {CIVIL_MODE && (
+          <div className="absolute inset-x-0 top-[70%] bottom-[60px] bg-black/10 px-4 py-3">
+            <div className="text-[9px] text-amber-400 mb-1 tracking-widest text-center">⚠ CIVIL — ESTIMACIONES NO CLÍNICAS</div>
+            <div className="grid grid-cols-3 gap-2 place-items-center">
               <VitalSign label="FRECUENCIA CARDÍACA" value={heartRate > 0 ? Math.round(heartRate) : "--"} unit="BPM" highlighted={showResults} />
               <VitalSign label="SPO2" value={vitalSigns.spo2 > 0 ? vitalSigns.spo2 : "--"} unit="%" highlighted={showResults} />
               <VitalSign 
@@ -846,6 +909,7 @@ const Index = () => {
               <VitalSign label="ARRITMIAS" value={vitalSigns.arrhythmiaStatus || "SIN ARRITMIAS|0"} highlighted={showResults} />
             </div>
           </div>
+          )}
 
           {showResults && measurementSummary && (() => {
             const { totalBeats, arrhythmiaBeats, normalPercent } = measurementSummary;
