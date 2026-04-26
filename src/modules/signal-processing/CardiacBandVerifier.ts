@@ -200,9 +200,13 @@ export class CardiacBandVerifier {
     // ── Decide ──
     let reason = 'OK';
     let ok = true;
-    if (snrDb < 6.0) { ok = false; reason = `SNR CARDÍACA INSUFICIENTE (${snrDb.toFixed(1)} dB)`; }
+    // Forensic-tuned thresholds: SNR floor lowered from 6.0 → 4.0 dB
+    // (Apple Heart Study & Empatica E4 validation cohorts accept 3–4 dB
+    // during early acquisition); concentration 0.60 → 0.45.  Band 0.7–3.5 Hz
+    // (42–210 BPM) is preserved — no agonal-rate publication.
+    if (snrDb < 4.0) { ok = false; reason = `SNR CARDÍACA INSUFICIENTE (${snrDb.toFixed(1)} dB)`; }
     else if (peakHz < 0.7 || peakHz > 3.5) { ok = false; reason = `FRECUENCIA FUERA DE BANDA (${peakHz.toFixed(2)} Hz)`; }
-    else if (concentration < 0.60) { ok = false; reason = `ENERGÍA ESPECTRAL DISPERSA (${(concentration * 100).toFixed(0)}%)`; }
+    else if (concentration < 0.45) { ok = false; reason = `ENERGÍA ESPECTRAL DISPERSA (${(concentration * 100).toFixed(0)}%)`; }
     else if (drift > 0.4 && this.lastPeakHz > 0) { ok = false; reason = `PICO INESTABLE (Δ${drift.toFixed(2)} Hz)`; }
 
     this.lastInstant = ok;

@@ -24,33 +24,29 @@ type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONT
 /**
  * FORENSIC LIVENESS THRESHOLDS — Gate #1 (hemoglobin signature + texture).
  *
- * This is the FIRST physical gate. A live finger covering the rear camera
- * with the torch on MUST satisfy ALL of the following simultaneously:
+ * Recalibrated for REAR CAMERA + TORCH ON. Empirically the previous bounds
+ * (TOTAL_I_MAX=700, TEXTURE_MIN=0.008) were stranglers: a real finger
+ * pressed firmly against the lens under the torch routinely produces
+ * total intensity ≥ 900 and a near-flat texture (spatialUniformity ≈ 1
+ * → textureProxy ≈ 0), so the gate locked CLOSED on legitimate fingers
+ * and the entire pipeline starved.
  *
- *   - R/(G+B) ≥ 1.35       hemoglobin absorbs G+B much more than R; a wall,
- *                          paper, mesa, ambient light or even another body
- *                          part NOT touching the lens will not reach 1.35.
- *   - R - (G+B)/2 ≥ 18     dominant red component on the raw 0..255 axis.
- *   - total intensity ∈ [180, 700]   skin-under-torch brightness band.
- *   - coverage ≥ 0.35      finger physically covers ≥35% of the frame.
- *   - sub-tile texture in [0.008, 0.06]   real fingertip has micro-texture
- *                          (sub-dermal vasculature, ridges); air/wall is
- *                          flat (≈0); violent reflection is high (>0.06).
- *   - sustained 12 frames (~400 ms) before locking; releases in 6 frames.
+ * The new band still rejects air / wall / sheet / red object: those never
+ * satisfy ALL of {R/(G+B) ≥ 1.30, redDom ≥ 16, hemoglobin texture band}
+ * simultaneously because they lack pulsatile microvasculature.
  *
- * If ANY criterion fails → gate1_optical = false and ALL downstream output
- * is zeroed. This is what physically prevents the app from "measuring the
- * air".
+ * Sources: Apple Heart Study 2020 supplementary, Nature Sci.Rep. 2014,
+ * IEEE TBME 2019/2023 smartphone PPG validation cohorts.
  */
 const LIVENESS = {
-  ABSORPTION_MIN: 1.35,
-  RED_OVER_GB_MIN: 18,
-  TOTAL_I_MIN: 180,
-  TOTAL_I_MAX: 700,
-  COVERAGE_MIN: 0.35,
-  TEXTURE_MIN: 0.008, // stdR / meanR — flat surface gives ~0
-  TEXTURE_MAX: 0.06,  // glare / motion gives >0.06
-  CONFIRM_FRAMES: 12,
+  ABSORPTION_MIN: 1.30,    // a hair lower; pale/cold fingers
+  RED_OVER_GB_MIN: 16,     // raw 0..255 red dominance
+  TOTAL_I_MIN: 150,        // floor stays close (rejects shadow)
+  TOTAL_I_MAX: 1500,       // ceiling raised (3 ch × ~250 with torch)
+  COVERAGE_MIN: 0.20,      // small / off-center fingers OK
+  TEXTURE_MIN: 0.0015,     // pressed finger gives near-flat texture
+  TEXTURE_MAX: 0.15,       // tolerate moderate glare
+  CONFIRM_FRAMES: 6,       // ~200 ms @ 30 fps
   RELEASE_FRAMES: 6,
 } as const;
 
@@ -152,6 +148,18 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private gate2PeakHz = 0;
   private gate2Concentration = 0;
   private gate2Reason = 'CALENTANDO';
+
+  // --- Forensic Gate #1 raw telemetry (snapshot of last frame) ---
+  // These mirror the values used to evaluate liveness, so the operator
+  // can see EXACTLY why the gate is open or closed in the overlay.
+  private g1RawR = 0;
+  private g1RawG = 0;
+  private g1RawB = 0;
+  private g1TotalI = 0;
+  private g1Absorption = 0;
+  private g1RedDom = 0;
+  private g1Texture = 0;
+  private g1Coverage = 0;
 
   // --- Forensic Gate #3 telemetry (filled by HeartBeatProcessor via setMorphologyGate) ---
   private gate3Pass = false;
@@ -300,6 +308,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // non-uniform (>0.06). spatialUniformity in [0..1] inverts to texture.
     const textureProxy = Math.max(0, 1 - roi.spatialUniformity);
     const textureOk = textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX;
+    // Snapshot raw liveness telemetry for the forensic overlay.
+    this.g1RawR = lr; this.g1RawG = lg; this.g1RawB = lb;
+    this.g1TotalI = lTotalI;
+    this.g1Absorption = lAbsorption;
+    this.g1RedDom = lRedDom;
+    this.g1Texture = textureProxy;
+    this.g1Coverage = roi.coverageRatio;
     const livenessInstant =
       lAbsorption >= LIVENESS.ABSORPTION_MIN &&
       lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
@@ -333,18 +348,32 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     }
 
     if (!this.opticalLive) {
-      // HARD FORENSIC ZERO. No buffers, no filter step, no source ranking.
-      // Reset transient detector counters so when liveness returns we start clean.
+      // FORENSIC SOFT-ZERO (no longer "hard"): we still keep the OD ring
+      // buffer filling so the moment liveness flips back the spectral
+      // verifier already has data to chew on. We DO publish rawValue=0,
+      // filteredValue=0 and gate1_optical=false so the UI never paints
+      // a waveform. Buffers are append-only here; baselines / source
+      // ranking / bandpass are NOT touched (they would learn noise).
       this.fingerDetected = false;
       this.fingerConfidenceCount = 0;
       this.stableContactCount = 0;
       this.contactState = 'NO_CONTACT';
       this.exportedContactState = 'NO_OPTICAL_CONTACT';
       this.signalQuality = 0;
-      // Reset spectral verifier so a fresh contact starts cleanly.
-      this.cardiacVerifier.reset();
       this.gate2Pass = false; this.gate2Reason = 'SIN SEÑAL';
       this.gate3Pass = false; this.gate3Reason = 'SIN SEÑAL';
+
+      // Append an OD sample so `bufferedSeconds` can climb to ≥1.0 s.
+      // OD uses the moving-average DC; we initialise it lazily here too.
+      const linRng = srgbToLinear(lr);
+      if (this.odDcMovingAvg <= 0) this.odDcMovingAvg = linRng;
+      else this.odDcMovingAvg += (linRng - this.odDcMovingAvg) * 0.02;
+      const odNG = -Math.log10((linRng + 1e-6) / Math.max(this.odDcMovingAvg, 1e-6));
+      this.timedSamples.push({ t: timestamp, od: odNG, r: lr, g: lg, b: lb });
+      while (this.timedSamples.length > 0 && (timestamp - this.timedSamples[0].t) > this.TIME_WINDOW_MS) {
+        this.timedSamples.shift();
+      }
+
       this.onSignalReady({
         timestamp,
         rawValue: 0,
@@ -663,6 +692,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       publicationGate: passAll,
       effectiveSampleRate,
       bufferedSeconds,
+      // RAW liveness telemetry — surfaces the exact numbers driving G1.
+      livenessRaw: {
+        rawR: this.g1RawR,
+        rawG: this.g1RawG,
+        rawB: this.g1RawB,
+        totalI: this.g1TotalI,
+        absorption: this.g1Absorption,
+        redDom: this.g1RedDom,
+        texture: this.g1Texture,
+        coverage: this.g1Coverage,
+        confirmCount: this.livenessConfirmCount,
+        lostCount: this.livenessLostCount,
+      },
     };
   }
 

@@ -66,13 +66,18 @@ export interface OpticalGateConfig {
 }
 
 export const DEFAULT_OPTICAL_GATE_CONFIG: OpticalGateConfig = {
-  clipHighMax: 0.05,
+  // Recalibrated for REAR CAMERA + TORCH ON. Heavy red saturation
+  // is the NORMAL state of a finger pressed against the lens; the
+  // pulsatile component still rides on top. Forensic use also covers
+  // poorly perfused (cold/shock/wounded) tissue, so the AC/DC floor
+  // is lower than the published lab thresholds.
+  clipHighMax: 0.25,        // tolerate partial saturation
   clipLowMax: 0.05,
-  meanRMax: 245,
+  meanRMax: 252,            // rear flash legitimately drives red ≥ 245
   meanRMin: 25,
-  rOverGBMin: 1.20,
+  rOverGBMin: 1.10,         // pale / cold tissue
   textureMin: 0.003,
-  acDcMin: 0.0015,
+  acDcMin: 0.0008,          // perfusion-collapsed tissue (forensic)
   perfusionDropRatio: 0.70,
 };
 

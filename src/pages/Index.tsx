@@ -919,10 +919,10 @@ const Index = () => {
     const processingAllowed =
       opticalOk &&
       om != null &&
-      om.meanR >= 25 && om.meanR <= 245 &&
-      om.clipHigh < 0.20 &&
+      om.meanR >= 25 && om.meanR <= 252 &&
+      om.clipHigh < 0.30 &&
       om.clipLow  < 0.20 &&
-      bufferedSeconds >= 1.5 &&
+      bufferedSeconds >= 1.0 &&
       Number.isFinite(signalValue);
 
     // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
