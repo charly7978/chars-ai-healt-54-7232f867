@@ -11,6 +11,7 @@ import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
 import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
+import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -89,6 +90,13 @@ const Index = () => {
   const cachedSampleRateRef = useRef<number>(30);
   const cachedSampleRateValidRef = useRef<boolean>(false);
 
+  // Auto-calibrating SR estimator with stall detection.
+  const srEstimatorRef = useRef<SampleRateEstimator>(new SampleRateEstimator());
+  // Timestamp (ms, performance.now) when the current monitoring session started.
+  const srCalibrationStartRef = useRef<number>(0);
+  const srCalibrationDoneRef = useRef<boolean>(false);
+  const SR_CALIBRATION_DURATION_MS = 4000; // ~4 s of timestamps to fingerprint jitter
+
   const EMA_ALPHA = 0.3;
   const emaRef = useRef({
     bpm: 0, spo2: 0, systolic: 0, diastolic: 0,
@@ -103,56 +111,30 @@ const Index = () => {
 
   const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
     // Fallback: if no valid timestamp, use performance.now() so we still feed
-    // a real monotonic clock instead of cold-starting at 30 fps.
+    // a real monotonic clock instead of cold-starting at the default SR.
     const ts = (typeof timestamp === 'number' && isFinite(timestamp))
       ? timestamp
       : performance.now();
 
-    const history = frameTimestampHistoryRef.current;
-    if (history.length === 0 || ts > history[history.length - 1]) {
-      history.push(ts);
-      // Wider window (~1.5–2 s @ 30 fps) for robust median under jitter.
-      if (history.length > 60) history.shift();
+    const est = srEstimatorRef.current.push(ts, performance.now());
+
+    // Auto-calibration: after ~4s of timestamps, derive a window/MAD that
+    // matches the device's actual jitter and freeze the recommendation.
+    if (!srCalibrationDoneRef.current) {
+      if (srCalibrationStartRef.current === 0) {
+        srCalibrationStartRef.current = performance.now();
+      } else if (performance.now() - srCalibrationStartRef.current >= SR_CALIBRATION_DURATION_MS) {
+        const cal = srEstimatorRef.current.applyCalibration();
+        if (cal.acceptedSamples >= 8) {
+          srCalibrationDoneRef.current = true;
+        }
+      }
     }
 
-    if (history.length < 6) {
-      return cachedSampleRateValidRef.current ? cachedSampleRateRef.current : 30;
-    }
-
-    // Collect inter-frame deltas in the plausible camera range.
-    const deltas: number[] = [];
-    for (let i = 1; i < history.length; i++) {
-      const d = history[i] - history[i - 1];
-      if (d >= 8 && d <= 120 && isFinite(d)) deltas.push(d);
-    }
-    if (deltas.length < 4) {
-      return cachedSampleRateValidRef.current ? cachedSampleRateRef.current : 30;
-    }
-
-    // Median + MAD outlier rejection (survives dropped frames / bursts).
-    const sorted = deltas.slice().sort((a, b) => a - b);
-    const median = sorted[sorted.length >> 1];
-    const devs = sorted.map(v => Math.abs(v - median)).sort((a, b) => a - b);
-    const mad = devs[devs.length >> 1] || 1;
-    const lo = median - 3 * mad;
-    const hi = median + 3 * mad;
-
-    let sum = 0, count = 0;
-    for (let i = 0; i < deltas.length; i++) {
-      const v = deltas[i];
-      if (v >= lo && v <= hi) { sum += v; count++; }
-    }
-    const robustMs = count >= 4 ? sum / count : median;
-    const instantSR = Math.max(15, Math.min(60, 1000 / Math.max(1, robustMs)));
-
-    // EMA smoothing against cached value -> stable SR under variable FPS.
-    const next = cachedSampleRateValidRef.current
-      ? cachedSampleRateRef.current * 0.7 + instantSR * 0.3
-      : instantSR;
-
-    cachedSampleRateRef.current = next;
-    cachedSampleRateValidRef.current = true;
-    return next;
+    // Mirror state into the legacy refs (other parts of Index still read them).
+    cachedSampleRateRef.current = est.sampleRate;
+    cachedSampleRateValidRef.current = est.valid;
+    return est.sampleRate;
   }, []);
 
   const computeRRStability = useCallback((intervals: number[]): number => {
@@ -343,7 +325,7 @@ const Index = () => {
     totalBeatsRef.current = 0;
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
-    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -405,7 +387,7 @@ const Index = () => {
     }
     setIsMonitoring(false);
     setIsCalibrating(false);
-    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
     if (savedResults) setVitalSigns(savedResults);
     setShowResults(true);
     const total = totalBeatsRef.current;
@@ -431,7 +413,7 @@ const Index = () => {
     fullResetVitalSigns();
     resetHeartBeat();
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
-    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
     setIsCameraOn(false);
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
@@ -690,7 +672,7 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount]);
+  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount, showFiducialTuner]);
 
   useEffect(() => {
     if (isMonitoring && elapsedTime >= 60) {
@@ -969,6 +951,21 @@ const Index = () => {
           )}
         </div>
       </div>
+
+      {/* Hidden long-press toggle in the corner — opens the fiducial tuner. */}
+      <button
+        aria-label="Open fiducial tuner"
+        onClick={() => setShowFiducialTuner(v => !v)}
+        className="fixed bottom-1 left-1 z-40 w-6 h-6 rounded-full bg-muted/40 hover:bg-muted text-[10px] text-muted-foreground"
+      >·</button>
+
+      <FiducialTuner
+        open={showFiducialTuner}
+        onClose={() => setShowFiducialTuner(false)}
+        getParams={getFiducialParams}
+        setParams={setFiducialParams}
+        liveStats={fiducialLive}
+      />
     </div>
   );
 };
