@@ -19,6 +19,7 @@ import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs 
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
+import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
