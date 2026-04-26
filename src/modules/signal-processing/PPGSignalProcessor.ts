@@ -5,31 +5,42 @@ import { AdaptiveROIMask, type ROIMaskResult } from './AdaptiveROIMask';
 import { PressureProxyEstimator, type PressureState, type PressureEstimate } from './PressureProxyEstimator';
 import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
+import { CardiacBandVerifier } from './CardiacBandVerifier';
 
 // Extended contact states
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
 
 /**
- * FORENSIC LIVENESS THRESHOLDS — hemoglobin optical signature.
- * A live finger over the camera+flash MUST satisfy:
- *   - red dominance over green+blue (oxyhemoglobin absorbs G+B, reflects R)
- *   - total brightness inside a plausible "skin under torch" range
- *   - some amount of coverage of the lens (not pinhole light leak)
- * Anything failing this is treated as NO_OPTICAL_CONTACT and forces ALL
- * downstream output to zero (no waveform, no BPM, no SpO2…) — this is what
- * stops the app from "measuring the air".
- * Thresholds are intentionally permissive on perfusion (so a cold/shock
- * finger still passes liveness) but strict on the hemoglobin signature
- * (so an empty lens, a wall, ambient light or a desk surface NEVER pass).
+ * FORENSIC LIVENESS THRESHOLDS — Gate #1 (hemoglobin signature + texture).
+ *
+ * This is the FIRST physical gate. A live finger covering the rear camera
+ * with the torch on MUST satisfy ALL of the following simultaneously:
+ *
+ *   - R/(G+B) ≥ 1.35       hemoglobin absorbs G+B much more than R; a wall,
+ *                          paper, mesa, ambient light or even another body
+ *                          part NOT touching the lens will not reach 1.35.
+ *   - R - (G+B)/2 ≥ 18     dominant red component on the raw 0..255 axis.
+ *   - total intensity ∈ [180, 700]   skin-under-torch brightness band.
+ *   - coverage ≥ 0.35      finger physically covers ≥35% of the frame.
+ *   - sub-tile texture in [0.008, 0.06]   real fingertip has micro-texture
+ *                          (sub-dermal vasculature, ridges); air/wall is
+ *                          flat (≈0); violent reflection is high (>0.06).
+ *   - sustained 12 frames (~400 ms) before locking; releases in 6 frames.
+ *
+ * If ANY criterion fails → gate1_optical = false and ALL downstream output
+ * is zeroed. This is what physically prevents the app from "measuring the
+ * air".
  */
 const LIVENESS = {
-  ABSORPTION_MIN: 1.05, // R / (G+B) — hemoglobin signature
-  RED_OVER_GB_MIN: 6,   // R - (G+B)/2 in raw 0..255 units
-  TOTAL_I_MIN: 70,      // too dark → no torch reflection from tissue
-  TOTAL_I_MAX: 740,     // blown out white → no tissue, just glare
-  COVERAGE_MIN: 0.12,   // less than this and there is no finger covering the lens
-  CONFIRM_FRAMES: 4,    // ~130ms at 30fps to lock liveness
-  RELEASE_FRAMES: 8,    // ~270ms to release (anti flicker)
+  ABSORPTION_MIN: 1.35,
+  RED_OVER_GB_MIN: 18,
+  TOTAL_I_MIN: 180,
+  TOTAL_I_MAX: 700,
+  COVERAGE_MIN: 0.35,
+  TEXTURE_MIN: 0.008, // stdR / meanR — flat surface gives ~0
+  TEXTURE_MAX: 0.06,  // glare / motion gives >0.06
+  CONFIRM_FRAMES: 12,
+  RELEASE_FRAMES: 6,
 } as const;
 
 /**
@@ -51,6 +62,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private roiMask = new AdaptiveROIMask();
   private pressureEstimator = new PressureProxyEstimator();
   private sourceRanker = new SignalSourceRanker();
+  // Forensic Gate #2 — cardiac-band SNR verifier on the raw red channel.
+  private cardiacVerifier = new CardiacBandVerifier();
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
@@ -99,6 +112,26 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private livenessLostCount = 0;
   private opticalLive = false;
   private lastLivenessReason = 'AIRE / SIN TEJIDO';
+
+  // --- Forensic Gate #2 telemetry ---
+  private gate2Pass = false;
+  private gate2SNRdB = 0;
+  private gate2PeakHz = 0;
+  private gate2Concentration = 0;
+  private gate2Reason = 'CALENTANDO';
+
+  // --- Forensic Gate #3 telemetry (filled by HeartBeatProcessor via setMorphologyGate) ---
+  private gate3Pass = false;
+  private gate3Reason = 'BUSCANDO LATIDOS';
+
+  /**
+   * Allow the heartbeat layer to push back gate #3 so the next emitted frame
+   * carries the truth about morphology validation. Called from useHeartBeatProcessor.
+   */
+  public setMorphologyGate(pass: boolean, reason?: string): void {
+    this.gate3Pass = pass;
+    if (reason) this.gate3Reason = reason;
+  }
 
   // --- Smoothed metrics (EWMA) ---
   private smoothedRed = 0;
@@ -211,12 +244,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const lAbsorption = (lg + lb) > 1 ? lr / (lg + lb) : 0;
     const lRedDom = lr - (lg + lb) / 2;
     const lTotalI = lr + lg + lb;
+    // Spatial texture from ROI (1 - spatialUniformity) acts as the std/mean
+    // proxy: a real fingertip pressed on the lens has micro-texture (>0.008
+    // and <0.06); a wall/air/glare is either perfectly flat (~0) or wildly
+    // non-uniform (>0.06). spatialUniformity in [0..1] inverts to texture.
+    const textureProxy = Math.max(0, 1 - roi.spatialUniformity);
+    const textureOk = textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX;
     const livenessInstant =
       lAbsorption >= LIVENESS.ABSORPTION_MIN &&
       lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
       lTotalI >= LIVENESS.TOTAL_I_MIN &&
       lTotalI <= LIVENESS.TOTAL_I_MAX &&
-      roi.coverageRatio >= LIVENESS.COVERAGE_MIN;
+      roi.coverageRatio >= LIVENESS.COVERAGE_MIN &&
+      textureOk;
 
     if (livenessInstant) {
       this.livenessConfirmCount = Math.min(this.livenessConfirmCount + 1, 200);
@@ -233,8 +273,12 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       // Build forensic reason string for the diagnostic banner
       if (lTotalI < LIVENESS.TOTAL_I_MIN) this.lastLivenessReason = 'OSCURO / SIN CONTACTO';
       else if (lTotalI > LIVENESS.TOTAL_I_MAX) this.lastLivenessReason = 'LUZ DIRECTA / NO ES TEJIDO';
-      else if (lAbsorption < LIVENESS.ABSORPTION_MIN) this.lastLivenessReason = 'SIN FIRMA DE HEMOGLOBINA';
+      else if (lAbsorption < LIVENESS.ABSORPTION_MIN) this.lastLivenessReason = `SIN FIRMA DE HEMOGLOBINA (R/(G+B)=${lAbsorption.toFixed(2)})`;
+      else if (lRedDom < LIVENESS.RED_OVER_GB_MIN) this.lastLivenessReason = 'ROJO INSUFICIENTE — NO ES TEJIDO';
       else if (roi.coverageRatio < LIVENESS.COVERAGE_MIN) this.lastLivenessReason = 'CUBRA EL LENTE CON EL DEDO';
+      else if (!textureOk) this.lastLivenessReason = textureProxy < LIVENESS.TEXTURE_MIN
+        ? 'SUPERFICIE PLANA — NO ES PIEL'
+        : 'TEXTURA INESTABLE — REFLEJO/MOVIMIENTO';
       else this.lastLivenessReason = 'SIN CONTACTO ÓPTICO';
     }
 
@@ -247,6 +291,10 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       this.contactState = 'NO_CONTACT';
       this.exportedContactState = 'NO_OPTICAL_CONTACT';
       this.signalQuality = 0;
+      // Reset spectral verifier so a fresh contact starts cleanly.
+      this.cardiacVerifier.reset();
+      this.gate2Pass = false; this.gate2Reason = 'SIN SEÑAL';
+      this.gate3Pass = false; this.gate3Reason = 'SIN SEÑAL';
       this.onSignalReady({
         timestamp,
         rawValue: 0,
@@ -263,6 +311,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           message: `SIN PULSO — ${this.lastLivenessReason}`,
           hasPulsatility: false,
           pulsatilityValue: 0,
+        },
+        forensicGate: {
+          gate1_optical: false,
+          gate2_spectral: false,
+          gate3_morphology: false,
+          passAll: false,
+          cardiacSNRdB: 0,
+          spectralPeakHz: 0,
+          spectralConcentration: 0,
+          livenessReason: this.lastLivenessReason,
         },
       });
       this.processingTimeMs = performance.now() - t0;
@@ -459,7 +517,39 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
         pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
       },
+      forensicGate: this.computeForensicGate(roi.rawRed, timestamp),
     });
+  }
+
+  /**
+   * Run Gate #2 (cardiac SNR) on the latest red sample and merge with the
+   * already-known Gate #1 + Gate #3 state into the unified verdict the UI
+   * uses to decide whether ANYTHING gets rendered.
+   */
+  private computeForensicGate(rawRed: number, nowMs: number) {
+    const g2 = this.cardiacVerifier.update(rawRed, this.estimatedSampleRate, nowMs);
+    this.gate2Pass = g2.passes;
+    this.gate2SNRdB = g2.snrDb;
+    this.gate2PeakHz = g2.peakHz;
+    this.gate2Concentration = g2.concentration;
+    this.gate2Reason = g2.reason;
+
+    const passAll = this.opticalLive && this.gate2Pass && this.gate3Pass;
+    let livenessReason = 'OK';
+    if (!this.opticalLive) livenessReason = this.lastLivenessReason;
+    else if (!this.gate2Pass) livenessReason = this.gate2Reason;
+    else if (!this.gate3Pass) livenessReason = this.gate3Reason;
+
+    return {
+      gate1_optical: this.opticalLive,
+      gate2_spectral: this.gate2Pass,
+      gate3_morphology: this.gate3Pass,
+      passAll,
+      cardiacSNRdB: this.gate2SNRdB,
+      spectralPeakHz: this.gate2PeakHz,
+      spectralConcentration: this.gate2Concentration,
+      livenessReason,
+    };
   }
 
   // ══════════════════════════════════════════════════════
