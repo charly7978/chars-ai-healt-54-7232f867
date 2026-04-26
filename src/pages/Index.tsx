@@ -158,6 +158,30 @@ const Index = () => {
   const [showThresholdPanel, setShowThresholdPanel] = useState(false);
   const acceptedRatioMinRef = useRef(acceptedRatioMin);
   const warmupSamplesRef = useRef(warmupSamples);
+
+  // Auto-relax: after N consecutive accepted frames, soften the thresholds
+  // so the operator doesn't have to fight the safeguard once a stable
+  // signal has been established. Toggle + N persisted in localStorage.
+  const [autoRelaxEnabled, setAutoRelaxEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('forensic.autoRelaxEnabled') === '1';
+  });
+  const [autoRelaxN, setAutoRelaxN] = useState<number>(() => {
+    if (typeof window === 'undefined') return 90;
+    const v = parseInt(localStorage.getItem('forensic.autoRelaxN') || '', 10);
+    return Number.isFinite(v) && v >= 30 && v <= 300 ? v : 90;
+  });
+  const consecutiveAcceptedRef = useRef(0);
+  const autoRelaxAppliedRef = useRef(false);
+  const preRelaxRef = useRef<{ ratio: number; warmup: number } | null>(null);
+  const [autoRelaxActive, setAutoRelaxActive] = useState(false);
+  useEffect(() => {
+    try { localStorage.setItem('forensic.autoRelaxEnabled', autoRelaxEnabled ? '1' : '0'); } catch {}
+  }, [autoRelaxEnabled]);
+  useEffect(() => {
+    try { localStorage.setItem('forensic.autoRelaxN', String(autoRelaxN)); } catch {}
+  }, [autoRelaxN]);
+
   useEffect(() => {
     acceptedRatioMinRef.current = acceptedRatioMin;
     try { localStorage.setItem('forensic.acceptedRatioMin', String(acceptedRatioMin)); } catch {}
@@ -565,6 +589,16 @@ const Index = () => {
     noiseSamplesRef.current = 0;
     setValidSamples(0);
     setNoiseSamples(0);
+    // Reset auto-relax tracking each new session.
+    consecutiveAcceptedRef.current = 0;
+    if (autoRelaxAppliedRef.current && preRelaxRef.current) {
+      // Restore user-set thresholds before next session.
+      setAcceptedRatioMin(preRelaxRef.current.ratio);
+      setWarmupSamples(preRelaxRef.current.warmup);
+    }
+    autoRelaxAppliedRef.current = false;
+    preRelaxRef.current = null;
+    setAutoRelaxActive(false);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
@@ -869,6 +903,36 @@ const Index = () => {
     const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
     const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
     const odAccepted = forensicPass && !!(fg as any)?.opticalEvidence;
+
+    // ── AUTO-RELAX: count consecutive accepted (OD) frames. Once the
+    // configured streak is reached, soften the safeguard thresholds so the
+    // operator can keep measuring on a stable signal without manual tuning.
+    if (odAccepted) {
+      consecutiveAcceptedRef.current += 1;
+      if (
+        autoRelaxEnabled &&
+        !autoRelaxAppliedRef.current &&
+        consecutiveAcceptedRef.current >= autoRelaxN
+      ) {
+        preRelaxRef.current = {
+          ratio: acceptedRatioMinRef.current,
+          warmup: warmupSamplesRef.current,
+        };
+        const relaxedRatio = Math.max(0.10, acceptedRatioMinRef.current * 0.5);
+        const relaxedWarmup = Math.max(30, Math.round(warmupSamplesRef.current * 0.5));
+        setAcceptedRatioMin(relaxedRatio);
+        setWarmupSamples(relaxedWarmup);
+        autoRelaxAppliedRef.current = true;
+        setAutoRelaxActive(true);
+        toast({
+          title: 'Umbrales auto-relajados',
+          description: `Señal estable (${autoRelaxN} frames). Ratio ${Math.round(relaxedRatio*100)}% · warm-up ${relaxedWarmup}.`,
+        });
+      }
+    } else {
+      consecutiveAcceptedRef.current = 0;
+    }
+
     if (ratioGuardActive || !odAccepted) {
       // Do NOT feed the beat detector with non-OD / rejected samples.
       setHeartbeatSignal(0);
@@ -1223,6 +1287,41 @@ const Index = () => {
                 >
                   RESET (15% / 60)
                 </button>
+                {/* ── Auto-relax block ─────────────────────────────── */}
+                <div className="border-t border-zinc-700/60 pt-2 space-y-1.5">
+                  <label className="flex items-center justify-between cursor-pointer">
+                    <span className="text-zinc-400">Auto-relax tras N frames</span>
+                    <input
+                      type="checkbox"
+                      checked={autoRelaxEnabled}
+                      onChange={(e) => setAutoRelaxEnabled(e.target.checked)}
+                      className="accent-emerald-500"
+                    />
+                  </label>
+                  <div>
+                    <div className="flex justify-between mb-0.5">
+                      <span className="text-zinc-400">N consecutivos</span>
+                      <span className="text-emerald-300 font-bold">{autoRelaxN}</span>
+                    </div>
+                    <input
+                      type="range" min={30} max={300} step={10}
+                      value={autoRelaxN}
+                      onChange={(e) => setAutoRelaxN(parseInt(e.target.value, 10))}
+                      disabled={!autoRelaxEnabled}
+                      className="w-full accent-emerald-500 disabled:opacity-40"
+                    />
+                    <div className="flex justify-between text-[9px] text-zinc-500">
+                      <span>30</span><span>300</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between text-[9px]">
+                    <span className="text-zinc-500">Racha actual</span>
+                    <span className="text-zinc-200 font-bold">{consecutiveAcceptedRef.current}</span>
+                  </div>
+                  {autoRelaxActive && (
+                    <div className="text-[9px] text-emerald-300 font-bold">⚡ Umbrales relajados activos</div>
+                  )}
+                </div>
                 <div className="text-[9px] text-zinc-500 leading-tight">
                   Bloquea cómputo de latidos si la ratio de muestras válidas en sesión cae bajo el umbral, tras superar el warm-up.
                 </div>
