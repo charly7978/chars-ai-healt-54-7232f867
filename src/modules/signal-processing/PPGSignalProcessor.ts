@@ -443,6 +443,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.g1RedDom = lRedDom;
     this.g1Texture = textureProxy;
     this.g1Coverage = roi.coverageRatio;
+    this.redBuf.push(lr);
+    this.greenBuf.push(lg);
+    this.blueBuf.push(lb);
+    this.updateBaselines(lr, lg, lb, false);
+    if (this.redBuf.length >= 6) this.calculateACDC();
     const livenessInstant =
       lAbsorption >= absorptionMin &&
       lRedDom >= redOverGbMin &&
@@ -522,6 +527,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         perfusionIndex: 0,
         rawRed: lr,
         rawGreen: lg,
+        rawBlue: lb,
+        rgbStats: this.getRGBStats(),
         diagnostics: {
           message: `SIN PULSO — ${this.lastLivenessReason}`,
           hasPulsatility: false,
@@ -598,6 +605,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         perfusionIndex: 0,
         rawRed: roi.rawRed,
         rawGreen: roi.rawGreen,
+        rawBlue: roi.rawBlue,
+        rgbStats: this.getRGBStats(),
         diagnostics: {
           message: `BUSCANDO DEDO C:${(roi.coverageRatio * 100).toFixed(0)}% P:${pressure.state}${motionArtifact ? ' MOV' : ''}`,
           hasPulsatility: false,
@@ -628,6 +637,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         perfusionIndex: 0,
         rawRed: roi.rawRed,
         rawGreen: roi.rawGreen,
+        rawBlue: roi.rawBlue,
+        rgbStats: this.getRGBStats(),
         diagnostics: {
           message: `MOV ALTO m=${this.motionScore.toFixed(2)} - SOSTENGA EL TELÉFONO QUIETO`,
           hasPulsatility: false,
@@ -660,10 +671,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         this.blueBaseline = this.blueDcMedianBuf.percentile(0.5);
       }
     }
-    this.redBuf.push(roi.rawRed);
-    this.greenBuf.push(roi.rawGreen);
-    this.blueBuf.push(roi.rawBlue);
-
     // V8: bloqueo por contigüidad — parches dispersos no son un dedo.
     if (roi.coverageContiguity < 0.55) {
       this.lowContiguityStreak++;
