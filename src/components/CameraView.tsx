@@ -151,34 +151,110 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         // PHASE 1
         const cameraId = await findMainBackCamera();
 
-        // PHASE 2: Open stream — request the highest forensically useful
-        // resolution we can sustain at 30 fps. Larger frames give the
-        // adaptive ROI more pixels to average → better SNR. We downscale
-        // for processing in Index.tsx while keeping native pixels.
-        const baseConstraints: MediaTrackConstraints = cameraId
-          ? {
-              deviceId: { exact: cameraId },
-              width:  { ideal: 1280, min: 640,  max: 1920 },
-              height: { ideal: 720,  min: 480,  max: 1080 },
-              frameRate: { ideal: 30, min: 24, max: 30 }
-            }
-          : {
-              facingMode: { ideal: 'environment' },
-              width:  { ideal: 1280, min: 640,  max: 1920 },
-              height: { ideal: 720,  min: 480,  max: 1080 },
-              frameRate: { ideal: 30, min: 24, max: 30 }
-            };
+        // PHASE 2: Negotiate the highest forensically useful resolution we
+        // can sustain. Profiles are tried top-down; the first one that
+        // (a) opens AND (b) holds ≥ FPS floor over a 1.5 s probe wins.
+        // Larger frames give the adaptive ROI more pixels → better SNR.
+        type Rung = { w: number; h: number; fps: number; floor: number };
+        const ladder: Rung[] = [
+          { w: 1280, h: 720, fps: 30, floor: 24 },
+          { w: 960,  h: 540, fps: 30, floor: 22 },
+          { w: 640,  h: 480, fps: 30, floor: 20 },
+          { w: 640,  h: 480, fps: 24, floor: 18 },
+        ];
 
-        let stream: MediaStream;
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: baseConstraints });
-        } catch {
-          console.warn('Fallback to simple constraints (720p denied)');
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } }
+        const buildConstraints = (r: Rung): MediaTrackConstraints =>
+          cameraId
+            ? {
+                deviceId: { exact: cameraId },
+                width:  { ideal: r.w },
+                height: { ideal: r.h },
+                frameRate: { ideal: r.fps, max: r.fps },
+              }
+            : {
+                facingMode: { ideal: 'environment' },
+                width:  { ideal: r.w },
+                height: { ideal: r.h },
+                frameRate: { ideal: r.fps, max: r.fps },
+              };
+
+        // Sample real FPS by counting requestVideoFrameCallback hits over windowMs.
+        // Falls back to track.getSettings().frameRate when rVFC is missing.
+        const measureRealFps = async (
+          videoEl: HTMLVideoElement,
+          track: MediaStreamTrack,
+          windowMs = 1500,
+        ): Promise<number> => {
+          if (!('requestVideoFrameCallback' in videoEl)) {
+            return (track.getSettings() as any).frameRate ?? 0;
+          }
+          return new Promise<number>((resolve) => {
+            const t0 = performance.now();
+            let frames = 0;
+            const tick = () => {
+              frames++;
+              const elapsed = performance.now() - t0;
+              if (elapsed >= windowMs) {
+                resolve((frames * 1000) / elapsed);
+              } else {
+                (videoEl as any).requestVideoFrameCallback(tick);
+              }
+            };
+            (videoEl as any).requestVideoFrameCallback(tick);
+            // Hard timeout in case the camera never delivers frames.
+            setTimeout(() => resolve(0), windowMs + 500);
           });
+        };
+
+        let stream: MediaStream | null = null;
+        let chosenRung: Rung | null = null;
+        let fallbacks = 0;
+        let downshiftedForFps = false;
+
+        for (let i = 0; i < ladder.length; i++) {
+          const rung = ladder[i];
+          try {
+            const candidate = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: buildConstraints(rung),
+            });
+            // Probe FPS only when the <video> element is ready to attach.
+            if (videoRef.current) {
+              videoRef.current.srcObject = candidate;
+              await new Promise<void>((res) => {
+                const v = videoRef.current!;
+                v.onloadedmetadata = async () => { try { await v.play(); } catch {} res(); };
+              });
+              const fps = await measureRealFps(videoRef.current, candidate.getVideoTracks()[0]);
+              console.log(`📊 Probe ${rung.w}x${rung.h}@${rung.fps} → measured ${fps.toFixed(1)} fps (floor ${rung.floor})`);
+              if (fps >= rung.floor) {
+                stream = candidate;
+                chosenRung = rung;
+                if (i > 0) downshiftedForFps = true;
+                break;
+              }
+              // Below floor — discard and try next rung.
+              candidate.getTracks().forEach(t => t.stop());
+              fallbacks++;
+              continue;
+            }
+            // No video element yet (component unmounting) — accept first open.
+            stream = candidate;
+            chosenRung = rung;
+            break;
+          } catch (err) {
+            console.warn(`⚠️ Rung ${rung.w}x${rung.h}@${rung.fps} unavailable:`, (err as any)?.name || err);
+            fallbacks++;
+          }
         }
+
+        if (!stream || !chosenRung) {
+          throw new Error('No camera profile in fallback ladder could be opened.');
+        }
+
+        diagnosticsRef.current.activeProfile = `${chosenRung.w}x${chosenRung.h}@${chosenRung.fps}`;
+        diagnosticsRef.current.fallbacksApplied = fallbacks;
+        diagnosticsRef.current.downshiftedForFps = downshiftedForFps;
 
         if (!mounted) { stream.getTracks().forEach(t => t.stop()); isStartingRef.current = false; return; }
         streamRef.current = stream;
