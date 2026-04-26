@@ -840,6 +840,9 @@ const Index = () => {
         clipLow: 0,
         perfusionIndex: lastSignal.perfusionIndex,
         positionDrifting: positionQuality.drifting,
+        // FORENSIC: triple-gate + evidencia óptica. SOLO con esto en true
+        // el HeartBeatProcessor permite beep + vibración por latido.
+        publicationGate: forensicPass && !!(fg as any)?.opticalEvidence,
       }
     );
 
