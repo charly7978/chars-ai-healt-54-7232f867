@@ -625,6 +625,8 @@ const Index = () => {
       cancelAnimationFrame(frameLoopRef.current);
       frameLoopRef.current = null;
     }
+    // Release the devicemotion listener so the IMU sleeps between sessions.
+    motionClassifierRef.current.stop();
   }, []);
 
   const startMonitoring = useCallback(() => {
