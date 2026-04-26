@@ -726,7 +726,8 @@ const Index = () => {
   }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount, showFiducialTuner]);
 
   useEffect(() => {
-    if (isMonitoring && elapsedTime >= 60) {
+    // FORENSIC MODE: continuous monitoring — never auto-finalize.
+    if (CIVIL_MODE && isMonitoring && elapsedTime >= 60) {
       finalizeMeasurement();
     }
   }, [elapsedTime, isMonitoring, finalizeMeasurement]);
