@@ -8,6 +8,7 @@ import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
 import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
 import { ROITelemetryLogger } from './ROITelemetryLogger';
+import { MotionRejection, type MotionRejectionState } from './MotionRejection';
 
 /**
  * Conversión sRGB (0..255) → intensidad lineal [0..1] según IEC 61966-2-1.
@@ -77,6 +78,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // Independiente de morfología, no bloquea por "forma de dedo".
   private opticalGate = new OpticalEvidenceGate();
   private lastOpticalEvidence: OpticalEvidence | null = null;
+
+  // V9 — Fusion of optical motion proxies (trackerSigma, centroidJumpPx,
+  // maskIoU) with the IMU motionScore. Produces a continuous `motionWeight`
+  // ∈ [0,1] used as a soft SQI multiplier and a `freezeBaselines` flag that
+  // pauses DC baseline updates during SLIDING / BURST_MOTION. NEVER blocks
+  // publication — forensic mode keeps the live trace honest.
+  private motionRejection = new MotionRejection();
+  private motionState: MotionRejectionState = 'STILL';
+  private motionWeight = 1.0;
 
   // V6: structured per-frame telemetry — exported on demand so the operator
   // can audit ROI position/size, coverage and Liveness reasons after a
@@ -558,6 +568,22 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // (handled below), it does NOT freeze the pipeline.
     const motionGated = false;
 
+    // ── V9: MOTION REJECTION FUSION ───────────────────────────────────
+    // Combine IMU motionScore with optical proxies (Kalman σ on the ROI
+    // centroid, |obs−predict| jump, and Jaccard maskIoU) into a single
+    // weight ∈ [0,1] and a discrete state. This is FORENSIC: it never
+    // blocks publication — only re-weights SQI and freezes baselines on
+    // SLIDING / BURST_MOTION so a finger drift does not silently rebase
+    // DC and bias every downstream estimator.
+    const mr = this.motionRejection.classify({
+      imuScore: this.motionScore,
+      trackerSigma: roi.trackerSigma,
+      maskIoU: roi.maskIoU,
+      centroidJumpPx: roi.centroidJumpPx,
+    });
+    this.motionState = mr.state;
+    this.motionWeight = mr.weight;
+
     if (this.exportedContactState === 'NO_CONTACT' || this.exportedContactState === 'NO_OPTICAL_CONTACT') {
       this.signalQuality = 0;
       this.onSignalReady({
@@ -618,14 +644,21 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // canal y, cuando hay datos suficientes, reemplazamos el baseline por
     // su mediana — robusto a clip-high transitorios (glare) que arrastran
     // el EWMA durante segundos.
-    this.updateBaselines(roi.rawRed, roi.rawGreen, roi.rawBlue, motionArtifact);
-    this.redDcMedianBuf.push(roi.rawRed);
-    this.greenDcMedianBuf.push(roi.rawGreen);
-    this.blueDcMedianBuf.push(roi.rawBlue);
-    if (this.redDcMedianBuf.length >= 90) {
-      this.redBaseline = this.redDcMedianBuf.percentile(0.5);
-      this.greenBaseline = this.greenDcMedianBuf.percentile(0.5);
-      this.blueBaseline = this.blueDcMedianBuf.percentile(0.5);
+    // V9: cuando MotionRejection emite SLIDING/BURST_MOTION, congelamos
+    // tanto el EWMA como los buffers de mediana DC. Si el dedo se desliza,
+    // la mediana móvil se contaminaría con tejido distinto (o aire) y los
+    // baselines arrastrarían sesgo durante 5 s. Mantener el último valor
+    // estable es la opción forense correcta: no inventamos DC nuevo.
+    if (!mr.freezeBaselines) {
+      this.updateBaselines(roi.rawRed, roi.rawGreen, roi.rawBlue, motionArtifact);
+      this.redDcMedianBuf.push(roi.rawRed);
+      this.greenDcMedianBuf.push(roi.rawGreen);
+      this.blueDcMedianBuf.push(roi.rawBlue);
+      if (this.redDcMedianBuf.length >= 90) {
+        this.redBaseline = this.redDcMedianBuf.percentile(0.5);
+        this.greenBaseline = this.greenDcMedianBuf.percentile(0.5);
+        this.blueBaseline = this.blueDcMedianBuf.percentile(0.5);
+      }
     }
     this.redBuf.push(roi.rawRed);
     this.greenBuf.push(roi.rawGreen);
@@ -668,7 +701,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       roi.rawRed, roi.rawGreen, roi.rawBlue,
       this.redBaseline, this.greenBaseline, this.blueBaseline,
       redPI, greenPI,
-      roi.clipHighRatio, motionArtifact
+      roi.clipHighRatio, motionArtifact,
+      // V9 — pass weighted top-K tile masks so CHROM/POS project on the
+      // SNR-maximised tile means rather than the uniform ROI mean.
+      roi.topKWeightsR, roi.topKWeightsG,
+      roi.tileMeanRArr, roi.tileMeanGArr, roi.tileMeanBArr,
     );
     this.activeSourceLabel = source.label;
     this.allSourceSQI = source.allSQI;
@@ -815,8 +852,14 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const gatedQuality = isGoodPerfusion && perfusionIndex >= 0.005
       ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
+    // V9: motion-rejection soft attenuation. We use sqrt(weight) so MICRO_DRIFT
+    // (weight=0.80) only shaves ~10% off SQI while SLIDING (0.40) halves it
+    // and BURST_MOTION (0.15) crushes it to ~38%. Never zero — forensic UI
+    // must keep showing the live trace and let the operator judge.
+    const motionRejectionPenalty = Math.sqrt(Math.max(0.05, mr.weight));
     const finalQuality = gatedQuality * motionQualPenalty
-      * trackerSigmaPenalty * vitalityPenalty * jumpPenalty;
+      * trackerSigmaPenalty * vitalityPenalty * jumpPenalty
+      * motionRejectionPenalty;
 
     // --- TELEMETRY ---
     // Hot path: no console output. Operators read live state through the
@@ -840,7 +883,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
-          `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}`,
+          `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}` +
+          ` MR:${mr.state.charAt(0)}${(mr.weight * 100).toFixed(0)}`,
         hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
         pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
         textureEntropy: roi.textureEntropy,
@@ -853,6 +897,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         vitalityCount: this.vitalityCount,
         bandpassMode: this.bandpassFilter.getMode(),
         frameJump,
+        motionState: mr.state,
+        motionWeight: mr.weight,
+        baselinesFrozen: mr.freezeBaselines,
       },
       forensicGate: (() => {
         const fg = this.computeForensicGate(roi.rawRed, timestamp);
@@ -1276,6 +1323,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.greenDC = 0; this.greenAC = 0;
     this.blueDC = 0; this.blueAC = 0;
     this.sourceRanker.reset();
+    this.motionRejection.reset();
+    this.motionState = 'STILL';
+    this.motionWeight = 1.0;
     this.bandpassFilter.reset();
     // Forensic: limpiar buffers temporales y estado de publicación.
     this.timedSamples.length = 0;

@@ -49,6 +49,10 @@ export interface ProcessedSignal {
     vitalityCount?: number;
     bandpassMode?: 'NORMAL' | 'RESCUE';
     frameJump?: boolean;
+    // V9 — motion rejection fusion telemetry (optical proxies + IMU).
+    motionState?: 'STILL' | 'MICRO_DRIFT' | 'SLIDING' | 'BURST_MOTION';
+    motionWeight?: number;
+    baselinesFrozen?: boolean;
   };
   /**
    * Forensic triple-gate verdict — the ONLY thing that authorises the UI
