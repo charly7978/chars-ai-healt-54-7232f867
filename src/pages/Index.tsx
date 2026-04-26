@@ -11,6 +11,7 @@ import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
 import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
+import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -88,6 +89,13 @@ const Index = () => {
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
   const cachedSampleRateValidRef = useRef<boolean>(false);
+
+  // Auto-calibrating SR estimator with stall detection.
+  const srEstimatorRef = useRef<SampleRateEstimator>(new SampleRateEstimator());
+  // Timestamp (ms, performance.now) when the current monitoring session started.
+  const srCalibrationStartRef = useRef<number>(0);
+  const srCalibrationDoneRef = useRef<boolean>(false);
+  const SR_CALIBRATION_DURATION_MS = 4000; // ~4 s of timestamps to fingerprint jitter
 
   const EMA_ALPHA = 0.3;
   const emaRef = useRef({
