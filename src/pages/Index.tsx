@@ -368,6 +368,8 @@ const Index = () => {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
+  const frameLoopGenerationRef = useRef(0);
+  const monitoringIntentRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
   // Motion classifier: drops frames during sustained SEVERE motion with a
   // hard 50% drop-rate cap so the operator never loses the live trace.
@@ -387,6 +389,7 @@ const Index = () => {
   const watchdogTimerRef = useRef<number | null>(null);
   const softRestartCountRef = useRef<number>(0);
   const lastSoftRestartAtRef = useRef<number>(0);
+  const lastSignalHealthCommitAtRef = useRef<number>(0);
   // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -571,6 +574,7 @@ const Index = () => {
   const startFrameLoop = useCallback(() => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
+    const generation = ++frameLoopGenerationRef.current;
     
     const canvas = canvasRef.current;
     const ctx = ctxRef.current;
@@ -610,7 +614,7 @@ const Index = () => {
     };
 
     const captureOneFrame = (frameTimestamp: number) => {
-      if (!isProcessingRef.current) return;
+      if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
       const video = cameraRef.current?.getVideoElement();
       if (!video || video.readyState < 2 || video.videoWidth === 0) {
         frameLoopRef.current = requestAnimationFrame(() =>
@@ -645,9 +649,10 @@ const Index = () => {
     };
 
     const scheduleNext = (video: HTMLVideoElement) => {
-      if (!isProcessingRef.current) return;
+      if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
       if ('requestVideoFrameCallback' in video) {
         (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+          if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
           // mediaTime is in seconds (camera capture clock); presentationTime
           // is in DOMHighResTimeStamp ms; performance.now() is fallback.
           const ts =
@@ -668,6 +673,7 @@ const Index = () => {
 
   const stopFrameLoop = useCallback(() => {
     isProcessingRef.current = false;
+    frameLoopGenerationRef.current++;
     if (frameLoopRef.current) {
       cancelAnimationFrame(frameLoopRef.current);
       frameLoopRef.current = null;
@@ -682,6 +688,7 @@ const Index = () => {
     console.log('🚀 Iniciando monitoreo...');
     if (navigator.vibrate) navigator.vibrate([200]);
     enterFullScreen();
+    monitoringIntentRef.current = true;
     setShowResults(false);
     setMeasurementSummary(null);
     setElapsedTime(0);
@@ -746,10 +753,16 @@ const Index = () => {
       const stream = (videoEl?.srcObject as MediaStream | null) ?? null;
       const tracks = stream?.getVideoTracks() ?? [];
       const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
+      const cameraStatus = cameraRef.current?.getStreamStatus();
+      const inCameraWarmup = now - monitoringStartedAtRef.current < 10000;
+      if (!hasLiveTrack && (inCameraWarmup || cameraStatus?.starting || cameraStatus?.stoppingPending)) {
+        lastFrameAtRef.current = now;
+        return;
+      }
       if (!stream || !hasLiveTrack) {
         console.warn('🎥 Watchdog: stream dead — bouncing camera (last frame', sinceLast.toFixed(0), 'ms ago)');
         setIsCameraOn(false);
-        window.setTimeout(() => { if (isProcessingRef.current) setIsCameraOn(true); }, 300);
+        window.setTimeout(() => { if (monitoringIntentRef.current && isProcessingRef.current) setIsCameraOn(true); }, 2800);
         lastFrameAtRef.current = now;
         return;
       }
@@ -814,6 +827,7 @@ const Index = () => {
     console.log('🛑 Finalizando medición...');
     playCompletionSound();
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
+    monitoringIntentRef.current = false;
     stopFrameLoop();
     if (watchdogTimerRef.current !== null) {
       window.clearInterval(watchdogTimerRef.current);
@@ -837,10 +851,7 @@ const Index = () => {
       });
     }
     setIsCameraOn(false);
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
+    setCameraStream(null);
     setIsMonitoring(false);
     setIsCalibrating(false);
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
@@ -856,10 +867,11 @@ const Index = () => {
     setElapsedTime(0);
     setCalibrationProgress(0);
     console.log('✅ Medición finalizada y guardada');
-  }, [isMonitoring, isCalibrating, cameraStream, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
+  }, [isMonitoring, isCalibrating, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
 
   const handleReset = useCallback(() => {
     console.log('🔄 Reset completo...');
+    monitoringIntentRef.current = false;
     stopFrameLoop();
     if (watchdogTimerRef.current !== null) {
       window.clearInterval(watchdogTimerRef.current);
@@ -875,10 +887,7 @@ const Index = () => {
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
     frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
     setIsCameraOn(false);
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
+    setCameraStream(null);
     setIsMonitoring(false);
     setShowResults(false);
     setMeasurementSummary(null);
@@ -910,7 +919,7 @@ const Index = () => {
     setCalibrationProgress(0);
     arrhythmiaDetectedRef.current = false;
     console.log('✅ Reset completado');
-  }, [cameraStream, stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
+  }, [stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
 
   const vitalSignsFrameCounter = useRef<number>(0);
   const unstableFrameCounter = useRef<number>(0);
@@ -920,20 +929,27 @@ const Index = () => {
   useEffect(() => {
     if (!lastSignal || !isMonitoring) return;
     
-    console.log('📊 lastSignal recibido:', {
-      filteredValue: lastSignal.filteredValue,
-      quality: lastSignal.quality,
-      fingerDetected: lastSignal.fingerDetected,
-      contactState: (lastSignal as any).contactState,
-      timestamp: lastSignal.timestamp
-    });
-    
     const signalValue = lastSignal.filteredValue;
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
     const noOpticalContact = contactState === 'NO_OPTICAL_CONTACT' || contactState === 'NO_CONTACT';
     const goodPerfusion = contactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' || contactState === 'STABLE_CONTACT';
     const positionQuality = getPositionQuality();
     const motionInfo = getMotionInfo();
+
+    // Per-frame camera/extraction health: records full G1/G2/G3 evidence even
+    // when downstream gates return early, but updates UI only once per second.
+    const rgbStatsForHealth = getRGBStats();
+    cameraQualityRef.current.inspect({
+      redDC: rgbStatsForHealth.redDC,
+      greenDC: rgbStatsForHealth.greenDC,
+      redAC: rgbStatsForHealth.redAC,
+      greenAC: rgbStatsForHealth.greenAC,
+    });
+    const healthNow = performance.now();
+    if (healthNow - lastSignalHealthCommitAtRef.current >= 1000) {
+      lastSignalHealthCommitAtRef.current = healthNow;
+      setSignalHealth(cameraQualityRef.current.getSignalHealth(healthNow));
+    }
 
     // ════════════════════════════════════════════════════════════
     //  FORENSIC TRIPLE GATE — single source of truth for the UI.
@@ -1077,14 +1093,6 @@ const Index = () => {
       return;
     }
     
-    // Si gate1 no pasa pero hay señal, procesar de todos modos para análisis forense
-    console.log('⚠️ Gate1 no pasa pero procesando para análisis:', {
-      gate1: fg?.gate1_optical,
-      contactState: (lastSignal as any)?.contactState,
-      quality: lastSignal.quality,
-      signalValue
-    });
-
     const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
@@ -1112,15 +1120,6 @@ const Index = () => {
     const processingAllowed =
       Number.isFinite(signalValue) &&
       (opticalOk || lastSignal.quality > 0); // Permitir si hay calidad mínima
-
-    console.log('🔍 Processing gate:', {
-      processingAllowed,
-      opticalOk,
-      signalValue,
-      quality: lastSignal.quality,
-      bufferedSeconds,
-      om
-    });
 
     // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
     // independiente de la publicación. Permite suavizar umbrales cuando hay
@@ -1189,16 +1188,8 @@ const Index = () => {
     // ════════════════════════════════════════════════════════════════
     //  ALIMENTACIÓN INCONDICIONAL DEL DETECTOR
     //  El detector procesa SIEMPRE (analiza, aprende morfología, abre gate3)
-    //  independientemente del estado de publicación. Esto rompe el deadlock
-    //  donde morphology necesita morphology para abrirse.
+    //  independientemente del estado de publicación.
     // ════════════════════════════════════════════════════════════════
-    console.log('💓 Procesando heartbeat:', {
-      signalValue,
-      contactState,
-      quality: lastSignal.quality,
-      timestamp: lastSignal.timestamp
-    });
-    
     const heartBeatResult = processHeartBeat(
       signalValue,
       contactState,
@@ -1219,14 +1210,6 @@ const Index = () => {
       }
     );
     
-    console.log('💓 HeartBeat result:', {
-      bpm: heartBeatResult.bpm,
-      bpmConfidence: heartBeatResult.bpmConfidence,
-      isPeak: heartBeatResult.isPeak,
-      beatSQI: heartBeatResult.beatSQI,
-      morphologyGatePass: (heartBeatResult as any).morphologyGatePass
-    });
-
     // Cerrar gate3_morphology con la verdad del detector — SIEMPRE que el
     // detector haya corrido. Esto es lo que permite que forensicPass pueda
     // llegar a true en el próximo frame.
@@ -1379,41 +1362,6 @@ const Index = () => {
           greenAC: rgbStats.greenAC,
           greenDC: rgbStats.greenDC
         });
-      }
-
-      // V9.4 — Camera quality gate. Runs at the same cadence as the rest
-      // of the CIVIL_MODE block (every N frames). If the gate has been
-      // unhappy for ≥ badFrameStreak consecutive samples it returns true
-      // → we bounce isCameraOn off → on, which forces CameraView's start
-      // effect to renegotiate the MediaStream from scratch.
-      const needReinit = cameraQualityRef.current.inspect({
-        redDC:   rgbStats.redDC,
-        greenDC: rgbStats.greenDC,
-        redAC:   rgbStats.redAC,
-        greenAC: rgbStats.greenAC,
-      });
-      setSignalHealth(cameraQualityRef.current.getSignalHealth());
-      // V9.6 — HARD STOP: do not automatically bounce the camera from the
-      // quality gate. On several mobile browsers, tearing down/reopening the
-      // stream destroys torch/exposure stability and causes the visible
-      // "abre y cierra" loop. We keep the full decision log + SIGNAL HEALTH
-      // overlay, but recovery must not interrupt capture while diagnosing
-      // G1/G2/G3 extraction.
-      if (false && needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
-        cameraReinitInFlightRef.current = true;
-        const health = cameraQualityRef.current.getSignalHealth();
-        setSignalHealth(health);
-        console.warn('🔁 Camera quality gate → reinit:', health.message);
-        setIsCameraOn(false);
-        // Allow CameraView's stopCamera() to run, then re-enable.
-        window.setTimeout(() => {
-          if (isProcessingRef.current) {
-            cameraQualityRef.current.reset(); // restart warm-up window
-            setIsCameraOn(true);
-          }
-          // Cooldown: clear in-flight a bit later so we don't loop.
-          window.setTimeout(() => { cameraReinitInFlightRef.current = false; }, 2000);
-        }, 400);
       }
 
       const usableRRData = heartBeatResult.rrData && heartBeatResult.rrData.intervals.length >= 2 && heartBeatResult.bpmConfidence > 0.18

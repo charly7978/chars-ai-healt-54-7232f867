@@ -3,6 +3,15 @@ import React, { useRef, useEffect, forwardRef, useImperativeHandle } from "react
 export interface CameraViewHandle {
   getVideoElement: () => HTMLVideoElement | null;
   getDiagnostics: () => CameraDiagnostics;
+  getStreamStatus: () => CameraStreamStatus;
+}
+
+export interface CameraStreamStatus {
+  active: boolean;
+  starting: boolean;
+  stoppingPending: boolean;
+  liveVideoTracks: number;
+  endedVideoTracks: number;
 }
 
 export interface CameraDiagnostics {
@@ -77,6 +86,16 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   useImperativeHandle(ref, () => ({
     getVideoElement: () => videoRef.current,
     getDiagnostics: () => ({ ...diagnosticsRef.current }),
+    getStreamStatus: () => {
+      const tracks = streamRef.current?.getVideoTracks() ?? [];
+      return {
+        active: streamRef.current?.active ?? false,
+        starting: isStartingRef.current,
+        stoppingPending: stopTimerRef.current !== null,
+        liveVideoTracks: tracks.filter(track => track.readyState === 'live' && track.enabled).length,
+        endedVideoTracks: tracks.filter(track => track.readyState === 'ended').length,
+      };
+    },
   }), []);
 
   useEffect(() => {
@@ -124,6 +143,7 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         }
         streamRef.current = null;
       }
+      diagnosticsRef.current.torchActive = false;
       if (videoRef.current) videoRef.current.srcObject = null;
       isStartingRef.current = false;
     };
