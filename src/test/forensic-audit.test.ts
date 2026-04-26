@@ -43,6 +43,11 @@ const ALLOWLIST: Array<{ file: string; tokens: RegExp[]; reason: string }> = [
     tokens: [/synthetic/i],
     reason: "Test file legitimately uses the word 'synthetic stream'.",
   },
+  {
+    file: "src/components/VitalSign.tsx",
+    tokens: [/normalRange/],
+    reason: "normalRange is a display-only prop used to label 'high/low' on real values; never seeds vitals.",
+  },
 ];
 
 /**
