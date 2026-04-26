@@ -626,11 +626,26 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.gate2Concentration = g2.concentration;
     this.gate2Reason = g2.reason;
 
-    const passAll = this.opticalLive && this.gate2Pass && this.gate3Pass;
+    // Evidencia óptica física (gate independiente, sin morfología).
+    const opticalAccept = this.lastOpticalEvidence?.accept ?? false;
+    const opticalReason = this.lastOpticalEvidence?.reasonText ?? 'SIN EVIDENCIA';
+
+    const passAll = this.opticalLive && opticalAccept && this.gate2Pass && this.gate3Pass;
+    this.publicationGate = passAll;
+
     let livenessReason = 'OK';
     if (!this.opticalLive) livenessReason = this.lastLivenessReason;
+    else if (!opticalAccept) livenessReason = opticalReason;
     else if (!this.gate2Pass) livenessReason = this.gate2Reason;
     else if (!this.gate3Pass) livenessReason = this.gate3Reason;
+
+    const n = this.timedSamples.length;
+    const bufferedSeconds = n > 1
+      ? (this.timedSamples[n - 1].t - this.timedSamples[0].t) / 1000
+      : 0;
+    const effectiveSampleRate = (n >= 2 && bufferedSeconds > 0.1)
+      ? (n - 1) / bufferedSeconds
+      : this.estimatedSampleRate;
 
     return {
       gate1_optical: this.opticalLive,
@@ -641,6 +656,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       spectralPeakHz: this.gate2PeakHz,
       spectralConcentration: this.gate2Concentration,
       livenessReason,
+      opticalEvidence: opticalAccept,
+      opticalReason: this.lastOpticalEvidence?.reason ?? 'OK',
+      opticalReasonText: opticalReason,
+      opticalMetrics: this.lastOpticalEvidence?.metrics ?? null,
+      publicationGate: passAll,
+      effectiveSampleRate,
+      bufferedSeconds,
     };
   }
 
