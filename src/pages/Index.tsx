@@ -585,6 +585,31 @@ const Index = () => {
           }))
         : undefined;
 
+      // Live tuner stats: pick the most recent beat that has fiducials
+      // attached. Updates immediately when params change because morphology
+      // boost is recomputed on the next pending fiducial evaluation.
+      if (showFiducialTuner) {
+        const accepted = heartBeatResult.debug.recentAcceptedBeats;
+        if (accepted && accepted.length > 0) {
+          for (let i = accepted.length - 1; i >= 0; i--) {
+            const b: any = accepted[i];
+            if (b.fiducials) {
+              fiducialBeatsCountRef.current = accepted.length;
+              setFiducialLive({
+                morphologyScore: b.morphologyScore || 0,
+                morphologyValidity: b.fiducials.morphologyValidity || 0,
+                notchDepth: b.fiducials.notchDepth || 0,
+                riseTimeMs: b.fiducials.riseTimeMs || 0,
+                pulseWidth50Ms: b.fiducials.pulseWidth50Ms || 0,
+                reflectionIndex: b.fiducials.reflectionIndex || 0,
+                beatsAnalyzed: accepted.length,
+              });
+              break;
+            }
+          }
+        }
+      }
+
       setUpstreamContext({
         contactStable: stableHumanSignal,
         pressureOptimal,
