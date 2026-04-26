@@ -18,6 +18,7 @@ import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
+import { CameraQualityGate } from "@/modules/signal-processing/CameraQualityGate";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
 
@@ -369,6 +370,12 @@ const Index = () => {
   // Motion classifier: drops frames during sustained SEVERE motion with a
   // hard 50% drop-rate cap so the operator never loses the live trace.
   const motionClassifierRef = useRef<MotionClassifier>(new MotionClassifier());
+  // V9.4 — Camera data-quality watchdog. Inspects G1 (greenDC), G2 (greenAC)
+  // and G3 (red/green ratio) every CIVIL_MODE vitals tick. If the camera
+  // delivers black / saturated / frozen / no-finger frames for ≥ 1 s, the
+  // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
+  const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
+  const cameraReinitInFlightRef = useRef<boolean>(false);
   // Cached/last-trusted sample rate, used to keep delineation stable when
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
