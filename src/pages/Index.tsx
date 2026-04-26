@@ -1290,7 +1290,7 @@ const Index = () => {
 
       <div className="flex-1 relative">
         <div className="absolute inset-0">
-          <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
+          <CameraView ref={cameraRef} onStreamReady={ppgCamera.onStreamReady} isMonitoring={isCameraOn} />
         </div>
 
         {isMonitoring && signalHealth && signalHealth.reason !== 'OK' && (
