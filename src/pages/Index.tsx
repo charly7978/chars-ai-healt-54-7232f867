@@ -617,23 +617,40 @@ const Index = () => {
       canvasSized = true;
     };
 
+    // Inline rVFC-driven stall detection: the moment a frame fires, we
+    // measure how long it has been since the previous frame. If that gap
+    // exceeds STALL_MS we assume the loop self-recovered (rVFC eventually
+    // fired) and just bookkeep a soft-restart event for telemetry. We do
+    // NOT use setInterval / requestAnimationFrame to poll — dead-stream
+    // detection is event-driven via track.onended / track.onmute below.
+    const STALL_MS = 1500;
+
     const captureOneFrame = (frameTimestamp: number) => {
       if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
       const video = cameraRef.current?.getVideoElement();
       if (!video || video.readyState < 2 || video.videoWidth === 0) {
-        frameLoopRef.current = requestAnimationFrame(() =>
-          captureOneFrame(performance.now())
-        );
+        // Wait for the next real video frame instead of polling rAF.
+        scheduleNext(video ?? null);
         return;
       }
       if (!canvasSized) sizeCanvasToVideo(video);
 
+      const nowMs = performance.now();
+      const prevFrameAt = lastFrameAtRef.current;
+      if (prevFrameAt > 0 && nowMs - prevFrameAt > STALL_MS) {
+        // The rVFC chain stalled and just recovered (browser tab returned
+        // to foreground, or the camera pipeline was momentarily blocked).
+        // No restart needed — rVFC is back. Just bookkeep for diagnostics.
+        softRestartCountRef.current++;
+        lastSoftRestartAtRef.current = nowMs;
+        console.warn('🔄 rVFC stall recovered:', (nowMs - prevFrameAt).toFixed(0), 'ms gap (#', softRestartCountRef.current, ')');
+      }
+      lastFrameAtRef.current = nowMs;
+
       try {
         // Motion gate: under sustained SEVERE motion, skip the heavy
-        // drawImage + getImageData + processFrame work, but log the drop
-        // so the rolling 50% drop-rate cap can hold us back when needed.
+        // drawImage + getImageData + processFrame work.
         const mc = motionClassifierRef.current;
-        const nowMs = performance.now();
         const drop = mc.shouldDropFrame(nowMs);
         mc.markFrame(nowMs, drop);
         if (!drop) {
@@ -641,21 +658,21 @@ const Index = () => {
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           processFrame(imageData, frameTimestamp);
         }
-        lastFrameAtRef.current = nowMs;
       } catch (e) {
-        const now = performance.now();
-        if (now - lastErrorLogAt > 2000) {
-          lastErrorLogAt = now;
+        if (nowMs - lastErrorLogAt > 2000) {
+          lastErrorLogAt = nowMs;
           console.error('Frame capture error:', e);
         }
       }
       scheduleNext(video);
     };
 
-    const scheduleNext = (video: HTMLVideoElement) => {
+    const scheduleNext = (video: HTMLVideoElement | null) => {
       if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
-      if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+      const v = video ?? cameraRef.current?.getVideoElement() ?? null;
+      if (!v) return; // nothing to schedule on; the camera-on effect will restart us
+      if ('requestVideoFrameCallback' in v) {
+        (v as any).requestVideoFrameCallback((_now: number, metadata: any) => {
           if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
           // mediaTime is in seconds (camera capture clock); presentationTime
           // is in DOMHighResTimeStamp ms; performance.now() is fallback.
@@ -666,13 +683,16 @@ const Index = () => {
           captureOneFrame(ts);
         });
       } else {
+        // Last-resort fallback for browsers without rVFC. Still no
+        // setInterval — we hop on the next animation frame instead.
         frameLoopRef.current = requestAnimationFrame(() =>
           captureOneFrame(performance.now())
         );
       }
     };
 
-    captureOneFrame(performance.now());
+    // Kick the chain off a true rVFC tick when possible (no rAF priming).
+    scheduleNext(null);
   }, [processFrame]);
 
   const stopFrameLoop = useCallback(() => {
