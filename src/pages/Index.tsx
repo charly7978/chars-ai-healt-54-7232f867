@@ -18,7 +18,7 @@ import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
-import { CameraQualityGate } from "@/modules/signal-processing/CameraQualityGate";
+import { CameraQualityGate, type CameraSignalHealth } from "@/modules/signal-processing/CameraQualityGate";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
 
@@ -67,6 +67,7 @@ const Index = () => {
   // - not yet monitoring, no finger contact, low quality, or after results
   // Otherwise auto-hide after a few seconds so the waveform stays clean.
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [signalHealth, setSignalHealth] = useState<CameraSignalHealth | null>(null);
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
     arrhythmiaBeats: number;
@@ -1313,10 +1314,12 @@ const Index = () => {
         redAC:   rgbStats.redAC,
         greenAC: rgbStats.greenAC,
       });
+      setSignalHealth(cameraQualityRef.current.getSignalHealth());
       if (needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
         cameraReinitInFlightRef.current = true;
-        const verdict = cameraQualityRef.current.getStats().lastVerdict;
-        console.warn('🔁 Camera quality gate → reinit:', verdict.reason);
+        const health = cameraQualityRef.current.getSignalHealth();
+        setSignalHealth(health);
+        console.warn('🔁 Camera quality gate → reinit:', health.message);
         setIsCameraOn(false);
         // Allow CameraView's stopCamera() to run, then re-enable.
         window.setTimeout(() => {
@@ -1473,6 +1476,35 @@ const Index = () => {
         <div className="absolute inset-0">
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
+
+        {isMonitoring && signalHealth && signalHealth.reason !== 'OK' && (
+          <div className="auto-hide absolute left-3 top-3 z-30 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background/90 p-3 font-mono text-[11px] text-foreground shadow-lg backdrop-blur-sm">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="font-bold tracking-wide text-primary">SIGNAL HEALTH</span>
+              <span className={signalHealth.shouldReinitialize ? 'font-bold text-destructive' : 'text-muted-foreground'}>
+                {signalHealth.shouldReinitialize ? 'REINIT PENDIENTE' : 'STREAM ACTIVO'}
+              </span>
+            </div>
+            <div className="mb-2 text-muted-foreground">{signalHealth.message}</div>
+            <div className="grid grid-cols-3 gap-2">
+              {[signalHealth.g1, signalHealth.g2, signalHealth.g3].map((g) => (
+                <div key={g.label} className="rounded border border-border/70 bg-muted/40 px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold">{g.label}</span>
+                    <span className={g.ok ? 'text-primary' : 'text-destructive'}>{g.ok ? 'OK' : g.failure}</span>
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    {g.label === 'G3' ? g.value.toFixed(2) : g.value.toFixed(3)}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 flex justify-between gap-3 text-muted-foreground">
+              <span>streak {signalHealth.badStreak}</span>
+              <span>warmup {Math.ceil(signalHealth.warmupRemainingMs / 1000)}s</span>
+            </div>
+          </div>
+        )}
 
         {/* ════════════════════════════════════════════════════════════
             PPGSignalMeter - FULL SCREEN 100% - MONITOR CARDÍACO FORENSE

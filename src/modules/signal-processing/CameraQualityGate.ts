@@ -59,6 +59,19 @@ export type CameraQualityVerdict =
   | { ok: true;  reason: 'OK' }
   | { ok: false; reason: 'BLACK' | 'SATURATED' | 'FROZEN' | 'NO_FINGER' | 'INVALID' };
 
+export interface CameraSignalHealth {
+  reason: CameraQualityVerdict['reason'];
+  message: string;
+  failing: string[];
+  g1: { label: 'G1'; value: number; ok: boolean; failure: 'BLACK' | 'SATURATED' | 'INVALID' | null };
+  g2: { label: 'G2'; value: number; ok: boolean; failure: 'FROZEN' | 'INVALID' | null };
+  g3: { label: 'G3'; value: number; ok: boolean; failure: 'NO_FINGER' | 'INVALID' | null };
+  framesSeen: number;
+  badStreak: number;
+  warmupRemainingMs: number;
+  shouldReinitialize: boolean;
+}
+
 export class CameraQualityGate {
   private cfg: CameraQualityConfig = { ...DEFAULT };
   private badStreak = 0;
@@ -66,6 +79,7 @@ export class CameraQualityGate {
   private framesSeen = 0;
   private framesBad = 0;
   private lastVerdict: CameraQualityVerdict = { ok: true, reason: 'OK' };
+  private lastInput: CameraQualityInputs = { redDC: 0, greenDC: 0, redAC: 0, greenAC: 0 };
   /** Wall-clock of the most recent reset() — used as warm-up anchor. */
   private warmupStart = performance.now();
   /** No reinit recommendations during the first warmupMs after reset. */
@@ -78,6 +92,7 @@ export class CameraQualityGate {
   /** Per-frame inspection. Returns `true` when the host should reinit camera. */
   inspect(input: CameraQualityInputs, nowMs = performance.now()): boolean {
     this.framesSeen++;
+    this.lastInput = input;
     const verdict = this.classify(input);
     this.lastVerdict = verdict;
 
@@ -94,6 +109,11 @@ export class CameraQualityGate {
 
     if (this.badStreak < this.cfg.badFrameStreak) return false;
     if (nowMs - this.lastReinitAt < this.cfg.reinitCooldownMs) return false;
+    // Do NOT bounce the camera for normal operator states. NO_FINGER and
+    // low early AC (FROZEN) should guide the user / accumulate signal, not
+    // tear down the stream repeatedly. Only hard camera-output failures may
+    // trigger an automatic recovery.
+    if (!['BLACK', 'SATURATED', 'INVALID'].includes(verdict.reason)) return false;
 
     this.lastReinitAt = nowMs;
     this.badStreak = 0;
@@ -131,6 +151,40 @@ export class CameraQualityGate {
       lastVerdict: this.lastVerdict,
       lastReinitAt: this.lastReinitAt,
     };
+  }
+
+  getSignalHealth(nowMs = performance.now()): CameraSignalHealth {
+    const i = this.lastInput;
+    const invalid = !Number.isFinite(i.greenDC) || !Number.isFinite(i.redDC) ||
+      !Number.isFinite(i.greenAC) || !Number.isFinite(i.redAC);
+    const rg = i.greenDC > 0 ? i.redDC / i.greenDC : 0;
+    const g1Failure = invalid ? 'INVALID' : i.greenDC < this.cfg.greenDcMin ? 'BLACK' : i.greenDC > this.cfg.greenDcMax ? 'SATURATED' : null;
+    const g2Failure = invalid ? 'INVALID' : i.greenAC < this.cfg.greenAcMin ? 'FROZEN' : null;
+    const g3Failure = invalid ? 'INVALID' : rg < this.cfg.rgRatioMin ? 'NO_FINGER' : null;
+    const failing = [g1Failure && `G1:${g1Failure}`, g2Failure && `G2:${g2Failure}`, g3Failure && `G3:${g3Failure}`].filter(Boolean) as string[];
+    const warmupRemainingMs = Math.max(0, this.warmupMs - (nowMs - this.warmupStart));
+    const hardFailure = ['BLACK', 'SATURATED', 'INVALID'].includes(this.lastVerdict.reason);
+    const shouldReinitialize = hardFailure && warmupRemainingMs === 0 && this.badStreak >= this.cfg.badFrameStreak &&
+      nowMs - this.lastReinitAt >= this.cfg.reinitCooldownMs;
+
+    return {
+      reason: this.lastVerdict.reason,
+      message: this.toMessage(this.lastVerdict.reason, failing, shouldReinitialize),
+      failing,
+      g1: { label: 'G1', value: i.greenDC, ok: !g1Failure, failure: g1Failure },
+      g2: { label: 'G2', value: i.greenAC, ok: !g2Failure, failure: g2Failure },
+      g3: { label: 'G3', value: rg, ok: !g3Failure, failure: g3Failure },
+      framesSeen: this.framesSeen,
+      badStreak: this.badStreak,
+      warmupRemainingMs,
+      shouldReinitialize,
+    };
+  }
+
+  private toMessage(reason: CameraQualityVerdict['reason'], failing: string[], shouldReinitialize: boolean): string {
+    if (reason === 'OK') return 'G1/G2/G3 dentro de rango';
+    const action = shouldReinitialize ? ' · reinicio de cámara preparado' : ' · manteniendo stream activo';
+    return `${failing.join(' + ') || reason}${action}`;
   }
 
   reset(): void {
