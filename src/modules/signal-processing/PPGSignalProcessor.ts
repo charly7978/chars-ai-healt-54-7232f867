@@ -646,18 +646,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       : Math.min(18, this.signalQuality * 0.45);
     const finalQuality = gatedQuality * motionQualPenalty;
 
-    // --- LOGGING ---
-    const now = performance.now();
-    this.processingTimeMs = now - t0;
-    if (now - this.lastLogTime >= 3000) {
-      this.lastLogTime = now;
-      console.log(
-        `📷 PPG [${source.label}] Q=${gatedQuality.toFixed(0)} PI=${perfusionIndex.toFixed(3)} ` +
-        `${this.exportedContactState} P:${this.pressureState} ` +
-        `FPS=${this.realFps.toFixed(0)} Clip:${(roi.clipHighRatio * 100).toFixed(1)}% ` +
-        `Cov:${(this.smoothedCoverage * 100).toFixed(0)}% Proc:${this.processingTimeMs.toFixed(1)}ms`
-      );
-    }
+    // --- TELEMETRY ---
+    // Hot path: no console output. Operators read live state through the
+    // forensic overlay / debug panel. The processor still tracks per-frame
+    // processing time for the SR diagnostics tab.
+    this.processingTimeMs = performance.now() - t0;
 
     this.onSignalReady({
       timestamp,
