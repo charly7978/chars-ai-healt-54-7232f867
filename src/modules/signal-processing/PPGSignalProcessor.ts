@@ -8,6 +8,16 @@ import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
 import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
 
+/**
+ * Conversión sRGB (0..255) → intensidad lineal [0..1] según IEC 61966-2-1.
+ * Necesaria para que la Optical Density represente absorbancia física real
+ * (la cámara aplica gamma ≈ 2.2 que comprime la pulsatilidad).
+ */
+function srgbToLinear(c8: number): number {
+  const x = Math.max(0, Math.min(255, c8)) / 255;
+  return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+}
+
 // Extended contact states
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
 
