@@ -10,10 +10,17 @@ import { useSaveMeasurement } from "@/hooks/useSaveMeasurement";
 import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
 import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
-// Componentes forenses esenciales únicamente
+import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
+import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
+import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
+import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
+import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
+import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
+import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
+import RecalibrationLogPanel from "@/components/RecalibrationLogPanel";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -66,7 +73,37 @@ const Index = () => {
     normalPercent: number;
   } | null>(null);
 
-  // Modo forense simplificado - sin componentes de calibración ni diagnóstico SR
+  // ── Fiducial tuner (dev/research panel) ──────────────────────────────────
+  // Toggle by triple-tapping the BPM card, or via ?tuner=1 URL flag.
+  const [showFiducialTuner, setShowFiducialTuner] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("tuner") === "1";
+  });
+  // Clinical calibration wizard. Opened on demand (?calibrate=1 or button).
+  const [showCalibration, setShowCalibration] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("calibrate") === "1";
+  });
+  const [calibrationBaseline, setCalibrationBaseline] = useState<CalibrationBaseline | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = localStorage.getItem('ppg.calibration.baseline');
+      return raw ? (JSON.parse(raw) as CalibrationBaseline) : null;
+    } catch { return null; }
+  });
+  // Highlight the CAL button briefly when the watchdog fires a prompt.
+  const [calPromptHighlight, setCalPromptHighlight] = useState(false);
+  const calPromptTimerRef = useRef<number | null>(null);
+  const triggerCalPromptHighlight = useCallback(() => {
+    setCalPromptHighlight(true);
+    if (calPromptTimerRef.current) window.clearTimeout(calPromptTimerRef.current);
+    calPromptTimerRef.current = window.setTimeout(() => setCalPromptHighlight(false), 6000);
+  }, []);
+  // Independent toggle for the SR diagnostics panel: ?srDiag=1
+  const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("srDiag") === "1";
+  });
   // Forensic gate overlay: visible by default in FORENSIC_MODE; can be forced
   // via ?forensic=1 or hidden via ?forensic=0 regardless of mode.
   const [showForensicOverlay] = useState<boolean>(() => {
@@ -302,15 +339,941 @@ const Index = () => {
     vibrate(60);
     toast({
       title: '✓ Sesión forense exportada',
+      description: `${log.length} muestras · JSON + CSV descargados`,
+      duration: 2600,
+    });
+    setSessionLogSize(log.length);
+  }, [vibrate]);
+  const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
+    morphologyScore: 0,
+    morphologyValidity: 0,
+    notchDepth: 0,
+    riseTimeMs: 0,
+    pulseWidth50Ms: 0,
+    reflectionIndex: 0,
+    beatsAnalyzed: 0,
+  });
   const fiducialBeatsCountRef = useRef(0);
 
   const measurementTimerRef = useRef<number | null>(null);
   const totalBeatsRef = useRef(0);
   const arrhythmiaBeatsRef = useRef(0);
-// ...
+  const lastArrhythmiaCountForBeatsRef = useRef(0);
+  const arrhythmiaDetectedRef = useRef(false);
+  const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
+  const cameraRef = useRef<CameraViewHandle>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const frameLoopRef = useRef<number | null>(null);
+  const isProcessingRef = useRef(false);
+  const frameTimestampHistoryRef = useRef<number[]>([]);
+  // Motion classifier: drops frames during sustained SEVERE motion with a
+  // hard 50% drop-rate cap so the operator never loses the live trace.
+  const motionClassifierRef = useRef<MotionClassifier>(new MotionClassifier());
+  // Cached/last-trusted sample rate, used to keep delineation stable when
+  // frame timestamps are momentarily missing, sparse or jittery.
+  const cachedSampleRateRef = useRef<number>(30);
+  const cachedSampleRateValidRef = useRef<boolean>(false);
+
+  // Auto-calibrating SR estimator with stall detection.
+  const srEstimatorRef = useRef<SampleRateEstimator>(new SampleRateEstimator());
+  // Timestamp (ms, performance.now) when the current monitoring session started.
+  const srCalibrationStartRef = useRef<number>(0);
+  const srCalibrationDoneRef = useRef<boolean>(false);
+  const SR_CALIBRATION_DURATION_MS = 4000; // ~4 s of timestamps to fingerprint jitter
+
+  const EMA_ALPHA = 0.3;
+  const emaRef = useRef({
+    bpm: 0, spo2: 0, systolic: 0, diastolic: 0,
+    glucose: 0, cholesterol: 0, triglycerides: 0,
+  });
+
+  const applyEMA = useCallback((prev: number, next: number): number => {
+    if (next === 0) return 0;
+    if (prev === 0) return next;
+    return Math.round(prev * (1 - EMA_ALPHA) + next * EMA_ALPHA);
+  }, []);
+
+  const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
+    // Fallback: if no valid timestamp, use performance.now() so we still feed
+    // a real monotonic clock instead of cold-starting at the default SR.
+    const ts = (typeof timestamp === 'number' && isFinite(timestamp))
+      ? timestamp
+      : performance.now();
+
+    const est = srEstimatorRef.current.push(ts, performance.now());
+
+    // Auto-calibration: after ~4s of timestamps, derive a window/MAD that
+    // matches the device's actual jitter and freeze the recommendation.
+    if (!srCalibrationDoneRef.current) {
+      if (srCalibrationStartRef.current === 0) {
+        srCalibrationStartRef.current = performance.now();
+      } else if (performance.now() - srCalibrationStartRef.current >= SR_CALIBRATION_DURATION_MS) {
+        const cal = srEstimatorRef.current.applyCalibration();
+        if (cal.acceptedSamples >= 8) {
+          srCalibrationDoneRef.current = true;
+        }
+      }
+    }
+
+    // Mirror state into the legacy refs (other parts of Index still read them).
+    cachedSampleRateRef.current = est.sampleRate;
+    cachedSampleRateValidRef.current = est.valid;
+    return est.sampleRate;
+  }, []);
+
+  const computeRRStability = useCallback((intervals: number[]): number => {
+    if (!intervals || intervals.length < 3) return 0;
+    const recent = intervals.slice(-8);
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const variance = recent.reduce((sum, rr) => sum + (rr - mean) ** 2, 0) / recent.length;
+    const cv = Math.sqrt(variance) / Math.max(1, mean);
+    return Math.max(0, Math.min(1, 1 - cv * 2));
+  }, []);
+
+  const { 
+    startProcessing, 
+    stopProcessing, 
+    lastSignal, 
+    processFrame, 
+    isProcessing, 
+    framesProcessed,
+    getRGBStats,
+    getPositionQuality,
+    getMotionInfo,
+    setMorphologyGate,
+  } = useSignalProcessor();
+  
+  const { 
+    processSignal: processHeartBeat, 
+    setArrhythmiaState,
+    reset: resetHeartBeat,
+    setFiducialParams,
+    getFiducialParams,
+  } = useHeartBeatProcessor();
+  
+  const { 
+    processSignal: processVitalSigns, 
+    setRGBData,
+    setUpstreamContext,
+    reset: resetVitalSigns,
+    fullReset: fullResetVitalSigns,
+    hasValidPressureEstimate,
+    lastValidResults,
+    startCalibration,
+    forceCalibrationCompletion,
+    getCalibrationProgress
+  } = useVitalSignsProcessor();
+  
+  const { saveMeasurement } = useSaveMeasurement();
+  const { analysis, isAnalyzing, analyzeVitals, clearAnalysis } = useHealthAnalysis();
+  const [showAIAnalysis, setShowAIAnalysis] = useState(false);
 
   useEffect(() => {
-    // ...
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+      // Initial size; adapted to native video size at first frame.
+      canvasRef.current.width = 480;
+      canvasRef.current.height = 360;
+      ctxRef.current = canvasRef.current.getContext('2d', {
+        willReadFrequently: true,
+        alpha: false,
+        desynchronized: true,
+      });
+    }
+  }, []);
+
+  const enterFullScreen = async () => {
+    if (isFullscreen) return;
+    try {
+      const docEl = document.documentElement;
+      if (docEl.requestFullscreen) {
+        await docEl.requestFullscreen();
+      } else if ((docEl as any).webkitRequestFullscreen) {
+        await (docEl as any).webkitRequestFullscreen();
+      }
+      if (screen.orientation?.lock) {
+        await screen.orientation.lock('portrait').catch(() => {});
+      }
+      setIsFullscreen(true);
+    } catch (err) {
+      console.log('Error pantalla completa:', err);
+    }
+  };
+  
+  const exitFullScreen = () => {
+    if (!isFullscreen) return;
+    try {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      } else if ((document as any).webkitExitFullscreen) {
+        (document as any).webkitExitFullscreen();
+      }
+      screen.orientation?.unlock();
+      setIsFullscreen(false);
+    } catch {}
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => enterFullScreen(), 1000);
+    const handleFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const preventScroll = (e: Event) => e.preventDefault();
+    document.body.addEventListener('touchmove', preventScroll, { passive: false });
+    document.body.addEventListener('scroll', preventScroll, { passive: false });
+    return () => {
+      document.body.removeEventListener('touchmove', preventScroll);
+      document.body.removeEventListener('scroll', preventScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (lastValidResults && !isMonitoring) {
+      setVitalSigns(lastValidResults);
+      setShowResults(true);
+    }
+  }, [lastValidResults, isMonitoring]);
+
+  const startFrameLoop = useCallback(() => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    
+    const canvas = canvasRef.current;
+    const ctx = ctxRef.current;
+    if (!canvas || !ctx) {
+      isProcessingRef.current = false;
+      return;
+    }
+
+    // Forensic capture loop — single hot path. No per-frame logging.
+    //
+    // Frame timing strategy (in priority order):
+    //   1. metadata.mediaTime (s) → ms, the camera's authoritative
+    //      capture clock; immune to main-thread jank.
+    //   2. metadata.presentationTime (ms) — DOMHighResTimeStamp at the
+    //      moment the frame was made available to the page.
+    //   3. performance.now() fallback for browsers without rVFC.
+    //
+    // Capture canvas is sized to (native_w / 2, native_h / 2) on first
+    // frame, capped at 640×480 pixels. This keeps the ROI mask working
+    // on a high-fidelity downscale without paying full-frame imageData
+    // cost on mobile GPUs.
+    let canvasSized = false;
+    let lastErrorLogAt = 0;
+
+    const sizeCanvasToVideo = (video: HTMLVideoElement) => {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+      // Aim for ~2× the legacy 320×240 (= 4× the pixel count) but cap
+      // at 640×480 so getImageData stays under ~1.2 ms on mid-range phones.
+      const targetMaxW = 640;
+      const scale = Math.min(1, targetMaxW / vw);
+      const w = Math.max(320, Math.round(vw * scale));
+      const h = Math.max(240, Math.round(vh * scale));
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      canvasSized = true;
+    };
+
+    const captureOneFrame = (frameTimestamp: number) => {
+      if (!isProcessingRef.current) return;
+      const video = cameraRef.current?.getVideoElement();
+      if (!video || video.readyState < 2 || video.videoWidth === 0) {
+        frameLoopRef.current = requestAnimationFrame(() =>
+          captureOneFrame(performance.now())
+        );
+        return;
+      }
+      if (!canvasSized) sizeCanvasToVideo(video);
+
+      try {
+        // Motion gate: under sustained SEVERE motion, skip the heavy
+        // drawImage + getImageData + processFrame work, but log the drop
+        // so the rolling 50% drop-rate cap can hold us back when needed.
+        const mc = motionClassifierRef.current;
+        const nowMs = performance.now();
+        const drop = mc.shouldDropFrame(nowMs);
+        mc.markFrame(nowMs, drop);
+        if (!drop) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          processFrame(imageData, frameTimestamp);
+        }
+      } catch (e) {
+        const now = performance.now();
+        if (now - lastErrorLogAt > 2000) {
+          lastErrorLogAt = now;
+          console.error('Frame capture error:', e);
+        }
+      }
+      scheduleNext(video);
+    };
+
+    const scheduleNext = (video: HTMLVideoElement) => {
+      if (!isProcessingRef.current) return;
+      if ('requestVideoFrameCallback' in video) {
+        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+          // mediaTime is in seconds (camera capture clock); presentationTime
+          // is in DOMHighResTimeStamp ms; performance.now() is fallback.
+          const ts =
+            (typeof metadata?.mediaTime === 'number' ? metadata.mediaTime * 1000 : null)
+            ?? (typeof metadata?.presentationTime === 'number' ? metadata.presentationTime : null)
+            ?? performance.now();
+          captureOneFrame(ts);
+        });
+      } else {
+        frameLoopRef.current = requestAnimationFrame(() =>
+          captureOneFrame(performance.now())
+        );
+      }
+    };
+
+    captureOneFrame(performance.now());
+  }, [processFrame]);
+
+  const stopFrameLoop = useCallback(() => {
+    isProcessingRef.current = false;
+    if (frameLoopRef.current) {
+      cancelAnimationFrame(frameLoopRef.current);
+      frameLoopRef.current = null;
+    }
+    // Release the devicemotion listener so the IMU sleeps between sessions.
+    motionClassifierRef.current.stop();
+  }, []);
+
+  const startMonitoring = useCallback(() => {
+    if (isMonitoring) return;
+    console.log('🚀 Iniciando monitoreo...');
+    if (navigator.vibrate) navigator.vibrate([200]);
+    enterFullScreen();
+    setShowResults(false);
+    setMeasurementSummary(null);
+    setElapsedTime(0);
+    totalBeatsRef.current = 0;
+    arrhythmiaBeatsRef.current = 0;
+    lastArrhythmiaCountForBeatsRef.current = 0;
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    // Reset gate-alert state so users get fresh transitions in the new session.
+    prevGatesRef.current = { g1: false, g2: false, g3: false, all: false };
+    lastAlertAtRef.current = {};
+    forensicGateRef.current = null;
+    lastOverlayCommitRef.current = 0;
+    // Reset session log for a fresh forensic export.
+    sessionLogRef.current = [];
+    setSessionLogSize(0);
+    validSamplesRef.current = 0;
+    noiseSamplesRef.current = 0;
+    setValidSamples(0);
+    setNoiseSamples(0);
+    // Reset auto-relax tracking each new session.
+    consecutiveAcceptedRef.current = 0;
+    if (autoRelaxAppliedRef.current && preRelaxRef.current) {
+      // Restore user-set thresholds before next session.
+      setAcceptedRatioMin(preRelaxRef.current.ratio);
+      setWarmupSamples(preRelaxRef.current.warmup);
+    }
+    autoRelaxAppliedRef.current = false;
+    preRelaxRef.current = null;
+    setAutoRelaxActive(false);
+    sessionStartIsoRef.current = new Date().toISOString();
+    sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
+    setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
+    // Iniciar procesamiento de señal primero
+    startProcessing();
+    // Start the IMU motion classifier (no-op on platforms without devicemotion).
+    motionClassifierRef.current.start().catch(() => {});
+    // Activar cámara
+    setIsCameraOn(true);
+    // Activar monitoreo
+    setIsMonitoring(true);
+    if (measurementTimerRef.current) clearInterval(measurementTimerRef.current);
+    measurementTimerRef.current = window.setInterval(() => setElapsedTime(prev => prev + 1), 1000);
+    setIsCalibrating(true);
+    startCalibration();
+    // FORENSIC: skip the 3s "calibration" gate. Start reporting pulse from
+    // the first morphology-validated beat. CIVIL keeps the legacy 3s window.
+    if (FORENSIC_MODE) setIsCalibrating(false);
+    else setTimeout(() => setIsCalibrating(false), 3000);
+  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
+
+  const handleStreamReady = useCallback((stream: MediaStream) => {
+    console.log('📹 Stream recibido');
+    setCameraStream(stream);
+    setTimeout(() => {
+      const video = cameraRef.current?.getVideoElement();
+      if (video && video.readyState >= 2) {
+        console.log('✅ Video listo:', video.videoWidth, 'x', video.videoHeight);
+        startFrameLoop();
+      } else {
+        const checkReady = setInterval(() => {
+          const v = cameraRef.current?.getVideoElement();
+          if (v && v.readyState >= 2 && v.videoWidth > 0) {
+            clearInterval(checkReady);
+            console.log('✅ Video listo (retry):', v.videoWidth, 'x', v.videoHeight);
+            startFrameLoop();
+          }
+        }, 100);
+        setTimeout(() => clearInterval(checkReady), 5000);
+      }
+    }, 500);
+  }, [startFrameLoop]);
+
+  const finalizeMeasurement = useCallback(async () => {
+    if (!isMonitoring) return;
+    console.log('🛑 Finalizando medición...');
+    playCompletionSound();
+    if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
+    stopFrameLoop();
+    if (measurementTimerRef.current) {
+      clearInterval(measurementTimerRef.current);
+      measurementTimerRef.current = null;
+    }
+    stopProcessing();
+    if (isCalibrating) forceCalibrationCompletion();
+    const savedResults = resetVitalSigns();
+    // FORENSIC: never persist vital-signs records that include SpO2/BP/etc.
+    // when running in forensic mode — those numbers are only valid in CIVIL.
+    if (CIVIL_MODE && (savedResults || vitalSigns.spo2 > 0)) {
+      const dataToSave = savedResults || vitalSigns;
+      await saveMeasurement({
+        heartRate,
+        vitalSigns: dataToSave,
+        signalQuality: lastSignal?.quality || 0
+      });
+    }
+    setIsCameraOn(false);
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+    setIsMonitoring(false);
+    setIsCalibrating(false);
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    if (savedResults) setVitalSigns(savedResults);
+    setShowResults(true);
+    const total = totalBeatsRef.current;
+    const arrBeats = arrhythmiaBeatsRef.current;
+    setMeasurementSummary({
+      totalBeats: total,
+      arrhythmiaBeats: arrBeats,
+      normalPercent: total > 0 ? Math.round(((total - arrBeats) / total) * 100) : 100
+    });
+    setElapsedTime(0);
+    setCalibrationProgress(0);
+    console.log('✅ Medición finalizada y guardada');
+  }, [isMonitoring, isCalibrating, cameraStream, stopFrameLoop, stopProcessing, forceCalibrationCompletion, resetVitalSigns, saveMeasurement, heartRate, vitalSigns, lastSignal]);
+
+  const handleReset = useCallback(() => {
+    console.log('🔄 Reset completo...');
+    stopFrameLoop();
+    if (measurementTimerRef.current) {
+      clearInterval(measurementTimerRef.current);
+      measurementTimerRef.current = null;
+    }
+    stopProcessing();
+    fullResetVitalSigns();
+    resetHeartBeat();
+    emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    setIsCameraOn(false);
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+    setIsMonitoring(false);
+    setShowResults(false);
+    setMeasurementSummary(null);
+    setIsCalibrating(false);
+    setElapsedTime(0);
+    setHeartRate(0);
+    totalBeatsRef.current = 0;
+    arrhythmiaBeatsRef.current = 0;
+    lastArrhythmiaCountForBeatsRef.current = 0;
+    unstableFrameCounter.current = 0;
+    setHeartbeatSignal(0);
+    setBeatMarker(0);
+    setRRIntervals([]);
+    setVitalSigns({ 
+      spo2: 0,
+      glucose: 0,
+      pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+      arrhythmiaCount: 0,
+      arrhythmiaStatus: "SIN ARRITMIAS|0",
+      lipids: { totalCholesterol: 0, triglycerides: 0 },
+      isCalibrating: false,
+      calibrationProgress: 0,
+      lastArrhythmiaData: undefined,
+      signalQuality: 0,
+      measurementConfidence: 'INVALID'
+    });
+    setArrhythmiaCount("--");
+    lastArrhythmiaData.current = null;
+    setCalibrationProgress(0);
+    arrhythmiaDetectedRef.current = false;
+    console.log('✅ Reset completado');
+  }, [cameraStream, stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
+
+  const vitalSignsFrameCounter = useRef<number>(0);
+  const unstableFrameCounter = useRef<number>(0);
+  const UNSTABLE_ZERO_THRESHOLD = 15;
+  const VITALS_PROCESS_EVERY_N_FRAMES = 3;
+  
+  useEffect(() => {
+    if (!lastSignal || !isMonitoring) return;
+    
+    console.log('📊 lastSignal recibido:', {
+      filteredValue: lastSignal.filteredValue,
+      quality: lastSignal.quality,
+      fingerDetected: lastSignal.fingerDetected,
+      contactState: (lastSignal as any).contactState,
+      timestamp: lastSignal.timestamp
+    });
+    
+    const signalValue = lastSignal.filteredValue;
+    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
+    const noOpticalContact = contactState === 'NO_OPTICAL_CONTACT' || contactState === 'NO_CONTACT';
+    const goodPerfusion = contactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' || contactState === 'STABLE_CONTACT';
+    const positionQuality = getPositionQuality();
+    const motionInfo = getMotionInfo();
+
+    // ════════════════════════════════════════════════════════════
+    //  FORENSIC TRIPLE GATE — single source of truth for the UI.
+    //  If passAll is false → zero everything. No waveform, no BPM, no
+    //  vitals. This is what physically prevents "measuring the air".
+    // ════════════════════════════════════════════════════════════
+    const fg = (lastSignal as any).forensicGate as
+      | { passAll: boolean; gate1_optical: boolean; gate2_spectral: boolean; gate3_morphology: boolean; livenessReason: string; cardiacSNRdB: number; spectralPeakHz: number }
+      | undefined;
+    const forensicPass = !!fg?.passAll;
+
+    // Mirror the gate snapshot into a ref every frame (cheap), but only
+    // commit it to React state at most every OVERLAY_MIN_INTERVAL_MS so the
+    // overlay re-render rate is decoupled from the camera frame rate. This
+    // keeps the camera preview perfectly smooth.
+    if (fg) {
+      const snap: ForensicGateSnapshot = {
+        gate1_optical: fg.gate1_optical,
+        gate2_spectral: fg.gate2_spectral,
+        gate3_morphology: fg.gate3_morphology,
+        passAll: fg.passAll,
+        cardiacSNRdB: fg.cardiacSNRdB,
+        spectralPeakHz: fg.spectralPeakHz,
+        spectralConcentration: (fg as any).spectralConcentration ?? 0,
+        livenessReason: fg.livenessReason,
+        opticalEvidence: (fg as any).opticalEvidence,
+        opticalReason: (fg as any).opticalReason,
+        opticalReasonText: (fg as any).opticalReasonText,
+        opticalMetrics: (fg as any).opticalMetrics,
+        publicationGate: (fg as any).publicationGate,
+        effectiveSampleRate: (fg as any).effectiveSampleRate,
+        bufferedSeconds: (fg as any).bufferedSeconds,
+      };
+      forensicGateRef.current = snap;
+      const nowMs = performance.now();
+      const prev = prevGatesRef.current;
+      const transitioned =
+        prev.g1 !== snap.gate1_optical ||
+        prev.g2 !== snap.gate2_spectral ||
+        prev.g3 !== snap.gate3_morphology ||
+        prev.all !== snap.passAll;
+      // Commit on transitions immediately (so users see the pill flip), or
+      // throttle steady-state updates.
+      if (transitioned || nowMs - lastOverlayCommitRef.current >= overlayCadenceRef.current) {
+        lastOverlayCommitRef.current = nowMs;
+        setForensicGate(snap);
+
+        // Append to the session log at the same throttled cadence.
+        const log = sessionLogRef.current;
+        log.push({
+          t_iso: new Date().toISOString(),
+          t_ms: Math.round(nowMs),
+          g1_optical: snap.gate1_optical,
+          g2_spectral: snap.gate2_spectral,
+          g3_morphology: snap.gate3_morphology,
+          pass_all: snap.passAll,
+          snr_db: +snap.cardiacSNRdB.toFixed(2),
+          peak_hz: +snap.spectralPeakHz.toFixed(3),
+          bpm_estimate: snap.spectralPeakHz > 0 ? Math.round(snap.spectralPeakHz * 60) : 0,
+          concentration: +snap.spectralConcentration.toFixed(3),
+          reason: snap.livenessReason,
+        });
+        if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
+        // Increment session-wide valid/noise counters at the same throttled
+        // cadence. These drive the "Válidas / Ruido" + "Triple-gate %"
+        // display in the forensic overlay.
+        if (snap.passAll) validSamplesRef.current += 1;
+        else noiseSamplesRef.current += 1;
+        // Cheap state ping (only when buckets of 25 rounds elapse) so the
+        // overlay counters update without spamming React.
+        if (log.length % 25 === 0) {
+          setSessionLogSize(log.length);
+          setValidSamples(validSamplesRef.current);
+          setNoiseSamples(noiseSamplesRef.current);
+        }
+      }
+
+      // ── Gate transition alerts (haptic + toast) ──
+      // Rising edge → success alerts (each gate that just opened).
+      if (!prev.g1 && snap.gate1_optical) {
+        fireGateAlert('g1_open', 'success', 'Contacto óptico válido (G1)');
+      }
+      if (!prev.g2 && snap.gate2_spectral) {
+        fireGateAlert('g2_open', 'success', 'Señal cardíaca confirmada (G2)');
+      }
+      if (!prev.g3 && snap.gate3_morphology) {
+        fireGateAlert('g3_open', 'success', 'Morfología de pulso válida (G3)');
+      }
+      if (!prev.all && snap.passAll) {
+        // Strong celebratory haptic for the full triple-gate.
+        vibrate([60, 50, 60, 50, 120]);
+        fireGateAlert('all_open', 'success', 'PULSO REAL DETECTADO');
+      }
+      // Falling edge → per-gate failure alerts (only when we previously had it).
+      if (prev.g1 && !snap.gate1_optical) {
+        fireGateAlert('g1_fail', 'fail', 'Sin contacto óptico (G1)');
+      }
+      if (prev.g2 && !snap.gate2_spectral) {
+        fireGateAlert('g2_fail', 'fail', 'Señal cardíaca perdida (G2)');
+      }
+      if (prev.g3 && !snap.gate3_morphology) {
+        fireGateAlert('g3_fail', 'fail', 'Morfología inválida (G3)');
+      }
+      prevGatesRef.current = {
+        g1: snap.gate1_optical,
+        g2: snap.gate2_spectral,
+        g3: snap.gate3_morphology,
+        all: snap.passAll,
+      };
+    }
+
+    // FORENSIC: a "stable human signal" is just optical contact + minimal
+    // perfusion. We do NOT require GOOD perfusion (a victim in shock won't
+    // have it) and we do NOT block on motion (operator may be moving).
+    // What protects us against fake numbers is the upstream liveness gate:
+    // if there is no hemoglobin signature → contactState === NO_OPTICAL_CONTACT
+    // → we early-return below with everything zeroed.
+    const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
+
+    // MODO FORENSE POLICIAL: permitir procesamiento incluso con contacto subóptimo
+    // Solo bloquear si hay evidencia clara de NO ser tejido humano
+    if (noOpticalContact && (lastSignal as any)?.contactState === 'NO_OPTICAL_CONTACT') {
+      setHeartbeatSignal(0);
+      setHeartRate(0);
+      setBeatMarker(0);
+      setRRIntervals([]);
+      vitalSignsFrameCounter.current = 0;
+      if (vitalSigns.spo2 !== 0 || vitalSigns.glucose !== 0 ||
+          vitalSigns.pressure.systolic !== 0 || vitalSigns.pressure.diastolic !== 0) {
+        setVitalSigns(prev => ({
+          ...prev,
+          spo2: 0, glucose: 0,
+          pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+          arrhythmiaCount: 0, arrhythmiaStatus: "SIN ARRITMIAS|0",
+          lipids: { totalCholesterol: 0, triglycerides: 0 },
+          lastArrhythmiaData: undefined,
+          signalQuality: 0,
+          measurementConfidence: 'INVALID',
+        }));
+      }
+      return;
+    }
+    
+    // Si gate1 no pasa pero hay señal, procesar de todos modos para análisis forense
+    console.log('⚠️ Gate1 no pasa pero procesando para análisis:', {
+      gate1: fg?.gate1_optical,
+      contactState: (lastSignal as any)?.contactState,
+      quality: lastSignal.quality,
+      signalValue
+    });
+
+    const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
+    const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
+    const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
+
+    // ── SAFEGUARD ratio: gates PUBLICATION only. NEVER blocks the detector
+    // feed (that would create the historical deadlock where gate3 can't
+    // open because the detector never runs). The detector keeps consuming
+    // candidate OD samples so morphology can build up over time.
+    const ACCEPTED_RATIO_MIN = acceptedRatioMinRef.current;
+    const ACCEPTED_RATIO_WARMUP_SAMPLES = warmupSamplesRef.current;
+    const totalSeen = validSamplesRef.current + noiseSamplesRef.current;
+    const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
+    const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
+
+    // ════════════════════════════════════════════════════════════════
+    //  PROCESSING_GATE — MODO FORENSE POLICIAL: procesar siempre que haya señal
+    //  Eliminamos restricciones estrictas para permitir análisis en condiciones
+    //  subóptimas (víctimas en shock, mala iluminación, movimiento).
+    // ════════════════════════════════════════════════════════════════
+    const om = (fg as any)?.opticalMetrics;
+    const bufferedSeconds = (fg as any)?.bufferedSeconds ?? 0;
+    const opticalOk = !!(fg as any)?.opticalEvidence;
+    
+    // MODO FORENSE: permitir procesamiento con condiciones mínimas
+    const processingAllowed =
+      Number.isFinite(signalValue) &&
+      (opticalOk || lastSignal.quality > 0); // Permitir si hay calidad mínima
+
+    console.log('🔍 Processing gate:', {
+      processingAllowed,
+      opticalOk,
+      signalValue,
+      quality: lastSignal.quality,
+      bufferedSeconds,
+      om
+    });
+
+    // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
+    // independiente de la publicación. Permite suavizar umbrales cuando hay
+    // contacto óptico estable, aunque la morfología aún no se haya validado.
+    if (opticalOk) {
+      consecutiveAcceptedRef.current += 1;
+      if (
+        autoRelaxEnabled &&
+        !autoRelaxAppliedRef.current &&
+        consecutiveAcceptedRef.current >= autoRelaxN
+      ) {
+        preRelaxRef.current = {
+          ratio: acceptedRatioMinRef.current,
+          warmup: warmupSamplesRef.current,
+        };
+        const relaxedRatio = Math.max(0.10, acceptedRatioMinRef.current * 0.5);
+        const relaxedWarmup = Math.max(30, Math.round(warmupSamplesRef.current * 0.5));
+        setAcceptedRatioMin(relaxedRatio);
+        setWarmupSamples(relaxedWarmup);
+        autoRelaxAppliedRef.current = true;
+        setAutoRelaxActive(true);
+        toast({
+          title: 'Umbrales auto-relajados',
+          description: `Señal estable (${autoRelaxN} frames). Ratio ${Math.round(relaxedRatio*100)}% · warm-up ${relaxedWarmup}.`,
+        });
+      }
+    } else {
+      consecutiveAcceptedRef.current = 0;
+    }
+
+    // MODO FORENSE: solo bloquear si no hay señal válida absolutamente
+    if (!processingAllowed) {
+      console.log('🚫 Processing gate cerrado - señal inválida');
+      setHeartbeatSignal(0);
+      unstableFrameCounter.current++;
+      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
+        setHeartRate(0);
+        vitalSignsFrameCounter.current = 0;
+        setBeatMarker(0);
+        setRRIntervals([]);
+        setArrhythmiaCount("--");
+        if (arrhythmiaDetectedRef.current) {
+          arrhythmiaDetectedRef.current = false;
+          setArrhythmiaState(false);
+        }
+        setVitalSigns(prev => (
+          prev.measurementConfidence === 'INVALID' && prev.spo2 === 0 && prev.glucose === 0 && prev.pressure.systolic === 0 && prev.pressure.diastolic === 0
+            ? prev
+            : {
+                ...prev,
+                spo2: 0,
+                glucose: 0,
+                pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+                arrhythmiaCount: 0,
+                arrhythmiaStatus: "SIN ARRITMIAS|0",
+                lipids: { totalCholesterol: 0, triglycerides: 0 },
+                lastArrhythmiaData: undefined,
+                signalQuality: 0,
+                measurementConfidence: 'INVALID'
+              }
+        ));
+      }
+      return;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  ALIMENTACIÓN INCONDICIONAL DEL DETECTOR
+    //  El detector procesa SIEMPRE (analiza, aprende morfología, abre gate3)
+    //  independientemente del estado de publicación. Esto rompe el deadlock
+    //  donde morphology necesita morphology para abrirse.
+    // ════════════════════════════════════════════════════════════════
+    console.log('💓 Procesando heartbeat:', {
+      signalValue,
+      contactState,
+      quality: lastSignal.quality,
+      timestamp: lastSignal.timestamp
+    });
+    
+    const heartBeatResult = processHeartBeat(
+      signalValue,
+      contactState,
+      lastSignal.timestamp,
+      {
+        quality: lastSignal.quality,
+        contactState,
+        motionArtifact: lastSignal.motionArtifact || motionInfo.motionArtifact,
+        pressureState: pressureOptimal ? 'OPTIMAL_PRESSURE' : 'LOW_PRESSURE',
+        clipHigh: om?.clipHigh ?? 0,
+        clipLow:  om?.clipLow  ?? 0,
+        perfusionIndex: lastSignal.perfusionIndex,
+        positionDrifting: positionQuality.drifting,
+        // Permitir que el detector corra sin restricción de publicación
+        // para que pueda aprender morfología y abrir gate3.
+        // La publicación (beep/vibrate/UI) se controla después.
+        publicationGate: true,
+      }
+    );
+    
+    console.log('💓 HeartBeat result:', {
+      bpm: heartBeatResult.bpm,
+      bpmConfidence: heartBeatResult.bpmConfidence,
+      isPeak: heartBeatResult.isPeak,
+      beatSQI: heartBeatResult.beatSQI,
+      morphologyGatePass: (heartBeatResult as any).morphologyGatePass
+    });
+
+    // Cerrar gate3_morphology con la verdad del detector — SIEMPRE que el
+    // detector haya corrido. Esto es lo que permite que forensicPass pueda
+    // llegar a true en el próximo frame.
+    const morphPass = !!(heartBeatResult as any).morphologyGatePass;
+    setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
+
+    // ════════════════════════════════════════════════════════════════
+    //  PUBLICATION_GATE — MODO FORENSE POLICIAL: publicar siempre que haya
+    //  datos válidos para análisis. No bloquear por gates estrictos.
+    // ════════════════════════════════════════════════════════════════
+    const spectralPass = !!fg?.gate2_spectral;
+    // MODO FORENSE: publicar si hay señal cardíaca detectada, sin restricciones de gates
+    const publicationGate =
+      heartBeatResult.bpm > 0 &&
+      heartBeatResult.bpmConfidence >= 0.10; // Mínimo muy bajo para modo forense
+    lastPublicationGateRef.current = publicationGate;
+
+    if (!publicationGate) {
+      // MODO FORENSE: mostrar señal cruda incluso sin BPM alto
+      setHeartbeatSignal(heartBeatResult.filteredValue);
+      unstableFrameCounter.current++;
+      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
+        setHeartRate(0);
+        vitalSignsFrameCounter.current = 0;
+        setBeatMarker(0);
+        setRRIntervals([]);
+        setArrhythmiaCount("--");
+        if (arrhythmiaDetectedRef.current) {
+          arrhythmiaDetectedRef.current = false;
+          setArrhythmiaState(false);
+        }
+        setVitalSigns(prev => (
+          prev.measurementConfidence === 'INVALID' && prev.spo2 === 0 && prev.glucose === 0 && prev.pressure.systolic === 0 && prev.pressure.diastolic === 0
+            ? prev
+            : {
+                ...prev,
+                spo2: 0,
+                glucose: 0,
+                pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+                arrhythmiaCount: 0,
+                arrhythmiaStatus: "SIN ARRITMIAS|0",
+                lipids: { totalCholesterol: 0, triglycerides: 0 },
+                lastArrhythmiaData: undefined,
+                signalQuality: 0,
+                measurementConfidence: 'INVALID'
+              }
+        ));
+      }
+      return;
+    }
+
+    // PUBLICATION_GATE = true → autorizamos onda + BPM + beep/vibración.
+    setHeartbeatSignal(heartBeatResult.filteredValue);
+    unstableFrameCounter.current = 0;
+    // FORENSIC: report the real instantaneous BPM (no EMA), but only when
+    // the heartbeat processor has enough morphology-validated confidence.
+    // Otherwise keep showing 0 → "BUSCANDO PULSO".
+    const forensicBpmOk = heartBeatResult.bpm > 0 && heartBeatResult.bpmConfidence >= 0.30;
+    if (forensicBpmOk) {
+      setHeartRate(Math.round(heartBeatResult.bpm));
+      emaRef.current.bpm = heartBeatResult.bpm;
+    } else if (!goodPerfusion) {
+      // In low-perfusion mode, don't display stale BPM either.
+      setHeartRate(0);
+    }
+
+    if (heartBeatResult.isPeak) {
+      setBeatMarker(1);
+      setTimeout(() => setBeatMarker(0), 300);
+      totalBeatsRef.current++;
+      const currentArrCount = vitalSigns.arrhythmiaCount || 0;
+      if (currentArrCount > lastArrhythmiaCountForBeatsRef.current) {
+        arrhythmiaBeatsRef.current++;
+        lastArrhythmiaCountForBeatsRef.current = currentArrCount;
+      }
+    }
+
+    if (heartBeatResult.rrData?.intervals) {
+      setRRIntervals(heartBeatResult.rrData.intervals.slice(-5));
+    }
+
+    vitalSignsFrameCounter.current++;
+
+    // FORENSIC: only run civil vitals (SpO2/BP/glucose/lipids) when explicitly
+    // enabled via ?civil=1. By default the forensic operator only sees pulse.
+    if (CIVIL_MODE && vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
+      vitalSignsFrameCounter.current = 0;
+      const rgbStats = getRGBStats();
+      const detectorAgreement = heartBeatResult.detectorAgreement || heartBeatResult.debug.detectorAgreement || 0;
+      const rrStability = computeRRStability(heartBeatResult.rrData?.intervals || []);
+      const beatInputs = heartBeatResult.debug.recentAcceptedBeats && heartBeatResult.debug.recentAcceptedBeats.length > 0
+        ? heartBeatResult.debug.recentAcceptedBeats.slice(-12).map((beat) => ({
+            ibiMs: beat.ibiMs,
+            beatSQI: beat.beatSQI,
+            morphologyScore: beat.morphologyScore,
+            detectorAgreement: beat.detectorAgreement,
+            amplitude: beat.amplitude,
+            flags: {
+              isWeak: beat.flags.isWeak,
+              isPremature: beat.flags.isPremature,
+              isSuspicious: beat.flags.isSuspicious,
+              isDoublePeak: beat.flags.isDoublePeak,
+            }
+          }))
+        : undefined;
+
+      // Live tuner stats: pick the most recent beat that has fiducials
+      // attached. Updates immediately when params change because morphology
+      // boost is recomputed on the next pending fiducial evaluation.
+      if (showFiducialTuner) {
+        const accepted = heartBeatResult.debug.recentAcceptedBeats;
+        if (accepted && accepted.length > 0) {
+          for (let i = accepted.length - 1; i >= 0; i--) {
+            const b: any = accepted[i];
+            if (b.fiducials) {
+              fiducialBeatsCountRef.current = accepted.length;
+              setFiducialLive({
+                morphologyScore: b.morphologyScore || 0,
+                morphologyValidity: b.fiducials.morphologyValidity || 0,
+                notchDepth: b.fiducials.notchDepth || 0,
+                riseTimeMs: b.fiducials.riseTimeMs || 0,
+                pulseWidth50Ms: b.fiducials.pulseWidth50Ms || 0,
+                reflectionIndex: b.fiducials.reflectionIndex || 0,
+                beatsAnalyzed: accepted.length,
+              });
+              break;
+            }
+          }
+        }
+      }
+
+      setUpstreamContext({
+        contactStable: stableHumanSignal,
+        pressureOptimal,
+        clipHighRatio: (lastSignal as any).clipHighRatio ?? 0,
         sourceStability,
         avgBeatSQI: heartBeatResult.beatSQI || heartBeatResult.debug.lastBeatSQI || 0,
         beatCount: heartBeatResult.debug.beatsAccepted || heartBeatResult.rrData?.intervals.length || 0,
@@ -391,7 +1354,7 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount]);
+  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount, showFiducialTuner]);
 
   useEffect(() => {
     // FORENSIC MODE: continuous monitoring — never auto-finalize.
@@ -420,7 +1383,33 @@ const Index = () => {
   };
 
   // Auto-hide overlays unless we need the operator's attention.
+  const overlayPinned = !isMonitoring
+    || !lastSignal?.fingerDetected
+    || (lastSignal?.quality ?? 0) < 40
+    || showResults;
+  const { visible: overlaysVisible, reveal: revealOverlays } =
+    useAutoHideOverlays({ idleMs: 4000, initialMs: 4000, pinned: overlayPinned });
 
+  // Confidence watchdog — fires a recalibration toast (and flashes the CAL
+  // chip) when quality, motion, or BPM/SpO₂ drift sustain past hold windows.
+  // Suppressed while the wizard is open or when not actively monitoring.
+  useRecalibrationWatchdog(
+    {
+      enabled: isMonitoring && !showCalibration,
+      quality: lastSignal?.quality ?? 0,
+      bpm: heartRate,
+      spo2: vitalSigns.spo2,
+      motionLevel: motionClassifierRef.current.classify(),
+      baseline: calibrationBaseline,
+    },
+    {
+      onPrompt: () => triggerCalPromptHighlight(),
+      onOpenWizard: () => {
+        setShowCalibration(true);
+        setCalPromptHighlight(false);
+      },
+    },
+  );
 
   return (
     <>
