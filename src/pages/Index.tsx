@@ -1402,7 +1402,13 @@ const Index = () => {
       motionLevel: motionClassifierRef.current.classify(),
       baseline: calibrationBaseline,
     },
-    { onPrompt: () => triggerCalPromptHighlight() },
+    {
+      onPrompt: () => triggerCalPromptHighlight(),
+      onOpenWizard: () => {
+        setShowCalibration(true);
+        setCalPromptHighlight(false);
+      },
+    },
   );
 
   return (
