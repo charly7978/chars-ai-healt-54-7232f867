@@ -449,6 +449,21 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.greenBuf.push(roi.rawGreen);
     this.blueBuf.push(roi.rawBlue);
 
+    // ── sRGB → LINEAL → OPTICAL DENSITY (absorbancia hemoglobina) ─────
+    // OD = -log10((I_lin + ε) / I0_lin), donde I0 es el DC móvil lineal.
+    // OD es la magnitud que la espectroscopía ve realmente; usar el rojo
+    // crudo subestima la pulsatilidad cuando la cámara aplica gamma.
+    const linR = srgbToLinear(roi.rawRed);
+    if (this.odDcMovingAvg <= 0) this.odDcMovingAvg = linR;
+    else this.odDcMovingAvg += (linR - this.odDcMovingAvg) * 0.02; // ~5s tau a 30fps
+    const odSample = -Math.log10((linR + 1e-6) / Math.max(this.odDcMovingAvg, 1e-6));
+
+    // ── BUFFER TEMPORAL DE 10s POR TIMESTAMPS REALES ────────────────
+    this.timedSamples.push({ t: timestamp, od: odSample, r: roi.rawRed, g: roi.rawGreen, b: roi.rawBlue });
+    while (this.timedSamples.length > 0 && (timestamp - this.timedSamples[0].t) > this.TIME_WINDOW_MS) {
+      this.timedSamples.shift();
+    }
+
     if (this.redBuf.length >= 36) {
       this.calculateACDC();
     }
@@ -492,6 +507,33 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     // --- GLOBAL SQI ---
     const perfusionIndex = this.calculatePerfusionIndex();
+
+    // ── PI WINDOW (500 ms) para detección de PERFUSION_DROP ──────────
+    this.piWindow.push(perfusionIndex);
+    this.piWindowTimes.push(timestamp);
+    while (this.piWindowTimes.length > 0 && (timestamp - this.piWindowTimes[0]) > this.PI_WINDOW_MS) {
+      this.piWindowTimes.shift();
+      this.piWindow.shift();
+    }
+
+    // ── OPTICAL EVIDENCE GATE (físico, sin morfología) ──────────────
+    // Stats RGB de la ROI + AC/DC reciente del rojo. Si rechaza, el frame
+    // se sigue emitiendo pero con publicationGate=false y razón visible.
+    const stdR_proxy = roi.rawRed > 0 ? roi.rawRed * (1 - this.spatialUniformity) : 0;
+    this.lastOpticalEvidence = this.opticalGate.evaluate(
+      {
+        meanR: roi.rawRed,
+        meanG: roi.rawGreen,
+        meanB: roi.rawBlue,
+        stdR: stdR_proxy,
+        clipHighRatio: roi.clipHighRatio,
+        clipLowRatio: roi.clipLowRatio,
+        acComponent: this.redAC,
+        dcComponent: this.redDC,
+      },
+      { piWindow: this.piWindow.slice() }
+    );
+
     const signalRange = this.getSignalRange();
     const redDominance = this.smoothedRed - (this.smoothedGreen + this.smoothedBlue) / 2;
 
