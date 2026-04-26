@@ -18,6 +18,7 @@ import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
+import { CameraQualityGate } from "@/modules/signal-processing/CameraQualityGate";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
 
@@ -369,6 +370,12 @@ const Index = () => {
   // Motion classifier: drops frames during sustained SEVERE motion with a
   // hard 50% drop-rate cap so the operator never loses the live trace.
   const motionClassifierRef = useRef<MotionClassifier>(new MotionClassifier());
+  // V9.4 — Camera data-quality watchdog. Inspects G1 (greenDC), G2 (greenAC)
+  // and G3 (red/green ratio) every CIVIL_MODE vitals tick. If the camera
+  // delivers black / saturated / frozen / no-finger frames for ≥ 1 s, the
+  // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
+  const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
+  const cameraReinitInFlightRef = useRef<boolean>(false);
   // Cached/last-trusted sample rate, used to keep delineation stable when
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
@@ -692,6 +699,9 @@ const Index = () => {
     startProcessing();
     // Start the IMU motion classifier (no-op on platforms without devicemotion).
     motionClassifierRef.current.start().catch(() => {});
+    // V9.4 — reset camera quality watchdog for the new session.
+    cameraQualityRef.current.reset();
+    cameraReinitInFlightRef.current = false;
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
@@ -1290,6 +1300,30 @@ const Index = () => {
           greenAC: rgbStats.greenAC,
           greenDC: rgbStats.greenDC
         });
+      }
+
+      // V9.4 — Camera quality gate. Runs at the same cadence as the rest
+      // of the CIVIL_MODE block (every N frames). If the gate has been
+      // unhappy for ≥ badFrameStreak consecutive samples it returns true
+      // → we bounce isCameraOn off → on, which forces CameraView's start
+      // effect to renegotiate the MediaStream from scratch.
+      const needReinit = cameraQualityRef.current.inspect({
+        redDC:   rgbStats.redDC,
+        greenDC: rgbStats.greenDC,
+        redAC:   rgbStats.redAC,
+        greenAC: rgbStats.greenAC,
+      });
+      if (needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
+        cameraReinitInFlightRef.current = true;
+        const verdict = cameraQualityRef.current.getStats().lastVerdict;
+        console.warn('🔁 Camera quality gate → reinit:', verdict.reason);
+        setIsCameraOn(false);
+        // Allow CameraView's stopCamera() to run, then re-enable.
+        window.setTimeout(() => {
+          if (isProcessingRef.current) setIsCameraOn(true);
+          // Cooldown: clear in-flight a bit later so we don't loop.
+          window.setTimeout(() => { cameraReinitInFlightRef.current = false; }, 2000);
+        }, 400);
       }
 
       const usableRRData = heartBeatResult.rrData && heartBeatResult.rrData.intervals.length >= 2 && heartBeatResult.bpmConfidence > 0.18
