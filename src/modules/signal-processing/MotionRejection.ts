@@ -564,5 +564,13 @@ export class MotionRejection {
     this.rejectedImuCount = 0;
     this.effUpgradeFrames = this.cfg.upgradeConfirmFrames;
     this.effAlpha = this.cfg.weightSmoothingAlpha;
+    // V9.5 — clear cached blend factors. We DO NOT clear `calibBaseline`:
+    // a per-device calibration must survive session resets so the user
+    // doesn't have to re-baseline every time they start monitoring.
+    this.lastTOpt = 0;
+    this.lastTImu = 0;
+    this.lastTBlend = 0;
+    this.calibrating = false;
+    this.calibBuf.length = 0;
   }
 }
