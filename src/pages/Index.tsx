@@ -699,6 +699,9 @@ const Index = () => {
     startProcessing();
     // Start the IMU motion classifier (no-op on platforms without devicemotion).
     motionClassifierRef.current.start().catch(() => {});
+    // V9.4 — reset camera quality watchdog for the new session.
+    cameraQualityRef.current.reset();
+    cameraReinitInFlightRef.current = false;
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
