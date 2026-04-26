@@ -163,6 +163,9 @@ export class MotionRejection {
   // telemetry so the operator can see what the auto-tuner picked.
   private effUpgradeFrames = DEFAULT_CONFIG.upgradeConfirmFrames;
   private effAlpha = DEFAULT_CONFIG.weightSmoothingAlpha;
+  // V9.4 — count of imuScore samples rejected by the input validator.
+  // Surfaced via getTuning() so a flaky IMU shows up in CI telemetry.
+  private rejectedImuCount = 0;
 
   /** Patch any subset of the config; unspecified fields keep current values. */
   setConfig(patch: Partial<MotionRejectionConfig>): void {
