@@ -420,7 +420,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
     // Motion penalty applied on top of contact/drift gating
     const motionQualPenalty = motionHigh ? 0.40 : (motionArtifact ? 0.70 : 1.0);
-    const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.005
+    const isGoodPerfusion = this.exportedContactState === 'OPTICAL_CONTACT_GOOD_PERFUSION';
+    const gatedQuality = isGoodPerfusion && perfusionIndex >= 0.005
       ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
     const finalQuality = gatedQuality * motionQualPenalty;
@@ -455,8 +456,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
           `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}`,
-        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.05 && !motionHigh,
-        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' && !motionHigh ? perfusionIndex : 0,
+        hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
+        pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
       },
     });
   }
@@ -696,7 +697,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       this.redBaseline = r; this.greenBaseline = g; this.blueBaseline = b;
       return;
     }
-    const alpha = motion ? 0.008 : this.exportedContactState === 'STABLE_CONTACT' ? 0.02 : 0.04;
+    const alpha = motion ? 0.008 : this.exportedContactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' ? 0.02 : 0.04;
     this.redBaseline += (r - this.redBaseline) * alpha;
     this.greenBaseline += (g - this.greenBaseline) * alpha;
     this.blueBaseline += (b - this.blueBaseline) * alpha;
