@@ -71,6 +71,26 @@ export interface MotionRejectionConfig {
   weightMicroDrift: number;
   weightSliding: number;
   weightBurst: number;
+  /**
+   * V9.2 — auto-tuning.
+   * When `autoTune=true`, `upgradeConfirmFrames` and `weightSmoothingAlpha`
+   * are recomputed every frame from the std-dev of `trackerSigma` over the
+   * last `autoTuneWindow` frames. The fields above act as the *baseline*
+   * (used as default when σ(trackerSigma) is small). The tuner blends them
+   * toward the `…High` ceiling as σ grows past `autoTuneSigmaTrigger`.
+   *
+   * Semantics:
+   *   - High σ(trackerSigma) → finger drifting/twitching → longer confirm
+   *     streak + slower weight EMA → suppress flicker.
+   *   - Low σ(trackerSigma)  → finger stable → shorter confirm + faster
+   *     EMA → responsive to a real motion event.
+   */
+  autoTune: boolean;
+  autoTuneWindow: number;            // frames to estimate σ(trackerSigma)
+  autoTuneSigmaTrigger: number;      // px std-dev that starts blending toward High
+  autoTuneSigmaSaturate: number;     // px std-dev where blend reaches 1.0
+  upgradeConfirmFramesHigh: number;  // ceiling under high variability
+  weightSmoothingAlphaLow: number;   // EMA alpha under high variability (slower → smaller)
 }
 
 const DEFAULT_CONFIG: MotionRejectionConfig = {
@@ -83,6 +103,12 @@ const DEFAULT_CONFIG: MotionRejectionConfig = {
   weightMicroDrift: 0.80,
   weightSliding: 0.40,
   weightBurst: 0.15,
+  autoTune: true,
+  autoTuneWindow: 30,
+  autoTuneSigmaTrigger: 1.0,
+  autoTuneSigmaSaturate: 4.0,
+  upgradeConfirmFramesHigh: 8,
+  weightSmoothingAlphaLow: 0.10,
 };
 
 export class MotionRejection {
@@ -92,17 +118,82 @@ export class MotionRejection {
   private smoothedWeight = 1.0;
   private cfg: MotionRejectionConfig = { ...DEFAULT_CONFIG };
 
+  // V9.2 — circular buffer of recent trackerSigma observations for auto-tune.
+  private sigmaBuf = new Float64Array(64);
+  private sigmaIdx = 0;
+  private sigmaCount = 0;
+  // Effective (post-tuning) values used by the current frame; exposed for
+  // telemetry so the operator can see what the auto-tuner picked.
+  private effUpgradeFrames = DEFAULT_CONFIG.upgradeConfirmFrames;
+  private effAlpha = DEFAULT_CONFIG.weightSmoothingAlpha;
+
   /** Patch any subset of the config; unspecified fields keep current values. */
   setConfig(patch: Partial<MotionRejectionConfig>): void {
     this.cfg = { ...this.cfg, ...patch };
+    // Resize the σ buffer if the tuning window changed.
+    const w = Math.max(4, Math.min(256, this.cfg.autoTuneWindow));
+    if (this.sigmaBuf.length !== w) {
+      this.sigmaBuf = new Float64Array(w);
+      this.sigmaIdx = 0;
+      this.sigmaCount = 0;
+    }
   }
 
   getConfig(): MotionRejectionConfig {
     return { ...this.cfg };
   }
 
+  /** Telemetry — what the auto-tuner is currently using. */
+  getTuning(): { upgradeConfirmFrames: number; weightSmoothingAlpha: number; sigmaStd: number } {
+    return {
+      upgradeConfirmFrames: this.effUpgradeFrames,
+      weightSmoothingAlpha: this.effAlpha,
+      sigmaStd: this.computeSigmaStd(),
+    };
+  }
+
+  private computeSigmaStd(): number {
+    if (this.sigmaCount < 4) return 0;
+    let sum = 0;
+    for (let i = 0; i < this.sigmaCount; i++) sum += this.sigmaBuf[i];
+    const mean = sum / this.sigmaCount;
+    let v = 0;
+    for (let i = 0; i < this.sigmaCount; i++) {
+      const d = this.sigmaBuf[i] - mean;
+      v += d * d;
+    }
+    return Math.sqrt(v / this.sigmaCount);
+  }
+
+  private recomputeTuning(): void {
+    if (!this.cfg.autoTune) {
+      this.effUpgradeFrames = this.cfg.upgradeConfirmFrames;
+      this.effAlpha = this.cfg.weightSmoothingAlpha;
+      return;
+    }
+    const s = this.computeSigmaStd();
+    const lo = this.cfg.autoTuneSigmaTrigger;
+    const hi = Math.max(lo + 1e-3, this.cfg.autoTuneSigmaSaturate);
+    // Linear blend factor in [0,1] from σ ∈ [lo, hi].
+    const t = Math.max(0, Math.min(1, (s - lo) / (hi - lo)));
+    // Higher variability → MORE confirm frames, SMALLER alpha (slower EMA).
+    const baseFrames = this.cfg.upgradeConfirmFrames;
+    const highFrames = Math.max(baseFrames, this.cfg.upgradeConfirmFramesHigh);
+    this.effUpgradeFrames = Math.round(baseFrames + (highFrames - baseFrames) * t);
+    const baseAlpha = this.cfg.weightSmoothingAlpha;
+    const lowAlpha = Math.min(baseAlpha, this.cfg.weightSmoothingAlphaLow);
+    this.effAlpha = baseAlpha + (lowAlpha - baseAlpha) * t;
+  }
+
   classify(input: MotionRejectionInputs): MotionRejectionResult {
     const { imuScore, trackerSigma, maskIoU, centroidJumpPx } = input;
+
+    // Push the new observation into the circular σ buffer and recompute the
+    // effective tuning BEFORE applying hysteresis this frame.
+    this.sigmaBuf[this.sigmaIdx] = trackerSigma;
+    this.sigmaIdx = (this.sigmaIdx + 1) % this.sigmaBuf.length;
+    if (this.sigmaCount < this.sigmaBuf.length) this.sigmaCount++;
+    this.recomputeTuning();
 
     // Detección instantánea (antes de aplicar hysteresis).
     let candidate: MotionRejectionState;
@@ -151,7 +242,7 @@ export class MotionRejection {
     // con candidato peor o igual al objetivo.
     if (order[candidate] > order[this.state]) {
       this.upgradeStreak++;
-      if (this.upgradeStreak >= this.cfg.upgradeConfirmFrames) {
+      if (this.upgradeStreak >= this.effUpgradeFrames) {
         this.state = candidate;
         this.upgradeStreak = 0;
       }
@@ -174,7 +265,7 @@ export class MotionRejection {
     }
     // EMA low-pass on the materialised weight → eliminates step changes on
     // every state transition. Then hard clamp to the configurable band.
-    const a = Math.max(0, Math.min(1, this.cfg.weightSmoothingAlpha));
+    const a = Math.max(0, Math.min(1, this.effAlpha));
     this.smoothedWeight = this.smoothedWeight * (1 - a) + target * a;
     const w = Math.min(
       this.cfg.weightClampMax,
@@ -190,5 +281,9 @@ export class MotionRejection {
     this.stillStreak = 0;
     this.upgradeStreak = 0;
     this.smoothedWeight = this.cfg.weightStill;
+    this.sigmaIdx = 0;
+    this.sigmaCount = 0;
+    this.effUpgradeFrames = this.cfg.upgradeConfirmFrames;
+    this.effAlpha = this.cfg.weightSmoothingAlpha;
   }
 }
