@@ -227,7 +227,26 @@ export class MotionRejection {
     sigmaP50: number;
     sigmaP90: number;
     rejectedImu: number;
+    tOpt: number;
+    tImu: number;
+    tBlend: number;
+    tDominant: 'OPTICAL' | 'IMU' | 'TIE';
+    calibrating: boolean;
+    calibration: {
+      hasBaseline: boolean;
+      baselineMean: number;
+      baselineStd: number;
+      samples: number;
+      appliedTrigger: number | null;
+      appliedSaturate: number | null;
+      updatedAt: number;
+    };
   } {
+    const tOpt = this.lastTOpt;
+    const tImu = this.lastTImu;
+    const eps = 1e-6;
+    const tDominant: 'OPTICAL' | 'IMU' | 'TIE' =
+      Math.abs(tOpt - tImu) < eps ? 'TIE' : (tOpt > tImu ? 'OPTICAL' : 'IMU');
     return {
       upgradeConfirmFrames: this.effUpgradeFrames,
       weightSmoothingAlpha: this.effAlpha,
@@ -236,7 +255,98 @@ export class MotionRejection {
       sigmaP50: this.percentile(this.sigmaBuf, this.sigmaCount, 0.50),
       sigmaP90: this.percentile(this.sigmaBuf, this.sigmaCount, 0.90),
       rejectedImu: this.rejectedImuCount,
+      tOpt, tImu, tBlend: this.lastTBlend, tDominant,
+      calibrating: this.calibrating,
+      calibration: {
+        hasBaseline: this.calibBaseline !== null,
+        baselineMean: this.calibBaseline?.mean ?? 0,
+        baselineStd:  this.calibBaseline?.std  ?? 0,
+        samples:      this.calibBaseline?.n    ?? 0,
+        appliedTrigger:  this.calibAppliedTrigger,
+        appliedSaturate: this.calibAppliedSaturate,
+        updatedAt:    this.calibBaseline?.updatedAt ?? 0,
+      },
     };
+  }
+
+  // -- V9.5 per-device calibration API -----------------------------------
+
+  /**
+   * Begin collecting an IMU baseline. The caller should ask the user to
+   * hold the phone still; classify() will accumulate imuScore samples
+   * during the next CAL_DURATION_MS (or until CAL_MAX_SAMPLES) and then
+   * derive autoTuneImuTrigger / autoTuneImuSaturate from the quiet floor.
+   */
+  startImuCalibration(nowMs = performance.now()): void {
+    this.calibrating = true;
+    this.calibBuf.length = 0;
+    this.calibStartedAt = nowMs;
+  }
+
+  /** Abort an in-flight calibration without touching the applied baseline. */
+  cancelImuCalibration(): void {
+    this.calibrating = false;
+    this.calibBuf.length = 0;
+  }
+
+  /**
+   * Force-load a previously persisted baseline (e.g. from localStorage).
+   * `updatedAt` is taken from the snapshot so the operator can see how
+   * fresh the calibration is.
+   */
+  loadBaseline(snapshot: { mean: number; std: number; n: number; updatedAt: number }): void {
+    if (
+      !Number.isFinite(snapshot.mean) || !Number.isFinite(snapshot.std) ||
+      snapshot.n <= 0 || snapshot.std < 0
+    ) return;
+    this.calibBaseline = { ...snapshot };
+    this.applyBaselineToConfig();
+  }
+
+  /** Map the captured baseline into the `cfg.autoTuneImu*` knobs. */
+  private applyBaselineToConfig(): void {
+    if (!this.calibBaseline) return;
+    const { mean, std } = this.calibBaseline;
+    // Anchor at quiet floor + K·σ. Always clamp below the physical max so
+    // we never silently disable the tuner on a very loud device.
+    const trig = Math.min(
+      this.cfg.imuScoreMax,
+      Math.max(0, mean + MotionRejection.CAL_TRIGGER_K  * std),
+    );
+    const sat  = Math.min(
+      this.cfg.imuScoreMax,
+      Math.max(trig + 1e-3, mean + MotionRejection.CAL_SATURATE_K * std),
+    );
+    this.cfg = { ...this.cfg, autoTuneImuTrigger: trig, autoTuneImuSaturate: sat };
+    this.calibAppliedTrigger  = trig;
+    this.calibAppliedSaturate = sat;
+  }
+
+  /** Internal — called from classify() while calibration is in progress. */
+  private feedCalibration(imuScore: number, nowMs: number): void {
+    if (!this.calibrating) return;
+    if (Number.isFinite(imuScore) &&
+        imuScore >= this.cfg.imuScoreMin &&
+        imuScore <= this.cfg.imuScoreMax) {
+      this.calibBuf.push(imuScore);
+    }
+    const elapsed = nowMs - this.calibStartedAt;
+    const enough = this.calibBuf.length >= MotionRejection.CAL_MIN_SAMPLES;
+    const done = (elapsed >= MotionRejection.CAL_DURATION_MS && enough) ||
+                 this.calibBuf.length >= MotionRejection.CAL_MAX_SAMPLES;
+    if (!done) return;
+
+    const n = this.calibBuf.length;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += this.calibBuf[i];
+    const mean = sum / n;
+    let v = 0;
+    for (let i = 0; i < n; i++) { const d = this.calibBuf[i] - mean; v += d * d; }
+    const std = Math.sqrt(v / n);
+    this.calibBaseline = { mean, std, n, updatedAt: nowMs };
+    this.calibrating = false;
+    this.calibBuf.length = 0;
+    this.applyBaselineToConfig();
   }
 
   /** Generic std over the first `count` slots of `buf`. */
