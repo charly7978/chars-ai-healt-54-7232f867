@@ -24,6 +24,13 @@ const NON_ALERT_RHYTHMS = new Set([
   'UNDETERMINED_LOW_QUALITY'
 ]);
 
+// FORENSIC MODE: civil (clinical-style) vitals are hidden by default.
+// They can be re-enabled with ?civil=1 (kept behind a flag, NOT clinical).
+const CIVIL_MODE = typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).get('civil') === '1';
+// FORENSIC MODE: bypass the mandatory 60s auto-finalize (continuous monitoring).
+const FORENSIC_MODE = !CIVIL_MODE;
+
 const Index = () => {
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
@@ -340,7 +347,10 @@ const Index = () => {
     measurementTimerRef.current = window.setInterval(() => setElapsedTime(prev => prev + 1), 1000);
     setIsCalibrating(true);
     startCalibration();
-    setTimeout(() => setIsCalibrating(false), 3000);
+    // FORENSIC: skip the 3s "calibration" gate. Start reporting pulse from
+    // the first morphology-validated beat. CIVIL keeps the legacy 3s window.
+    if (FORENSIC_MODE) setIsCalibrating(false);
+    else setTimeout(() => setIsCalibrating(false), 3000);
   }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
 
   const handleStreamReady = useCallback((stream: MediaStream) => {
@@ -467,16 +477,44 @@ const Index = () => {
     if (!lastSignal || !isMonitoring) return;
     
     const signalValue = lastSignal.filteredValue;
-    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
+    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
+    const noOpticalContact = contactState === 'NO_OPTICAL_CONTACT' || contactState === 'NO_CONTACT';
+    const goodPerfusion = contactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' || contactState === 'STABLE_CONTACT';
     const positionQuality = getPositionQuality();
     const motionInfo = getMotionInfo();
-    const stableHumanSignal =
-      contactState === 'STABLE_CONTACT' &&
-      (lastSignal.quality || 0) >= 12 &&
-      (lastSignal.perfusionIndex || 0) >= 0.005 &&
-      !motionInfo.motionHigh; // IMU gate: high motion blocks "stable human signal"
 
-    const pressureOptimal = positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
+    // FORENSIC: a "stable human signal" is just optical contact + minimal
+    // perfusion. We do NOT require GOOD perfusion (a victim in shock won't
+    // have it) and we do NOT block on motion (operator may be moving).
+    // What protects us against fake numbers is the upstream liveness gate:
+    // if there is no hemoglobin signature → contactState === NO_OPTICAL_CONTACT
+    // → we early-return below with everything zeroed.
+    const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
+
+    if (noOpticalContact) {
+      // Hard forensic zero — never invent waveforms or numbers from air.
+      setHeartbeatSignal(0);
+      setHeartRate(0);
+      setBeatMarker(0);
+      setRRIntervals([]);
+      vitalSignsFrameCounter.current = 0;
+      if (vitalSigns.spo2 !== 0 || vitalSigns.glucose !== 0 ||
+          vitalSigns.pressure.systolic !== 0 || vitalSigns.pressure.diastolic !== 0) {
+        setVitalSigns(prev => ({
+          ...prev,
+          spo2: 0, glucose: 0,
+          pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+          arrhythmiaCount: 0, arrhythmiaStatus: "SIN ARRITMIAS|0",
+          lipids: { totalCholesterol: 0, triglycerides: 0 },
+          lastArrhythmiaData: undefined,
+          signalQuality: 0,
+          measurementConfidence: 'INVALID',
+        }));
+      }
+      return;
+    }
+
+    const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
@@ -531,9 +569,17 @@ const Index = () => {
     }
 
     unstableFrameCounter.current = 0;
-    const smoothedBPM = applyEMA(emaRef.current.bpm, heartBeatResult.bpm);
-    emaRef.current.bpm = smoothedBPM;
-    setHeartRate(smoothedBPM);
+    // FORENSIC: report the real instantaneous BPM (no EMA), but only when
+    // the heartbeat processor has enough morphology-validated confidence.
+    // Otherwise keep showing 0 → "BUSCANDO PULSO".
+    const forensicBpmOk = heartBeatResult.bpm > 0 && heartBeatResult.bpmConfidence >= 0.30;
+    if (forensicBpmOk) {
+      setHeartRate(Math.round(heartBeatResult.bpm));
+      emaRef.current.bpm = heartBeatResult.bpm;
+    } else if (!goodPerfusion) {
+      // In low-perfusion mode, don't display stale BPM either.
+      setHeartRate(0);
+    }
 
     if (heartBeatResult.isPeak) {
       setBeatMarker(1);
@@ -552,7 +598,9 @@ const Index = () => {
 
     vitalSignsFrameCounter.current++;
 
-    if (vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
+    // FORENSIC: only run civil vitals (SpO2/BP/glucose/lipids) when explicitly
+    // enabled via ?civil=1. By default the forensic operator only sees pulse.
+    if (CIVIL_MODE && vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
       vitalSignsFrameCounter.current = 0;
       const rgbStats = getRGBStats();
       const detectorAgreement = heartBeatResult.detectorAgreement || heartBeatResult.debug.detectorAgreement || 0;
@@ -681,7 +729,8 @@ const Index = () => {
   }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount, showFiducialTuner]);
 
   useEffect(() => {
-    if (isMonitoring && elapsedTime >= 60) {
+    // FORENSIC MODE: continuous monitoring — never auto-finalize.
+    if (CIVIL_MODE && isMonitoring && elapsedTime >= 60) {
       finalizeMeasurement();
     }
   }, [elapsedTime, isMonitoring, finalizeMeasurement]);
@@ -775,8 +824,71 @@ const Index = () => {
             />
           </div>
 
-          <div className="absolute inset-x-0 top-[55%] bottom-[60px] bg-black/10 px-4 py-6">
-            <div className="grid grid-cols-3 gap-4 place-items-center">
+          {/* ════════════════════════════════════════════════════════════
+              FORENSIC PULSE PANEL — the only thing the operator sees by
+              default. Shows: PULSO DETECTADO / SIN PULSO + BPM + PI.
+              No SpO2/BP/glucose/lipids unless ?civil=1 is passed.
+              ════════════════════════════════════════════════════════════ */}
+          {(() => {
+            const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
+            const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
+            const pulsePresent = isMonitoring && !noOptical && heartRate > 0;
+            const pi = lastSignal?.perfusionIndex || 0;
+            return (
+              <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
+                {/* Forensic banner — always visible while monitoring */}
+                {isMonitoring && (
+                  <div className="px-3 py-1 rounded-md bg-slate-900/80 border border-slate-700 text-[10px] text-slate-300 tracking-wider text-center max-w-[95%]">
+                    MODO FORENSE — DETECTOR DE PULSO PPG. NO MIDE SPO₂ / PRESIÓN / GLUCOSA / LÍPIDOS.
+                  </div>
+                )}
+                <div className={`w-[92%] rounded-xl px-4 py-3 border-2 backdrop-blur-sm ${
+                  pulsePresent
+                    ? 'bg-emerald-500/10 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.35)]'
+                    : 'bg-red-500/10 border-red-400'
+                }`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className={`text-xs font-bold tracking-widest ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
+                        {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {noOptical
+                          ? (lastSignal?.diagnostics?.message || 'SIN CONTACTO ÓPTICO')
+                          : (cs === 'OPTICAL_CONTACT_LOW_PERFUSION' ? 'CONTACTO — BAJA PERFUSIÓN' : 'CONTACTO ESTABLE')}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
+                        {heartRate > 0 ? Math.round(heartRate) : '--'}
+                      </div>
+                      <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50">
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">ÍNDICE DE PERFUSIÓN</div>
+                      <div className="text-sm font-mono text-slate-200">{pi > 0 ? pi.toFixed(2) : '--'}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">CALIDAD SEÑAL</div>
+                      <div className="text-sm font-mono text-slate-200">{lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-[8px] text-slate-500 tracking-wider">TIEMPO</div>
+                      <div className="text-sm font-mono text-slate-200">{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* CIVIL MODE — legacy clinical-style vitals (research only). */}
+          {CIVIL_MODE && (
+          <div className="absolute inset-x-0 top-[70%] bottom-[60px] bg-black/10 px-4 py-3">
+            <div className="text-[9px] text-amber-400 mb-1 tracking-widest text-center">⚠ CIVIL — ESTIMACIONES NO CLÍNICAS</div>
+            <div className="grid grid-cols-3 gap-2 place-items-center">
               <VitalSign label="FRECUENCIA CARDÍACA" value={heartRate > 0 ? Math.round(heartRate) : "--"} unit="BPM" highlighted={showResults} />
               <VitalSign label="SPO2" value={vitalSigns.spo2 > 0 ? vitalSigns.spo2 : "--"} unit="%" highlighted={showResults} />
               <VitalSign 
@@ -797,6 +909,7 @@ const Index = () => {
               <VitalSign label="ARRITMIAS" value={vitalSigns.arrhythmiaStatus || "SIN ARRITMIAS|0"} highlighted={showResults} />
             </div>
           </div>
+          )}
 
           {showResults && measurementSummary && (() => {
             const { totalBeats, arrhythmiaBeats, normalPercent } = measurementSummary;
