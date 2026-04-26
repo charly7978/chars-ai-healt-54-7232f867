@@ -782,6 +782,38 @@ const Index = () => {
   const handleStreamReady = useCallback((stream: MediaStream) => {
     console.log('📹 Stream recibido');
     setCameraStream(stream);
+    // Event-driven dead-stream watchdog. The platform tells us when a
+    // MediaStreamTrack ends or is muted; no polling needed.
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
+    }
+    const tracks = stream.getVideoTracks();
+    const onDead = (reason: string) => () => {
+      if (!monitoringIntentRef.current) return;
+      console.warn('🎥 Track event:', reason, '— bouncing camera');
+      setIsCameraOn(false);
+      // Re-arm rVFC chain by re-mounting the camera stream.
+      window.setTimeout(() => {
+        if (monitoringIntentRef.current && isProcessingRef.current) {
+          setIsCameraOn(true);
+          lastFrameAtRef.current = performance.now();
+        }
+      }, 800);
+    };
+    const handlers: Array<() => void> = [];
+    tracks.forEach(track => {
+      const ended = onDead(`track.ended (${track.label || 'video'})`);
+      const muted = onDead(`track.muted (${track.label || 'video'})`);
+      track.addEventListener('ended', ended);
+      track.addEventListener('mute', muted);
+      handlers.push(() => {
+        track.removeEventListener('ended', ended);
+        track.removeEventListener('mute', muted);
+      });
+    });
+    trackListenersCleanupRef.current = () => handlers.forEach(fn => fn());
+
     setTimeout(() => {
       const video = cameraRef.current?.getVideoElement();
       if (video && video.readyState >= 2) {
