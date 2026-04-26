@@ -308,6 +308,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // non-uniform (>0.06). spatialUniformity in [0..1] inverts to texture.
     const textureProxy = Math.max(0, 1 - roi.spatialUniformity);
     const textureOk = textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX;
+    // Snapshot raw liveness telemetry for the forensic overlay.
+    this.g1RawR = lr; this.g1RawG = lg; this.g1RawB = lb;
+    this.g1TotalI = lTotalI;
+    this.g1Absorption = lAbsorption;
+    this.g1RedDom = lRedDom;
+    this.g1Texture = textureProxy;
+    this.g1Coverage = roi.coverageRatio;
     const livenessInstant =
       lAbsorption >= LIVENESS.ABSORPTION_MIN &&
       lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
