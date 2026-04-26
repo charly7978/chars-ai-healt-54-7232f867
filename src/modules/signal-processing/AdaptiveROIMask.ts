@@ -552,28 +552,37 @@ export class AdaptiveROIMask {
       this.roiCenterX = box.cx;
       this.roiCenterY = box.cy;
       this.roiSizeFrac = targetSizeFrac;
+      // V9 — seed Kalman filters to first observation (no transient).
+      this.kfSeed(this.kfCx, box.cx);
+      this.kfSeed(this.kfCy, box.cy);
+      this.kfSeed(this.kfSz, targetSizeFrac);
+      this.lastCentroidJumpPx = 0;
     } else if (box.mass > 0) {
-      // Smoothly follow the finger; don't snap.
-      // V8: track residual |observation − previous smoothed| as σ proxy.
-      const dxRes = box.cx - this.roiCenterX;
-      const dyRes = box.cy - this.roiCenterY;
-      const resMag = Math.sqrt(dxRes * dxRes + dyRes * dyRes);
-      this.trackerResidualEMA =
-        this.trackerResidualEMA * (1 - this.TRACKER_RES_ALPHA) +
-        resMag * this.TRACKER_RES_ALPHA;
-      this.trackerSigmaPx = this.trackerResidualEMA;
-      this.roiCenterX += (box.cx - this.roiCenterX) * this.ROI_CENTER_ALPHA;
-      this.roiCenterY += (box.cy - this.roiCenterY) * this.ROI_CENTER_ALPHA;
-      this.roiSizeFrac += (targetSizeFrac - this.roiSizeFrac) * this.ROI_SIZE_ALPHA;
+      // V9 — Kalman 1D update per dimension. Observation noise scales with
+      // clipping (glare degrades centroid precision).
+      const r = this.KF_R_BASE * (1 + Math.min(1, totalPixels === 0 ? 0 : 0));
+      const stepCx = this.kfStep(this.kfCx, box.cx, this.KF_Q, r);
+      const stepCy = this.kfStep(this.kfCy, box.cy, this.KF_Q, r);
+      this.kfStep(this.kfSz, targetSizeFrac, this.KF_Q * 0.001, 0.01);
+      this.roiCenterX = this.kfCx.x;
+      this.roiCenterY = this.kfCy.x;
+      this.roiSizeFrac = Math.max(0.5, Math.min(0.95, this.kfSz.x));
+      this.kalmanCovariancePx2 = this.kfCx.P00 + this.kfCy.P00;
+      this.trackerSigmaPx = Math.sqrt(this.kalmanCovariancePx2);
+      // Use the largest residual of the two dims as the centroid jump proxy
+      // (rejected observations report the magnitude of the rejection).
+      this.lastCentroidJumpPx = Math.max(stepCx.residual, stepCy.residual);
     } else {
       // No finger evidence — drift gently back to the geometric center
       // so the next finger touch starts from a neutral position.
       this.roiCenterX += (w / 2 - this.roiCenterX) * 0.05;
       this.roiCenterY += (h / 2 - this.roiCenterY) * 0.05;
       this.roiSizeFrac += (0.85 - this.roiSizeFrac) * 0.05;
-      // Sin observación válida: relajar σ hacia 0.
-      this.trackerResidualEMA *= 0.85;
-      this.trackerSigmaPx = this.trackerResidualEMA;
+      // Sin observación válida: la covarianza Kalman crece; truncamos a una
+      // ventana razonable y seguimos reportando σ honestamente.
+      this.kalmanCovariancePx2 = Math.min(400, this.kalmanCovariancePx2 + this.KF_Q);
+      this.trackerSigmaPx = Math.sqrt(this.kalmanCovariancePx2);
+      this.lastCentroidJumpPx = 0;
     }
     const roiSize = minDim * this.roiSizeFrac;
     const half = roiSize / 2;
