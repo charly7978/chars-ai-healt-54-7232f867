@@ -9,6 +9,17 @@ export interface ForensicGateSnapshot {
   spectralPeakHz: number;
   spectralConcentration: number;
   livenessReason: string;
+  // Optical Evidence Gate (físico, independiente de morfología).
+  opticalEvidence?: boolean;
+  opticalReason?: string;
+  opticalReasonText?: string;
+  opticalMetrics?: {
+    acDc: number; rOverGB: number; texture: number;
+    clipHigh: number; clipLow: number; pi: number; meanR: number;
+  } | null;
+  publicationGate?: boolean;
+  effectiveSampleRate?: number;
+  bufferedSeconds?: number;
 }
 
 export const FORENSIC_CADENCE_OPTIONS = [100, 150, 300, 500, 1000] as const;
