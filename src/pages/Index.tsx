@@ -66,6 +66,10 @@ const Index = () => {
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
+  // Cached/last-trusted sample rate, used to keep delineation stable when
+  // frame timestamps are momentarily missing, sparse or jittery.
+  const cachedSampleRateRef = useRef<number>(30);
+  const cachedSampleRateValidRef = useRef<boolean>(false);
 
   const EMA_ALPHA = 0.3;
   const emaRef = useRef({
@@ -80,22 +84,57 @@ const Index = () => {
   }, []);
 
   const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
-    if (!timestamp || !isFinite(timestamp)) return 30;
+    // Fallback: if no valid timestamp, use performance.now() so we still feed
+    // a real monotonic clock instead of cold-starting at 30 fps.
+    const ts = (typeof timestamp === 'number' && isFinite(timestamp))
+      ? timestamp
+      : performance.now();
+
     const history = frameTimestampHistoryRef.current;
-    if (history.length === 0 || timestamp > history[history.length - 1]) {
-      history.push(timestamp);
-      if (history.length > 24) history.shift();
+    if (history.length === 0 || ts > history[history.length - 1]) {
+      history.push(ts);
+      // Wider window (~1.5–2 s @ 30 fps) for robust median under jitter.
+      if (history.length > 60) history.shift();
     }
-    if (history.length < 6) return 30;
+
+    if (history.length < 6) {
+      return cachedSampleRateValidRef.current ? cachedSampleRateRef.current : 30;
+    }
+
+    // Collect inter-frame deltas in the plausible camera range.
     const deltas: number[] = [];
     for (let i = 1; i < history.length; i++) {
       const d = history[i] - history[i - 1];
-      if (d >= 8 && d <= 120) deltas.push(d);
+      if (d >= 8 && d <= 120 && isFinite(d)) deltas.push(d);
     }
-    if (deltas.length < 4) return 30;
-    deltas.sort((a, b) => a - b);
-    const median = deltas[Math.floor(deltas.length / 2)];
-    return Math.max(15, Math.min(60, 1000 / Math.max(1, median)));
+    if (deltas.length < 4) {
+      return cachedSampleRateValidRef.current ? cachedSampleRateRef.current : 30;
+    }
+
+    // Median + MAD outlier rejection (survives dropped frames / bursts).
+    const sorted = deltas.slice().sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    const devs = sorted.map(v => Math.abs(v - median)).sort((a, b) => a - b);
+    const mad = devs[devs.length >> 1] || 1;
+    const lo = median - 3 * mad;
+    const hi = median + 3 * mad;
+
+    let sum = 0, count = 0;
+    for (let i = 0; i < deltas.length; i++) {
+      const v = deltas[i];
+      if (v >= lo && v <= hi) { sum += v; count++; }
+    }
+    const robustMs = count >= 4 ? sum / count : median;
+    const instantSR = Math.max(15, Math.min(60, 1000 / Math.max(1, robustMs)));
+
+    // EMA smoothing against cached value -> stable SR under variable FPS.
+    const next = cachedSampleRateValidRef.current
+      ? cachedSampleRateRef.current * 0.7 + instantSR * 0.3
+      : instantSR;
+
+    cachedSampleRateRef.current = next;
+    cachedSampleRateValidRef.current = true;
+    return next;
   }, []);
 
   const computeRRStability = useCallback((intervals: number[]): number => {
@@ -284,7 +323,7 @@ const Index = () => {
     totalBeatsRef.current = 0;
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
-    frameTimestampHistoryRef.current = [];
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -346,7 +385,7 @@ const Index = () => {
     }
     setIsMonitoring(false);
     setIsCalibrating(false);
-    frameTimestampHistoryRef.current = [];
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
     if (savedResults) setVitalSigns(savedResults);
     setShowResults(true);
     const total = totalBeatsRef.current;
@@ -372,7 +411,7 @@ const Index = () => {
     fullResetVitalSigns();
     resetHeartBeat();
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
-    frameTimestampHistoryRef.current = [];
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
     setIsCameraOn(false);
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
