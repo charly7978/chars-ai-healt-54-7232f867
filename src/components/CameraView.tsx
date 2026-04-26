@@ -259,16 +259,12 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         if (!mounted) { stream.getTracks().forEach(t => t.stop()); isStartingRef.current = false; return; }
         streamRef.current = stream;
 
-        // Connect video
-        if (videoRef.current) {
+        // The probe loop already attached the winning stream to <video> and
+        // awaited loadedmetadata + play(). Re-assert srcObject as a no-op
+        // safety net in case the element was swapped during teardown.
+        if (videoRef.current && videoRef.current.srcObject !== stream) {
           videoRef.current.srcObject = stream;
-          await new Promise<void>((resolve) => {
-            const video = videoRef.current!;
-            video.onloadedmetadata = async () => {
-              try { await video.play(); } catch {}
-              resolve();
-            };
-          });
+          try { await videoRef.current.play(); } catch {}
         }
 
         const track = stream.getVideoTracks()[0];
