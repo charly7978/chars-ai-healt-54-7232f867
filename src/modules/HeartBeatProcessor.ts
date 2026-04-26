@@ -767,18 +767,75 @@ export class HeartBeatProcessor {
     return out;
   }
 
+  /**
+   * Robust sample-rate estimator.
+   * - Uses real frame timestamps from timestampBuf as the primary source.
+   * - Rejects outliers via MAD (median absolute deviation) to survive jitter,
+   *   dropped frames and bursts.
+   * - Caches the last trusted SR so delineation/morphology stay stable when
+   *   timestamps are momentarily sparse or noisy (variable frame rate).
+   * - Falls back, in order, to: cached SR -> last instantaneous estimate -> 30.
+   */
+  private cachedSampleRate: number = 30;
+  private cachedSampleRateValid: boolean = false;
+  private lastSampleRateUpdateFrame: number = -1;
+
   private estimateSampleRate(): number {
-    if (this.timestampBuf.length < 10) return 30;
-    const n = Math.min(50, this.timestampBuf.length);
-    const intervals: number[] = [];
-    for (let i = 1; i < n; i++) {
-      const d = this.timestampBuf.get(this.timestampBuf.length - n + i) - this.timestampBuf.get(this.timestampBuf.length - n + i - 1);
-      if (d >= 8 && d <= 120) intervals.push(d);
+    // Cheap memoization within the same frame (called several times per tick).
+    if (this.lastSampleRateUpdateFrame === this.frameCount && this.cachedSampleRateValid) {
+      return this.cachedSampleRate;
     }
-    if (intervals.length < 6) return 30;
-    intervals.sort((a, b) => a - b);
-    const median = intervals[Math.floor(intervals.length / 2)];
-    return clamp(1000 / median, 15, 60);
+
+    const tsLen = this.timestampBuf.length;
+    if (tsLen < 6) {
+      return this.cachedSampleRateValid ? this.cachedSampleRate : 30;
+    }
+
+    // Use a wider window (up to 90 deltas) so variable frame rates average out.
+    const n = Math.min(90, tsLen);
+    const start = tsLen - n;
+    const raw: number[] = [];
+    for (let i = 1; i < n; i++) {
+      const d = this.timestampBuf.get(start + i) - this.timestampBuf.get(start + i - 1);
+      // Accept 8..120 ms (≈ 8–125 fps) — anything else is a dropped frame or stall.
+      if (d >= 8 && d <= 120 && isFinite(d)) raw.push(d);
+    }
+    if (raw.length < 5) {
+      return this.cachedSampleRateValid ? this.cachedSampleRate : 30;
+    }
+
+    // Median + MAD outlier rejection.
+    const sorted = raw.slice().sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    const devs = new Array(sorted.length);
+    for (let i = 0; i < sorted.length; i++) devs[i] = Math.abs(sorted[i] - median);
+    devs.sort((a, b) => a - b);
+    const mad = devs[devs.length >> 1] || 1;
+    const lo = median - 3 * mad;
+    const hi = median + 3 * mad;
+
+    let sum = 0, count = 0;
+    for (let i = 0; i < raw.length; i++) {
+      const v = raw[i];
+      if (v >= lo && v <= hi) { sum += v; count++; }
+    }
+    const robustMs = count >= 4 ? sum / count : median;
+    const instantSR = clamp(1000 / Math.max(1, robustMs), 15, 60);
+
+    // Smooth against cached value to avoid step-jumps under variable FPS.
+    const next = this.cachedSampleRateValid
+      ? this.cachedSampleRate * 0.7 + instantSR * 0.3
+      : instantSR;
+
+    this.cachedSampleRate = next;
+    this.cachedSampleRateValid = true;
+    this.lastSampleRateUpdateFrame = this.frameCount;
+    return next;
+  }
+
+  /** Public accessor for downstream modules (fiducial delineation, BP, etc.) */
+  public getSampleRate(): number {
+    return this.estimateSampleRate();
   }
 
   private updateThreshold(range: number): void {
