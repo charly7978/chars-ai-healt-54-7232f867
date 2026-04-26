@@ -112,6 +112,10 @@ const Index = () => {
   });
   const lastAlertAtRef = useRef<Record<string, number>>({});
   const ALERT_COOLDOWN_MS = 2500;
+  // Last frame's publicationGate verdict — used to authorise beep/vibrate
+  // inside HeartBeatProcessor on the NEXT frame (one-frame lag, ~30 ms).
+  // Avoids the deadlock of needing morphology to allow morphology.
+  const lastPublicationGateRef = useRef<boolean>(false);
 
   // ── Forensic session log (rolling ring buffer of overlay snapshots) ──
   // Each entry mirrors the overlay payload + a timestamp + a session ID, so
@@ -892,22 +896,39 @@ const Index = () => {
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
-    // ── SAFEGUARD: refuse beat computation if the session-wide accepted
-    // sample ratio is too low. Below this threshold the signal is dominated
-    // by noise and any IBI/BPM extracted would be artefactual. Requires a
-    // minimum number of samples before activating to avoid blocking the
-    // initial acquisition window.
+    // ── SAFEGUARD ratio: gates PUBLICATION only. NEVER blocks the detector
+    // feed (that would create the historical deadlock where gate3 can't
+    // open because the detector never runs). The detector keeps consuming
+    // candidate OD samples so morphology can build up over time.
     const ACCEPTED_RATIO_MIN = acceptedRatioMinRef.current;
     const ACCEPTED_RATIO_WARMUP_SAMPLES = warmupSamplesRef.current;
     const totalSeen = validSamplesRef.current + noiseSamplesRef.current;
     const acceptedRatio = totalSeen > 0 ? validSamplesRef.current / totalSeen : 0;
     const ratioGuardActive = totalSeen >= ACCEPTED_RATIO_WARMUP_SAMPLES && acceptedRatio < ACCEPTED_RATIO_MIN;
-    const odAccepted = forensicPass && !!(fg as any)?.opticalEvidence;
 
-    // ── AUTO-RELAX: count consecutive accepted (OD) frames. Once the
-    // configured streak is reached, soften the safeguard thresholds so the
-    // operator can keep measuring on a stable signal without manual tuning.
-    if (odAccepted) {
+    // ════════════════════════════════════════════════════════════════
+    //  PROCESSING_GATE — habilita ALIMENTAR el detector cardíaco.
+    //  NO depende de morfología ni de forensicPass ni de publicationGate.
+    //  Solo exige evidencia óptica mínima + buffer + OD computable.
+    //  Esto rompe el deadlock: gate3_morphology necesita que el detector
+    //  corra para poder cerrarse.
+    // ════════════════════════════════════════════════════════════════
+    const om = (fg as any)?.opticalMetrics;
+    const bufferedSeconds = (fg as any)?.bufferedSeconds ?? 0;
+    const opticalOk = !!(fg as any)?.opticalEvidence;
+    const processingAllowed =
+      opticalOk &&
+      om != null &&
+      om.meanR >= 25 && om.meanR <= 245 &&
+      om.clipHigh < 0.20 &&
+      om.clipLow  < 0.20 &&
+      bufferedSeconds >= 1.5 &&
+      Number.isFinite(signalValue);
+
+    // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
+    // independiente de la publicación. Permite suavizar umbrales cuando hay
+    // contacto óptico estable, aunque la morfología aún no se haya validado.
+    if (opticalOk) {
       consecutiveAcceptedRef.current += 1;
       if (
         autoRelaxEnabled &&
@@ -933,47 +954,10 @@ const Index = () => {
       consecutiveAcceptedRef.current = 0;
     }
 
-    if (ratioGuardActive || !odAccepted) {
-      // Do NOT feed the beat detector with non-OD / rejected samples.
+    // Si PROCESSING_GATE está cerrado, no podemos alimentar al detector
+    // (no hay OD utilizable). Limpiamos UI y volvemos.
+    if (!processingAllowed) {
       setHeartbeatSignal(0);
-      unstableFrameCounter.current++;
-      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
-        setHeartRate(0);
-        vitalSignsFrameCounter.current = 0;
-        setBeatMarker(0);
-      }
-      return;
-    }
-
-    const heartBeatResult = processHeartBeat(
-      signalValue,
-      contactState,
-      lastSignal.timestamp,
-      {
-        quality: lastSignal.quality,
-        contactState,
-        motionArtifact: lastSignal.motionArtifact || motionInfo.motionArtifact,
-        pressureState: pressureOptimal ? 'OPTIMAL_PRESSURE' : 'LOW_PRESSURE',
-        clipHigh: 0,
-        clipLow: 0,
-        perfusionIndex: lastSignal.perfusionIndex,
-        positionDrifting: positionQuality.drifting,
-        // FORENSIC: triple-gate + evidencia óptica. SOLO con esto en true
-        // el HeartBeatProcessor permite beep + vibración por latido.
-        publicationGate: forensicPass && !!(fg as any)?.opticalEvidence,
-      }
-    );
-
-    // Gate #2 (spectral) must be open for the waveform to be drawn at all.
-    setHeartbeatSignal(forensicPass ? heartBeatResult.filteredValue : 0);
-
-    // Push Gate #3 (morphology) verdict back into the processor so the next
-    // emitted signal frame carries the truthful triple-gate state.
-    const morphPass = !!(heartBeatResult as any).morphologyGatePass;
-    // Typed feedback path through the signal-processor hook — no globals.
-    setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
-
-    if (!forensicPass) {
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
         setHeartRate(0);
@@ -1005,6 +989,90 @@ const Index = () => {
       return;
     }
 
+    // ════════════════════════════════════════════════════════════════
+    //  ALIMENTACIÓN INCONDICIONAL DEL DETECTOR
+    //  Pasamos publicationGate=false aquí: el detector procesa SIEMPRE
+    //  (analiza, aprende morfología, abre gate3 cuando proceda) pero
+    //  internamente silencia beep/vibrate hasta que setPublicationGate
+    //  se llame con true (lo hacemos más abajo).
+    // ════════════════════════════════════════════════════════════════
+    const heartBeatResult = processHeartBeat(
+      signalValue,
+      contactState,
+      lastSignal.timestamp,
+      {
+        quality: lastSignal.quality,
+        contactState,
+        motionArtifact: lastSignal.motionArtifact || motionInfo.motionArtifact,
+        pressureState: pressureOptimal ? 'OPTIMAL_PRESSURE' : 'LOW_PRESSURE',
+        clipHigh: om?.clipHigh ?? 0,
+        clipLow:  om?.clipLow  ?? 0,
+        perfusionIndex: lastSignal.perfusionIndex,
+        positionDrifting: positionQuality.drifting,
+        // Usamos el veredicto del FRAME ANTERIOR (~30ms de retraso) para
+        // autorizar beep/vibrate del latido actual. Esto evita el deadlock
+        // (morphology no puede depender de morphology) y mantiene el sonido
+        // sincronizado en estado estacionario.
+        publicationGate: lastPublicationGateRef.current,
+      }
+    );
+
+    // Cerrar gate3_morphology con la verdad del detector — SIEMPRE que el
+    // detector haya corrido. Esto es lo que permite que forensicPass pueda
+    // llegar a true en el próximo frame.
+    const morphPass = !!(heartBeatResult as any).morphologyGatePass;
+    setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
+
+    // ════════════════════════════════════════════════════════════════
+    //  PUBLICATION_GATE — autoriza onda visible, BPM, vitals, beep, vibrate.
+    //  Combina los 3 gates ya conocidos + ratio mínimo + confianza BPM.
+    // ════════════════════════════════════════════════════════════════
+    const spectralPass = !!fg?.gate2_spectral;
+    const publicationGate =
+      opticalOk &&
+      spectralPass &&
+      morphPass &&
+      !ratioGuardActive &&
+      heartBeatResult.bpm > 0 &&
+      heartBeatResult.bpmConfidence >= 0.30;
+    lastPublicationGateRef.current = publicationGate;
+
+    if (!publicationGate) {
+      // El detector ya corrió y aprendió de la señal. Solo cerramos la UI.
+      unstableFrameCounter.current++;
+      setHeartbeatSignal(0);
+      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
+        setHeartRate(0);
+        vitalSignsFrameCounter.current = 0;
+        setBeatMarker(0);
+        setRRIntervals([]);
+        setArrhythmiaCount("--");
+        if (arrhythmiaDetectedRef.current) {
+          arrhythmiaDetectedRef.current = false;
+          setArrhythmiaState(false);
+        }
+        setVitalSigns(prev => (
+          prev.measurementConfidence === 'INVALID' && prev.spo2 === 0 && prev.glucose === 0 && prev.pressure.systolic === 0 && prev.pressure.diastolic === 0
+            ? prev
+            : {
+                ...prev,
+                spo2: 0,
+                glucose: 0,
+                pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+                arrhythmiaCount: 0,
+                arrhythmiaStatus: "SIN ARRITMIAS|0",
+                lipids: { totalCholesterol: 0, triglycerides: 0 },
+                lastArrhythmiaData: undefined,
+                signalQuality: 0,
+                measurementConfidence: 'INVALID'
+              }
+        ));
+      }
+      return;
+    }
+
+    // PUBLICATION_GATE = true → autorizamos onda + BPM + beep/vibración.
+    setHeartbeatSignal(heartBeatResult.filteredValue);
     unstableFrameCounter.current = 0;
     // FORENSIC: report the real instantaneous BPM (no EMA), but only when
     // the heartbeat processor has enough morphology-validated confidence.
@@ -1153,7 +1221,7 @@ const Index = () => {
             if (isArrhythmiaDetected) {
               // FORENSIC: vibración de arritmia SOLO si triple-gate + evidencia
               // óptica autorizan publicación. Evita falsas alarmas en aire/ruido.
-              if (forensicPass && (fg as any)?.opticalEvidence && navigator.vibrate) {
+              if (publicationGate && navigator.vibrate) {
                 navigator.vibrate([200, 100, 200]);
               }
               toast({
