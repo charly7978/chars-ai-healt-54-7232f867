@@ -93,6 +93,11 @@ const Index = () => {
   // Highlight the CAL button briefly when the watchdog fires a prompt.
   const [calPromptHighlight, setCalPromptHighlight] = useState(false);
   const calPromptTimerRef = useRef<number | null>(null);
+  const triggerCalPromptHighlight = useCallback(() => {
+    setCalPromptHighlight(true);
+    if (calPromptTimerRef.current) window.clearTimeout(calPromptTimerRef.current);
+    calPromptTimerRef.current = window.setTimeout(() => setCalPromptHighlight(false), 6000);
+  }, []);
   // Independent toggle for the SR diagnostics panel: ?srDiag=1
   const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
