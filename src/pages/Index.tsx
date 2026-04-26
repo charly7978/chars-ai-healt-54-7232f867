@@ -377,6 +377,12 @@ const Index = () => {
   // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
   const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
   const cameraReinitInFlightRef = useRef<boolean>(false);
+  // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const verbose = new URLSearchParams(window.location.search).get('gateLog') === '1';
+    cameraQualityRef.current.setVerbose(verbose);
+  }, []);
   // Cached/last-trusted sample rate, used to keep delineation stable when
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
