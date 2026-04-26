@@ -575,9 +575,18 @@ const Index = () => {
       if (!canvasSized) sizeCanvasToVideo(video);
 
       try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        processFrame(imageData, frameTimestamp);
+        // Motion gate: under sustained SEVERE motion, skip the heavy
+        // drawImage + getImageData + processFrame work, but log the drop
+        // so the rolling 50% drop-rate cap can hold us back when needed.
+        const mc = motionClassifierRef.current;
+        const nowMs = performance.now();
+        const drop = mc.shouldDropFrame(nowMs);
+        mc.markFrame(nowMs, drop);
+        if (!drop) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          processFrame(imageData, frameTimestamp);
+        }
       } catch (e) {
         const now = performance.now();
         if (now - lastErrorLogAt > 2000) {
