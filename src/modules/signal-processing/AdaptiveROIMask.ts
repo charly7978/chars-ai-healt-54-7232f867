@@ -108,16 +108,109 @@ export class AdaptiveROIMask {
     return t;
   })();
 
+  // --- V5: adaptive ROI re-centering state ---
+  // The ROI box was previously fixed to the geometric center of the frame at
+  // 85% of min(w,h). For off-center fingers (very common on phones with the
+  // rear camera near a corner) this leaves half the ROI outside the finger,
+  // which crushes `coverage` and inflates `spatialUniformity` (because the
+  // dark/non-finger half is itself uniform). Both effects sabotage Liveness.
+  //
+  // V5 runs a *very* cheap coarse pre-pass at ~32×32 to estimate the centroid
+  // of the red-dominant (high-luminance) region of the frame, and re-centers
+  // the working ROI on that centroid with light temporal smoothing.
+  // No gate logic is altered — only WHERE we look.
+  private roiCenterX = -1; // smoothed (px in source frame coords)
+  private roiCenterY = -1;
+  private roiSizeFrac = 0.85; // adaptive size fraction of min(w,h)
+  private readonly ROI_CENTER_ALPHA = 0.35; // EMA on centroid
+  private readonly ROI_SIZE_ALPHA = 0.25;   // EMA on size
+
+  /**
+   * Coarse 32×32 pre-pass that returns the centroid of the red-dominant
+   * region and an estimate of its bounding extent (used to size the ROI).
+   * Cost: ~1024 pixel reads — negligible vs the main pass.
+   */
+  private estimateFingerBox(
+    data: Uint8ClampedArray, w: number, h: number,
+  ): { cx: number; cy: number; sizePx: number; mass: number } {
+    const N = 32;
+    const stepX = Math.max(1, (w / N) | 0);
+    const stepY = Math.max(1, (h / N) | 0);
+    let sumW = 0, sumWX = 0, sumWY = 0;
+    let minX = w, maxX = 0, minY = h, maxY = 0;
+    for (let y = 0; y < h; y += stepY) {
+      const rowOff = y * w;
+      for (let x = 0; x < w; x += stepX) {
+        const i = (rowOff + x) << 2;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        // Skip clipped lows (shadows around the finger) and pure saturation.
+        if (r + g + b < 60) continue;
+        // "Finger-likely" pixel: red dominates AND luminance is meaningful.
+        const redDom = r - (g + b) * 0.5;
+        if (redDom < 12 || r < 70) continue;
+        // Weight by red dominance × luminance band (favour 100..240).
+        const lum = (r + g + b) / 3;
+        const lumW = lum < 100 ? lum / 100 : lum > 240 ? Math.max(0, 1 - (lum - 240) / 30) : 1;
+        const wgt = Math.max(0, redDom) * lumW;
+        if (wgt <= 0) continue;
+        sumW += wgt;
+        sumWX += wgt * x;
+        sumWY += wgt * y;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (sumW <= 0) {
+      return { cx: w / 2, cy: h / 2, sizePx: Math.min(w, h) * 0.85, mass: 0 };
+    }
+    const cx = sumWX / sumW;
+    const cy = sumWY / sumW;
+    // Use the larger of the two extents as size hint, padded ×1.15.
+    const extent = Math.max(maxX - minX, maxY - minY) * 1.15;
+    // Clamp to a sensible band: never smaller than 50% nor larger than 95%.
+    const minDim = Math.min(w, h);
+    const sizePx = Math.max(minDim * 0.5, Math.min(minDim * 0.95, extent));
+    return { cx, cy, sizePx, mass: sumW };
+  }
+
   process(imageData: ImageData): ROIMaskResult {
     this.frameCount++;
     const data = imageData.data;
     const w = imageData.width;
     const h = imageData.height;
 
-    // V3: Central ROI: 85% of min dimension (cover more finger area)
-    const roiSize = Math.min(w, h) * 0.85;
-    const sx = Math.floor((w - roiSize) / 2);
-    const sy = Math.floor((h - roiSize) / 2);
+    // V5: Adaptive ROI — coarse pre-pass picks the finger centroid and size,
+    // then we EMA-smooth both to avoid jitter. Falls back to the geometric
+    // center when no red-dominant pixels are found (no finger / pure noise).
+    const minDim = Math.min(w, h);
+    const box = this.estimateFingerBox(data, w, h);
+    const targetSizeFrac = Math.max(0.5, Math.min(0.95, box.sizePx / minDim));
+    if (this.roiCenterX < 0) {
+      // first frame seed
+      this.roiCenterX = box.cx;
+      this.roiCenterY = box.cy;
+      this.roiSizeFrac = targetSizeFrac;
+    } else if (box.mass > 0) {
+      // Smoothly follow the finger; don't snap.
+      this.roiCenterX += (box.cx - this.roiCenterX) * this.ROI_CENTER_ALPHA;
+      this.roiCenterY += (box.cy - this.roiCenterY) * this.ROI_CENTER_ALPHA;
+      this.roiSizeFrac += (targetSizeFrac - this.roiSizeFrac) * this.ROI_SIZE_ALPHA;
+    } else {
+      // No finger evidence — drift gently back to the geometric center
+      // so the next finger touch starts from a neutral position.
+      this.roiCenterX += (w / 2 - this.roiCenterX) * 0.05;
+      this.roiCenterY += (h / 2 - this.roiCenterY) * 0.05;
+      this.roiSizeFrac += (0.85 - this.roiSizeFrac) * 0.05;
+    }
+    const roiSize = minDim * this.roiSizeFrac;
+    const half = roiSize / 2;
+    // Clamp the box inside the frame.
+    const cxC = Math.max(half, Math.min(w - half, this.roiCenterX));
+    const cyC = Math.max(half, Math.min(h - half, this.roiCenterY));
+    const sx = Math.floor(cxC - half);
+    const sy = Math.floor(cyC - half);
     const ex = sx + Math.floor(roiSize);
     const ey = sy + Math.floor(roiSize);
     const roiW = ex - sx;
@@ -423,5 +516,9 @@ export class AdaptiveROIMask {
     this.tileMeanB.fill(0);
     this.tileMeanInit = false;
     this.frameCount = 0;
+    // V5: clear adaptive ROI tracker so the next session starts at center.
+    this.roiCenterX = -1;
+    this.roiCenterY = -1;
+    this.roiSizeFrac = 0.85;
   }
 }
