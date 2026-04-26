@@ -10,6 +10,29 @@ import { computeGlobalSQI } from './SignalQualityEstimator';
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
 
 /**
+ * FORENSIC LIVENESS THRESHOLDS — hemoglobin optical signature.
+ * A live finger over the camera+flash MUST satisfy:
+ *   - red dominance over green+blue (oxyhemoglobin absorbs G+B, reflects R)
+ *   - total brightness inside a plausible "skin under torch" range
+ *   - some amount of coverage of the lens (not pinhole light leak)
+ * Anything failing this is treated as NO_OPTICAL_CONTACT and forces ALL
+ * downstream output to zero (no waveform, no BPM, no SpO2…) — this is what
+ * stops the app from "measuring the air".
+ * Thresholds are intentionally permissive on perfusion (so a cold/shock
+ * finger still passes liveness) but strict on the hemoglobin signature
+ * (so an empty lens, a wall, ambient light or a desk surface NEVER pass).
+ */
+const LIVENESS = {
+  ABSORPTION_MIN: 1.05, // R / (G+B) — hemoglobin signature
+  RED_OVER_GB_MIN: 6,   // R - (G+B)/2 in raw 0..255 units
+  TOTAL_I_MIN: 70,      // too dark → no torch reflection from tissue
+  TOTAL_I_MAX: 740,     // blown out white → no tissue, just glare
+  COVERAGE_MIN: 0.12,   // less than this and there is no finger covering the lens
+  CONFIRM_FRAMES: 4,    // ~130ms at 30fps to lock liveness
+  RELEASE_FRAMES: 8,    // ~270ms to release (anti flicker)
+} as const;
+
+/**
  * PPG SIGNAL PROCESSOR V2
  * 
  * Complete rewrite with:
@@ -67,6 +90,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private readonly FINGER_LOST = 120;     // ~4s tolerance
   private readonly STABLE_THRESHOLD = 40; // ~1.3s for STABLE
   private readonly UNSTABLE_GRACE = 160;
+
+  // --- Forensic optical liveness ---
+  // Independent of the perfusion-based finger detector. Verifies that what
+  // the camera sees has a hemoglobin signature; if not, NO numeric output
+  // is ever produced.
+  private livenessConfirmCount = 0;
+  private livenessLostCount = 0;
+  private opticalLive = false;
+  private lastLivenessReason = 'AIRE / SIN TEJIDO';
 
   // --- Smoothed metrics (EWMA) ---
   private smoothedRed = 0;
@@ -164,6 +196,79 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.spatialUniformity = roi.spatialUniformity;
     this.centerCoverage = roi.centerCoverage;
 
+    // ════════════════════════════════════════════════════════════
+    //  FORENSIC OPTICAL LIVENESS GATE
+    //  This runs BEFORE anything else. If the camera is looking at air,
+    //  ambient light, a wall, a desk, or anything that lacks a hemoglobin
+    //  optical signature → emit NO_OPTICAL_CONTACT with rawValue=0,
+    //  filteredValue=0, quality=0 and DO NOT update buffers, baselines
+    //  or filters. This is the single line of defense that stops the app
+    //  from inventing a "cardiac wave" out of camera noise / autoexposure.
+    // ════════════════════════════════════════════════════════════
+    const lr = roi.rawRed;
+    const lg = roi.rawGreen;
+    const lb = roi.rawBlue;
+    const lAbsorption = (lg + lb) > 1 ? lr / (lg + lb) : 0;
+    const lRedDom = lr - (lg + lb) / 2;
+    const lTotalI = lr + lg + lb;
+    const livenessInstant =
+      lAbsorption >= LIVENESS.ABSORPTION_MIN &&
+      lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
+      lTotalI >= LIVENESS.TOTAL_I_MIN &&
+      lTotalI <= LIVENESS.TOTAL_I_MAX &&
+      roi.coverageRatio >= LIVENESS.COVERAGE_MIN;
+
+    if (livenessInstant) {
+      this.livenessConfirmCount = Math.min(this.livenessConfirmCount + 1, 200);
+      this.livenessLostCount = 0;
+      if (!this.opticalLive && this.livenessConfirmCount >= LIVENESS.CONFIRM_FRAMES) {
+        this.opticalLive = true;
+      }
+    } else {
+      this.livenessLostCount = Math.min(this.livenessLostCount + 1, 200);
+      this.livenessConfirmCount = Math.max(0, this.livenessConfirmCount - 1);
+      if (this.opticalLive && this.livenessLostCount >= LIVENESS.RELEASE_FRAMES) {
+        this.opticalLive = false;
+      }
+      // Build forensic reason string for the diagnostic banner
+      if (lTotalI < LIVENESS.TOTAL_I_MIN) this.lastLivenessReason = 'OSCURO / SIN CONTACTO';
+      else if (lTotalI > LIVENESS.TOTAL_I_MAX) this.lastLivenessReason = 'LUZ DIRECTA / NO ES TEJIDO';
+      else if (lAbsorption < LIVENESS.ABSORPTION_MIN) this.lastLivenessReason = 'SIN FIRMA DE HEMOGLOBINA';
+      else if (roi.coverageRatio < LIVENESS.COVERAGE_MIN) this.lastLivenessReason = 'CUBRA EL LENTE CON EL DEDO';
+      else this.lastLivenessReason = 'SIN CONTACTO ÓPTICO';
+    }
+
+    if (!this.opticalLive) {
+      // HARD FORENSIC ZERO. No buffers, no filter step, no source ranking.
+      // Reset transient detector counters so when liveness returns we start clean.
+      this.fingerDetected = false;
+      this.fingerConfidenceCount = 0;
+      this.stableContactCount = 0;
+      this.contactState = 'NO_CONTACT';
+      this.exportedContactState = 'NO_OPTICAL_CONTACT';
+      this.signalQuality = 0;
+      this.onSignalReady({
+        timestamp,
+        rawValue: 0,
+        filteredValue: 0,
+        quality: 0,
+        fingerDetected: false,
+        contactState: 'NO_OPTICAL_CONTACT',
+        motionArtifact: false,
+        roi: { x: 0, y: 0, width: imageData.width, height: imageData.height },
+        perfusionIndex: 0,
+        rawRed: lr,
+        rawGreen: lg,
+        diagnostics: {
+          message: `SIN PULSO — ${this.lastLivenessReason}`,
+          hasPulsatility: false,
+          pulsatilityValue: 0,
+        },
+      });
+      this.processingTimeMs = performance.now() - t0;
+      return;
+    }
+
     // --- PRESSURE ESTIMATION ---
     const pressure = this.pressureEstimator.estimate({
       coverageRatio: roi.coverageRatio,
@@ -182,9 +287,12 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.updateContactState(roi, pressure);
     const motionArtifact = this.motionScore > this.MOTION_THRESH;
     const motionHigh = this.motionScore > this.MOTION_HIGH_THRESH;
-    const motionGated = this.motionScore > this.MOTION_GATE_THRESH;
+    // FORENSIC: motion is NEVER a hard gate. The forensic operator may move
+    // the phone while examining a victim. Heavy motion only down-weights SQI
+    // (handled below), it does NOT freeze the pipeline.
+    const motionGated = false;
 
-    if (this.exportedContactState === 'NO_CONTACT') {
+    if (this.exportedContactState === 'NO_CONTACT' || this.exportedContactState === 'NO_OPTICAL_CONTACT') {
       this.signalQuality = 0;
       this.onSignalReady({
         timestamp,
@@ -192,7 +300,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         filteredValue: 0,
         quality: 0,
         fingerDetected: false,
-        contactState: 'NO_CONTACT',
+        contactState: this.exportedContactState,
         motionArtifact,
         roi: { x: 0, y: 0, width: imageData.width, height: imageData.height },
         perfusionIndex: 0,
