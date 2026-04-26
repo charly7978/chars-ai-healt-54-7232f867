@@ -483,6 +483,16 @@ const Index = () => {
     const positionQuality = getPositionQuality();
     const motionInfo = getMotionInfo();
 
+    // ════════════════════════════════════════════════════════════
+    //  FORENSIC TRIPLE GATE — single source of truth for the UI.
+    //  If passAll is false → zero everything. No waveform, no BPM, no
+    //  vitals. This is what physically prevents "measuring the air".
+    // ════════════════════════════════════════════════════════════
+    const fg = (lastSignal as any).forensicGate as
+      | { passAll: boolean; gate1_optical: boolean; gate2_spectral: boolean; gate3_morphology: boolean; livenessReason: string; cardiacSNRdB: number; spectralPeakHz: number }
+      | undefined;
+    const forensicPass = !!fg?.passAll;
+
     // FORENSIC: a "stable human signal" is just optical contact + minimal
     // perfusion. We do NOT require GOOD perfusion (a victim in shock won't
     // have it) and we do NOT block on motion (operator may be moving).
@@ -491,7 +501,7 @@ const Index = () => {
     // → we early-return below with everything zeroed.
     const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
 
-    if (noOpticalContact) {
+    if (noOpticalContact || !fg?.gate1_optical) {
       // Hard forensic zero — never invent waveforms or numbers from air.
       setHeartbeatSignal(0);
       setHeartRate(0);
@@ -534,9 +544,20 @@ const Index = () => {
       }
     );
 
-    setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
+    // Gate #2 (spectral) must be open for the waveform to be drawn at all.
+    setHeartbeatSignal(forensicPass ? heartBeatResult.filteredValue : 0);
 
-    if (!stableHumanSignal) {
+    // Push Gate #3 (morphology) verdict back into the processor so the next
+    // emitted signal frame carries the truthful triple-gate state.
+    const morphPass = !!(heartBeatResult as any).morphologyGatePass;
+    try {
+      // best-effort: the underlying processor exposes setMorphologyGate
+      // through the signal-processor singleton; if missing this is a no-op.
+      (window as any).__ppgProcessor?.setMorphologyGate?.(morphPass,
+        morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
+    } catch {}
+
+    if (!forensicPass) {
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
         setHeartRate(0);
