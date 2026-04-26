@@ -18,6 +18,7 @@ import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
+import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -75,6 +76,18 @@ const Index = () => {
   const [showFiducialTuner, setShowFiducialTuner] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("tuner") === "1";
+  });
+  // Clinical calibration wizard. Opened on demand (?calibrate=1 or button).
+  const [showCalibration, setShowCalibration] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("calibrate") === "1";
+  });
+  const [calibrationBaseline, setCalibrationBaseline] = useState<CalibrationBaseline | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const raw = localStorage.getItem('ppg.calibration.baseline');
+      return raw ? (JSON.parse(raw) as CalibrationBaseline) : null;
+    } catch { return null; }
   });
   // Independent toggle for the SR diagnostics panel: ?srDiag=1
   const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
@@ -1774,6 +1787,37 @@ const Index = () => {
         onClick={() => setShowFiducialTuner(v => !v)}
         className="fixed bottom-1 left-1 z-40 w-6 h-6 rounded-full bg-muted/40 hover:bg-muted text-[10px] text-muted-foreground"
       >·</button>
+
+      {/* Clinical calibration trigger — only available while monitoring. */}
+      {isMonitoring && (
+        <button
+          type="button"
+          onClick={() => setShowCalibration(true)}
+          className="fixed bottom-1 left-9 z-40 h-6 px-2 rounded-full bg-primary/15 hover:bg-primary/25 text-[10px] font-medium text-primary border border-primary/30"
+          aria-label="Calibración clínica"
+        >
+          CAL
+        </button>
+      )}
+
+      <CalibrationWizard
+        open={showCalibration}
+        live={{
+          fingerDetected: !!lastSignal?.fingerDetected,
+          quality: lastSignal?.quality ?? 0,
+          bpm: heartRate,
+          spo2: vitalSigns.spo2,
+          motionLevel: motionClassifierRef.current.classify(),
+        }}
+        onCancel={() => setShowCalibration(false)}
+        onComplete={(baseline) => {
+          setCalibrationBaseline(baseline);
+          toast({
+            title: 'Calibración completa',
+            description: `BPM ${baseline.bpmMean.toFixed(1)} ± ${baseline.bpmSd.toFixed(1)} (n=${baseline.bpmSamples}) · SpO₂ ${baseline.spo2Mean.toFixed(1)} ± ${baseline.spo2Sd.toFixed(1)} (n=${baseline.spo2Samples})`,
+          });
+        }}
+      />
 
       <FiducialTuner
         open={showFiducialTuner}
