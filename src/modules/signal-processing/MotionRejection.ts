@@ -166,6 +166,36 @@ export class MotionRejection {
   // V9.4 — count of imuScore samples rejected by the input validator.
   // Surfaced via getTuning() so a flaky IMU shows up in CI telemetry.
   private rejectedImuCount = 0;
+  // V9.5 — last per-frame blend factors (optical, IMU, max). Updated by
+  // `recomputeTuning()` and exposed via getTuning() so external loggers
+  // can correlate tuning switches with downstream artefacts (BPM blips,
+  // SQI dips, etc.) on a frame-by-frame basis.
+  private lastTOpt = 0;
+  private lastTImu = 0;
+  private lastTBlend = 0;
+
+  // V9.5 — per-device IMU baseline calibration. The baseline collector
+  // gathers `imuScore` samples while the user is asked to hold the phone
+  // still for ~2 s. The mean + std of those samples become the device's
+  // *quiet floor*, and the auto-tune trigger/saturate are shifted to sit
+  // a configurable number of std-devs above that floor — this stops a
+  // device with a noisier IMU (or a different driver) from constantly
+  // tripping the IMU branch of the tuner.
+  private calibrating = false;
+  private calibBuf: number[] = [];
+  private calibStartedAt = 0;
+  private calibBaseline: { mean: number; std: number; n: number; updatedAt: number } | null = null;
+  private calibAppliedTrigger: number | null = null;
+  private calibAppliedSaturate: number | null = null;
+
+  /** Per-device calibration tuning constants (frozen — no need to expose). */
+  private static readonly CAL_DURATION_MS = 2000;
+  private static readonly CAL_MIN_SAMPLES = 30;
+  private static readonly CAL_MAX_SAMPLES = 600;
+  /** Trigger sits at mean + this many std-devs above the quiet floor. */
+  private static readonly CAL_TRIGGER_K = 2.0;
+  /** Saturate sits at mean + this many std-devs above the quiet floor. */
+  private static readonly CAL_SATURATE_K = 6.0;
 
   /** Patch any subset of the config; unspecified fields keep current values. */
   setConfig(patch: Partial<MotionRejectionConfig>): void {
