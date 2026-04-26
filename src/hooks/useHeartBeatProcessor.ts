@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
 import type { ContactState } from '../types/signal';
 import type { HeartBeatResult } from '../types/beat';
+import type { FiducialParams } from '../modules/beats/FiducialDelineator';
 
 /**
  * HOOK DE PROCESAMIENTO CARDÍACO V2
@@ -137,6 +138,14 @@ export const useHeartBeatProcessor = () => {
 
   const setArrhythmiaState = useCallback((_isArrhythmiaDetected: boolean) => {}, []);
 
+  const setFiducialParams = useCallback((patch: Partial<FiducialParams>) => {
+    processorRef.current?.setFiducialParams(patch);
+  }, []);
+
+  const getFiducialParams = useCallback((): FiducialParams | null => {
+    return processorRef.current?.getFiducialParams() ?? null;
+  }, []);
+
   return {
     currentBPM,
     confidence,
@@ -144,6 +153,8 @@ export const useHeartBeatProcessor = () => {
     processSignal,
     reset,
     setArrhythmiaState,
+    setFiducialParams,
+    getFiducialParams,
     debugInfo: {
       sessionId: sessionIdRef.current,
       processingState: processingStateRef.current,
