@@ -83,6 +83,36 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // session where the app says it isn't detecting pulses.
   private roiTelemetry = new ROITelemetryLogger();
 
+  /**
+   * V6: emit one structured telemetry record per processed frame so the
+   * operator can export ROI/Liveness traces and audit failures offline.
+   */
+  private logRoiTelemetry(
+    timestamp: number,
+    roi: ROIMaskResult,
+    livenessPass: boolean,
+    livenessReason: string,
+  ): void {
+    this.roiTelemetry.record({
+      t: timestamp,
+      frame: this.frameCount,
+      cx: roi.roiBox.cx,
+      cy: roi.roiBox.cy,
+      sizePx: roi.roiBox.sizePx,
+      sizeFrac: roi.roiBox.sizeFrac,
+      coverage: roi.coverageRatio,
+      livenessPass,
+      livenessReason,
+      prepassRedDomMin: roi.prepassThresholds.redDomMin,
+      prepassRedMin: roi.prepassThresholds.redMin,
+      prepassSuccessRate: roi.prepassSuccessRate,
+      prepassMass: roi.roiBox.mass,
+    });
+  }
+
+  /** Public accessors for the telemetry logger (used by hook + UI export). */
+  public getROITelemetry(): ROITelemetryLogger { return this.roiTelemetry; }
+
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
   private redBuf = new RingBuffer(300);
