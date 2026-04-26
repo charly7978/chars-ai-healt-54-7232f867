@@ -1379,7 +1379,7 @@ const Index = () => {
           const isDrifting = pq.drifting;
           const isLocked = pq.locked && !isDrifting;
           return (
-            <div className="absolute top-2 left-0 right-0 z-30 flex justify-center pointer-events-none">
+            <div className="auto-hide safe-top absolute top-0 left-0 right-0 z-30 flex justify-center pointer-events-none">
               <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider shadow-md backdrop-blur-md border ${
                 isLocked ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300' :
                 isDrifting ? 'bg-red-500/15 border-red-500/30 text-red-300 animate-pulse' :
@@ -1409,7 +1409,7 @@ const Index = () => {
 
         {/* Threshold calibration - floating panel */}
         {showForensicOverlay && isMonitoring && (
-          <div className="fixed top-3 right-3 z-40 font-mono">
+          <div className="auto-hide fixed top-0 right-0 z-40 font-mono safe-top safe-right">
             <button
               type="button"
               onClick={() => setShowThresholdPanel(v => !v)}
@@ -1508,7 +1508,7 @@ const Index = () => {
           const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
           const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
           return (
-            <div className="absolute top-10 left-2 z-30 pointer-events-none">
+            <div className="auto-hide safe-top safe-left absolute top-8 left-0 z-30 pointer-events-none">
               <div className={`rounded-lg px-2.5 py-1.5 border backdrop-blur-md shadow-lg ${
                 pulsePresent
                   ? 'bg-emerald-500/10 border-emerald-400/50'
@@ -1535,13 +1535,15 @@ const Index = () => {
 
         {/* CIVIL MODE - compact bottom-right chip */}
         {CIVIL_MODE && (
-          <div className="absolute bottom-2 right-2 z-30 bg-black/70 backdrop-blur-md border border-slate-700/50 rounded-lg px-2 py-1.5 pointer-events-none">
-            <div className="text-[7px] text-amber-400/80 mb-0.5 tracking-widest">⚠ CIVIL · NO CLÍNICO</div>
-            <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] font-mono">
-              <span className="text-slate-400">FC <span className="text-white">{heartRate > 0 ? Math.round(heartRate) : "--"}</span></span>
-              <span className="text-slate-400">O₂ <span className="text-white">{vitalSigns.spo2 > 0 ? vitalSigns.spo2.toFixed(0) : "--"}%</span></span>
-              <span className="text-slate-400">PA <span className="text-white">{vitalSigns.pressure?.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}</span></span>
-              <span className="text-slate-400">GL <span className="text-white">{vitalSigns.glucose > 0 ? vitalSigns.glucose.toFixed(0) : "--"}</span></span>
+          <div className="auto-hide safe-bottom safe-right absolute bottom-0 right-0 z-30 pointer-events-none">
+            <div className="bg-black/70 backdrop-blur-md border border-slate-700/50 rounded-lg px-2 py-1.5">
+              <div className="text-[7px] text-amber-400/80 mb-0.5 tracking-widest">⚠ CIVIL · NO CLÍNICO</div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] font-mono">
+                <span className="text-slate-400">FC <span className="text-white">{heartRate > 0 ? Math.round(heartRate) : "--"}</span></span>
+                <span className="text-slate-400">O₂ <span className="text-white">{vitalSigns.spo2 > 0 ? vitalSigns.spo2.toFixed(0) : "--"}%</span></span>
+                <span className="text-slate-400">PA <span className="text-white">{vitalSigns.pressure?.systolic > 0 ? `${vitalSigns.pressure.systolic}/${vitalSigns.pressure.diastolic}` : "--/--"}</span></span>
+                <span className="text-slate-400">GL <span className="text-white">{vitalSigns.glucose > 0 ? vitalSigns.glucose.toFixed(0) : "--"}</span></span>
+              </div>
             </div>
           </div>
         )}
