@@ -21,6 +21,7 @@ import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
 import { CameraQualityGate, type CameraSignalHealth } from "@/modules/signal-processing/CameraQualityGate";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
+import { usePpgCamera } from "@/hooks/usePpgCamera";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
