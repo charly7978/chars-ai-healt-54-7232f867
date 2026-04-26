@@ -134,6 +134,14 @@ const Index = () => {
   const sessionIdRef = useRef<string>("");
   const SESSION_LOG_MAX = 4000; // ~10 min @ 1 sample / 150 ms
   const [sessionLogSize, setSessionLogSize] = useState(0);
+  // Session-wide counters: a "valid sample" is one where the triple gate
+  // passed at the moment we sampled it; a "noise sample" is everything
+  // else (any gate closed). The percentage tells the operator whether
+  // the device is truly measuring or staring at noise.
+  const validSamplesRef = useRef(0);
+  const noiseSamplesRef = useRef(0);
+  const [validSamples, setValidSamples] = useState(0);
+  const [noiseSamples, setNoiseSamples] = useState(0);
 
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
