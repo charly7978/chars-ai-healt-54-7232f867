@@ -1170,6 +1170,67 @@ const Index = () => {
           noiseSamples={noiseSamples}
         />
 
+        {/* ── Threshold calibration panel (gear toggle) ────────────── */}
+        {showForensicOverlay && isMonitoring && (
+          <div className="fixed top-2 right-[296px] z-50 font-mono">
+            <button
+              type="button"
+              onClick={() => setShowThresholdPanel(v => !v)}
+              className="rounded-md border border-zinc-700/70 bg-black/75 backdrop-blur-sm px-2 py-1 text-[10px] font-bold tracking-wide text-zinc-200 hover:bg-zinc-800/80"
+              title="Calibrar umbrales del safeguard"
+            >
+              {showThresholdPanel ? 'CERRAR ⚙' : 'UMBRALES ⚙'}
+            </button>
+            {showThresholdPanel && (
+              <div className="mt-1 w-[240px] rounded-lg border border-zinc-700/70 bg-black/85 backdrop-blur-sm p-2 text-[11px] text-zinc-100 shadow-xl space-y-2">
+                <div className="text-[10px] font-bold tracking-widest text-zinc-300 border-b border-zinc-700/60 pb-1">
+                  CALIBRACIÓN SAFEGUARD
+                </div>
+                <div>
+                  <div className="flex justify-between mb-0.5">
+                    <span className="text-zinc-400">Ratio mínimo aceptado</span>
+                    <span className="text-emerald-300 font-bold">{Math.round(acceptedRatioMin * 100)}%</span>
+                  </div>
+                  <input
+                    type="range" min={0.10} max={0.30} step={0.01}
+                    value={acceptedRatioMin}
+                    onChange={(e) => setAcceptedRatioMin(parseFloat(e.target.value))}
+                    className="w-full accent-emerald-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-zinc-500">
+                    <span>10%</span><span>30%</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-0.5">
+                    <span className="text-zinc-400">Warm-up (muestras)</span>
+                    <span className="text-emerald-300 font-bold">{warmupSamples}</span>
+                  </div>
+                  <input
+                    type="range" min={30} max={150} step={5}
+                    value={warmupSamples}
+                    onChange={(e) => setWarmupSamples(parseInt(e.target.value, 10))}
+                    className="w-full accent-emerald-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-zinc-500">
+                    <span>30</span><span>150</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setAcceptedRatioMin(0.15); setWarmupSamples(60); }}
+                  className="w-full rounded-md border border-zinc-600/60 bg-zinc-800/60 hover:bg-zinc-700/60 text-[10px] font-bold tracking-wide py-1"
+                >
+                  RESET (15% / 60)
+                </button>
+                <div className="text-[9px] text-zinc-500 leading-tight">
+                  Bloquea cómputo de latidos si la ratio de muestras válidas en sesión cae bajo el umbral, tras superar el warm-up.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {isMonitoring && (() => {
           const pq = getPositionQuality();
           const isDrifting = pq.drifting;
