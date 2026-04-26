@@ -1,66 +1,77 @@
-# Auditoría Forense del Repositorio — Archivo por Archivo
+Voy a corregirlo en dos frentes inseparables: primero despejar la pantalla para que el monitor cardíaco sea realmente el fondo 100%, y segundo endurecer/ajustar la extracción PPG real para que no se quede bloqueada por umbrales o gates contradictorios.
 
-## Evidencia de revisión
+Plan de implementación
 
-Inventario completo: **133 archivos** en el repo (excluyendo `node_modules`, `.git`, `dist`).
-De esos: **92 archivos fuente/config** + 2 migraciones SQL + lockfiles + assets.
+1. Rediseñar la pantalla como monitor 100%
+- Convertir `PPGSignalMeter` en el lienzo principal absoluto de toda la pantalla, sin paneles grandes dentro del canvas que tapen la onda.
+- Eliminar del canvas los bloques redundantes que hoy ocupan área útil: panel superior grande, panel derecho de SpO2 en modo forense, panel morfológico inferior, historial de latidos grande, leyenda y banner grande.
+- Mantener solo la onda, grid, escala mínima y marcadores esenciales, maximizando el área de trazado.
+- Mover la información crítica a overlays HTML compactos y translúcidos: BPM/estado, calidad/SQI, fuente activa, presión, razón de bloqueo.
+- Hacer que controles `INICIAR/DETENER` y `RESET` sean botones flotantes pequeños, no una barra fija de 48px tapando el monitor.
 
-He auditado cada archivo `.ts/.tsx/.js/.json/.md/.css/.html/.toml/.yml` con tres pasadas:
+2. Reorganizar overlays por importancia
+- Crear una estructura visual tipo cockpit:
+```text
+┌──────────────────────────────┐
+│  mini estado/contacto/BPM     │
+│                              │
+│                              │
+│     MONITOR PPG 100%          │
+│       onda + grid             │
+│                              │
+│  controles compactos          │
+└──────────────────────────────┘
+```
+- Ocultar o colapsar `ForensicGateOverlay` por defecto para que no tape el monitor; dejarlo accesible con botón `DEBUG`.
+- Reemplazar el panel de umbrales flotante grande por un panel desplegable compacto solo cuando debug esté activo.
+- Mantener información técnica, pero sin invadir la onda.
 
-1. **Búsqueda de patrones obsoletos** (`deprecated|legacy|obsolete|TODO|FIXME|HACK|mock|fake|simulate`) en todo `src/`, `scripts/`, `supabase/`. Resultado: solo 3 menciones de "legacy" en `Index.tsx` (comentarios descriptivos, no código muerto).
-2. **Forensic audit existente** (`scripts/audit-forensic.mjs` + `src/test/forensic-audit.test.ts`) — el repo ya está blindado contra `Math.random`, defaults fisiológicos, `mock/fake/synthetic`, etc. **0 violaciones activas** fuera de allowlist documentada.
-3. **Detección de archivos huérfanos** — para cada archivo fuente busqué su nombre como import en el resto del repo. Resultado: **8 archivos sin un solo import**.
+3. Corregir captura y timing de frames
+- Cambiar el canvas de procesamiento de `320x240` a una resolución interna mayor y adaptativa según el video real, con límite móvil seguro para rendimiento.
+- Usar correctamente `requestVideoFrameCallback(now, metadata)` y pasar `metadata.presentationTime`/`expectedDisplayTime` convertido a milisegundos cuando exista; fallback con `performance.now()`.
+- Eliminar `console.log` por frame, porque genera jank y puede arruinar la detección en móviles.
+- Medir tiempo de captura/procesamiento sin contaminar el hot path.
 
-## Hallazgos — Archivos huérfanos confirmados (BASURA, eliminar)
+4. Arreglar la detección de dedo/liveness que está bloqueando señal real
+- Revisar los gates que hoy pueden impedir detección aun con dedo: `LIVENESS`, `OpticalEvidenceGate`, `coverage`, `texture`, `AC/DC`, `clipHigh`, `gate2`, `gate3`.
+- Separar claramente:
+  - contacto óptico real del dedo,
+  - calidad de pulsatilidad,
+  - autorización final de publicación.
+- Evitar que el monitor se quede en `NO PULSO` mientras sí hay contacto óptico pero aún no hay morfología suficiente.
+- Hacer el modo de visualización de señal más útil: mostrar señal PPG cruda/filtrada cuando hay contacto óptico real, aunque BPM todavía esté en adquisición, sin inventar BPM.
+- Mantener la filosofía de no falsear lecturas: si no hay latido validado, no publicar BPM, pero sí permitir ver la onda real de adquisición.
 
-| # | Archivo | LOC | Razón |
-|---|---|---|---|
-| 1 | `src/pages/Auth.tsx` | 109 | Página de login/registro Supabase nunca enrutada (`App.tsx` solo monta `/` → `Index` y `*` → `NotFound`). Importa `useToast` que tampoco se usa. |
-| 2 | `src/components/CameraPreview.tsx` | 73 | Componente de preview alternativo. El sistema usa `CameraView.tsx`. Cero imports. |
-| 3 | `src/components/MonitorButton.tsx` | 30 | Botón obsoleto. Cero imports. |
-| 4 | `src/components/ui/card.tsx` | 79 | Componente shadcn/ui no usado por ninguna pantalla. |
-| 5 | `src/components/ui/sonner.tsx` | 29 | Toaster alternativo (sonner). El proyecto usa `@/hooks/use-toast` (radix). Cero imports. |
-| 6 | `src/components/ui/toaster.tsx` | 33 | Toaster radix nunca montado en `App.tsx`. Cero imports. |
-| 7 | `src/components/ui/use-toast.ts` | 5 | Re-export trivial de `@/hooks/use-toast`. Solo `Index.tsx` lo importa **y se puede redirigir** al hook real, eliminando el shim. |
-| 8 | `src/utils/qualityUtils.ts` | 44 | Util de calidad legacy. La calidad real vive en `SignalQualityEstimator.ts` + `qualityUtils` no aparece en ningún import. |
+5. Mejorar ROI adaptativo para cobertura real
+- Reducir el ROI fine cuando haya buena masa de dedo para evitar mezclar bordes negros/flash saturado.
+- Cambiar el cálculo de `coverageRatio` para que represente cobertura dentro del ROI adaptado, no castigar injustamente por una grilla demasiado grande.
+- Suavizar el centroide y tamaño, pero permitir reubicación más rápida si el dedo está fuera del centro.
+- Exportar ROI real (`x/y/width/height`) en `ProcessedSignal` para overlay/debug futuro.
 
-**Total a eliminar: ~402 LOC de código muerto.**
+6. Ajustar presión y clipping sin bloquear dedos reales
+- Distinguir saturación local tolerable de saturación global destructiva.
+- Penalizar `HIGH_PRESSURE`, pero no matar la adquisición si todavía hay AC/DC útil.
+- Actualizar mensajes: “reduzca presión”, “cubra lente”, “mueva dedo al centro”, “mantenga quieto”, según causa real.
 
-## Hallazgos — Sin basura detectada
+7. Validación final
+- Ejecutar build limpio.
+- Ejecutar pruebas unitarias/instrumentación existentes.
+- Ejecutar auditoría forense contra simulaciones/fakes.
+- Revisar que no haya `Math.random`, mocks ni datos fisiológicos simulados.
+- Entregar resumen de archivos cambiados y evidencia de verificación.
 
-Los **84 archivos restantes** están todos referenciados y pertenecen al pipeline forense activo:
+Archivos principales a modificar
+- `src/components/PPGSignalMeter.tsx`
+- `src/pages/Index.tsx`
+- `src/modules/signal-processing/PPGSignalProcessor.ts`
+- `src/modules/signal-processing/AdaptiveROIMask.ts`
+- `src/modules/signal-processing/OpticalEvidenceGate.ts`
+- `src/types/signal.d.ts`
 
-- **Pipeline DSP** (`src/modules/signal-processing/*` — 12 archivos): todos importados por `PPGSignalProcessor.ts` o tests.
-- **Vital signs** (`src/modules/vital-signs/*` — 6 archivos): orquestados por `VitalSignsProcessor.ts`.
-- **Biomarkers research** (`GlucoseResearchProcessor`, `LipidResearchProcessor`): usados por `VitalSignsProcessor`.
-- **Hooks** (`useSignalProcessor`, `useVitalSignsProcessor`, `useHeartBeatProcessor`, `useHealthAnalysis`, `useSaveMeasurement`, `use-toast`): todos consumidos por `Index.tsx` o entre sí.
-- **UI** (`PPGSignalMeter`, `VitalSign`, `CameraView`, `ForensicGateOverlay`, `FiducialTuner`, `SRDiagnostics`, `ui/button`, `ui/input`, `ui/toast`): todos montados en `Index.tsx`.
-- **Tests** (4 archivos): `forensic-audit`, `srDiagnosticsState`, `PPGSignalProcessor.gates`, `SampleRateEstimator` — todos en suite vitest activa.
-- **Configs** (`vite`, `vitest`, `tailwind`, `tsconfig*`, `eslint`, `postcss`, `components.json`): necesarios para build.
-- **Supabase** (`client.ts`, `types.ts`, `config.toml`, edge function `analyze-vitals`, 2 migraciones): backend activo.
-
-## Acciones a ejecutar
-
-1. **Eliminar 8 archivos huérfanos** listados arriba.
-2. **Reemplazar 1 import** en `src/pages/Index.tsx`:
-   - `from "@/components/ui/use-toast"` → `from "@/hooks/use-toast"` (elimina el shim sin romper nada).
-3. **Verificación post-cleanup**:
-   - `bun run build` → debe compilar sin errores.
-   - `node scripts/audit-forensic.mjs` → debe seguir verde.
-   - `bunx vitest run` → los 33 tests deben seguir pasando.
-   - Re-ejecutar el detector de huérfanos para confirmar 0 archivos sin import.
-
-## Lo que NO voy a tocar (justificación forense)
-
-- **`HeartBeatProcessor.ts`, `PPGSignalProcessor.ts`, `OpticalEvidenceGate.ts`, etc.**: núcleo del pipeline ya endurecido en mensajes previos.
-- **Comentarios "legacy" en `Index.tsx`**: son notas descriptivas sobre estructura UI, no código muerto.
-- **`docs/medical-validation.md`, `README.md`, `.workspace/AGENTS.md`**: documentación viva.
-- **Migraciones SQL**: historial inmutable de Supabase.
-- **`bun.lockb`, `package-lock.json`**: lockfiles necesarios.
-
-## Resultado esperado
-
-- Repo pasa de 92 → 84 archivos fuente útiles.
-- –402 LOC de código muerto.
-- Sin pérdida funcional (los 8 archivos no se usan en runtime ni en tests).
-- Forensic audit y suite de tests siguen verdes.
+Criterio de éxito
+- El monitor cardíaco ocupa visualmente el 100% de la pantalla.
+- Los elementos no tapan la onda; solo quedan overlays compactos y controlados.
+- La app diferencia “contacto óptico adquirido” de “BPM validado”.
+- La señal real puede verse durante adquisición sin publicar BPM falso.
+- La detección deja de depender de umbrales visuales demasiado restrictivos que bloquean dedos reales bajo flash.
+- Build, tests y auditoría pasan sin errores.
