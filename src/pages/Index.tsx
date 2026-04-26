@@ -1299,6 +1299,30 @@ const Index = () => {
         });
       }
 
+      // V9.4 — Camera quality gate. Runs at the same cadence as the rest
+      // of the CIVIL_MODE block (every N frames). If the gate has been
+      // unhappy for ≥ badFrameStreak consecutive samples it returns true
+      // → we bounce isCameraOn off → on, which forces CameraView's start
+      // effect to renegotiate the MediaStream from scratch.
+      const needReinit = cameraQualityRef.current.inspect({
+        redDC:   rgbStats.redDC,
+        greenDC: rgbStats.greenDC,
+        redAC:   rgbStats.redAC,
+        greenAC: rgbStats.greenAC,
+      });
+      if (needReinit && isMonitoring && !cameraReinitInFlightRef.current) {
+        cameraReinitInFlightRef.current = true;
+        const verdict = cameraQualityRef.current.getStats().lastVerdict;
+        console.warn('🔁 Camera quality gate → reinit:', verdict.reason);
+        setIsCameraOn(false);
+        // Allow CameraView's stopCamera() to run, then re-enable.
+        window.setTimeout(() => {
+          if (isProcessingRef.current) setIsCameraOn(true);
+          // Cooldown: clear in-flight a bit later so we don't loop.
+          window.setTimeout(() => { cameraReinitInFlightRef.current = false; }, 2000);
+        }, 400);
+      }
+
       const usableRRData = heartBeatResult.rrData && heartBeatResult.rrData.intervals.length >= 2 && heartBeatResult.bpmConfidence > 0.18
         ? heartBeatResult.rrData
         : undefined;
