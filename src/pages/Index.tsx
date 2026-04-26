@@ -12,6 +12,7 @@ import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
 import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
+import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -966,6 +967,10 @@ const Index = () => {
         setParams={setFiducialParams}
         liveStats={fiducialLive}
       />
+
+      {/* SR diagnostics — visible alongside the tuner so devs can see the
+          frame timing health (stall, recovery, last trusted SR) live. */}
+      <SRDiagnostics estimator={srEstimatorRef.current} hidden={!showFiducialTuner} />
     </div>
   );
 };
