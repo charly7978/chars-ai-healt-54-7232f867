@@ -1320,7 +1320,10 @@ const Index = () => {
         setIsCameraOn(false);
         // Allow CameraView's stopCamera() to run, then re-enable.
         window.setTimeout(() => {
-          if (isProcessingRef.current) setIsCameraOn(true);
+          if (isProcessingRef.current) {
+            cameraQualityRef.current.reset(); // restart warm-up window
+            setIsCameraOn(true);
+          }
           // Cooldown: clear in-flight a bit later so we don't loop.
           window.setTimeout(() => { cameraReinitInFlightRef.current = false; }, 2000);
         }, 400);
