@@ -927,14 +927,6 @@ const Index = () => {
   useEffect(() => {
     if (!lastSignal || !isMonitoring) return;
     
-    console.log('📊 lastSignal recibido:', {
-      filteredValue: lastSignal.filteredValue,
-      quality: lastSignal.quality,
-      fingerDetected: lastSignal.fingerDetected,
-      contactState: (lastSignal as any).contactState,
-      timestamp: lastSignal.timestamp
-    });
-    
     const signalValue = lastSignal.filteredValue;
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
     const noOpticalContact = contactState === 'NO_OPTICAL_CONTACT' || contactState === 'NO_CONTACT';
@@ -1084,14 +1076,6 @@ const Index = () => {
       return;
     }
     
-    // Si gate1 no pasa pero hay señal, procesar de todos modos para análisis forense
-    console.log('⚠️ Gate1 no pasa pero procesando para análisis:', {
-      gate1: fg?.gate1_optical,
-      contactState: (lastSignal as any)?.contactState,
-      quality: lastSignal.quality,
-      signalValue
-    });
-
     const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
@@ -1119,15 +1103,6 @@ const Index = () => {
     const processingAllowed =
       Number.isFinite(signalValue) &&
       (opticalOk || lastSignal.quality > 0); // Permitir si hay calidad mínima
-
-    console.log('🔍 Processing gate:', {
-      processingAllowed,
-      opticalOk,
-      signalValue,
-      quality: lastSignal.quality,
-      bufferedSeconds,
-      om
-    });
 
     // Auto-relax counter — sigue mirando "OD aceptada por evidencia óptica",
     // independiente de la publicación. Permite suavizar umbrales cuando hay
