@@ -692,6 +692,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       publicationGate: passAll,
       effectiveSampleRate,
       bufferedSeconds,
+      // RAW liveness telemetry — surfaces the exact numbers driving G1.
+      livenessRaw: {
+        rawR: this.g1RawR,
+        rawG: this.g1RawG,
+        rawB: this.g1RawB,
+        totalI: this.g1TotalI,
+        absorption: this.g1Absorption,
+        redDom: this.g1RedDom,
+        texture: this.g1Texture,
+        coverage: this.g1Coverage,
+        confirmCount: this.livenessConfirmCount,
+        lostCount: this.livenessLostCount,
+      },
     };
   }
 
