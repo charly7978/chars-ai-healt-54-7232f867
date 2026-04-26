@@ -352,8 +352,33 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     if (!this.isProcessing || !this.onSignalReady) return;
 
     const t0 = performance.now();
-    this.frameCount++;
     const timestamp = frameTimestamp ?? performance.now();
+
+    // ── V8: TIMING REAL ESTRICTO ──────────────────────────────────
+    // 1) Duplicado: rVFC entregó dos callbacks con (casi) el mismo mediaTime.
+    //    Lo descartamos completo — procesarlo contaminaría el sample-rate
+    //    estimado y duplicaría el latido visual.
+    // 2) Salto: la cámara dropeó ≥1 frame. NO lo extrapolamos: marcamos
+    //    `frameJump=true`, congelamos el bandpass este frame (no llamamos
+    //    `filter()`) y publicamos quality *= 0.5.
+    let dtMs = 0;
+    let frameJump = false;
+    if (this.lastFrameTime > 0) {
+      dtMs = timestamp - this.lastFrameTime;
+      if (dtMs > 0 && dtMs < this.DT_DUPLICATE_MS) {
+        this.duplicateFrameCount++;
+        // No actualizar lastFrameTime: el siguiente dt se mide contra
+        // el último frame válido (preserva estimación correcta de fps).
+        this.processingTimeMs = performance.now() - t0;
+        return;
+      }
+      if (dtMs > this.DT_JUMP_MS) {
+        this.jumpFrameCount++;
+        frameJump = true;
+      }
+    }
+    this.lastFrameJump = frameJump;
+    this.frameCount++;
     this.updateSampleRate(timestamp);
 
     // --- ADAPTIVE ROI ---
