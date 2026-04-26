@@ -83,8 +83,20 @@ export class BloodPressureProcessor {
     this.lastSBP = sbp;
     this.lastDBP = dbp;
 
-    sbp = Math.max(85, Math.min(180, sbp));
-    dbp = Math.max(50, Math.min(110, dbp));
+    // FORENSIC: never clamp to a "normal" range. If the regression produces a
+    // value outside physiologically plausible bounds, the underlying features
+    // are unreliable — reject the estimate instead of fabricating a normal one.
+    // Bounds are *rejection limits*, not display caps.
+    const SBP_MIN = 70, SBP_MAX = 220;
+    const DBP_MIN = 40, DBP_MAX = 130;
+    if (!isFinite(sbp) || !isFinite(dbp) ||
+        sbp < SBP_MIN || sbp > SBP_MAX ||
+        dbp < DBP_MIN || dbp > DBP_MAX) {
+      // Reset EMA so a future bad value doesn't drag a clean one back into range.
+      this.lastSBP = 0;
+      this.lastDBP = 0;
+      return insufficient;
+    }
     const map = dbp + (sbp - dbp) / 3;
     const featureQuality = this.assessFeatureQuality(mf, useCycles.length);
     const confidence = this.assessConfidence(featureQuality, useCycles.length);
