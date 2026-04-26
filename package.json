@@ -8,7 +8,11 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:forensic": "vitest run src/test/forensic-audit.test.ts",
+    "audit:forensic": "node scripts/audit-forensic.mjs",
+    "ci:guard": "npm run audit:forensic && npm run test:forensic && npm run lint && npm run build"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.1.0",
