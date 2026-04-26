@@ -380,16 +380,20 @@ const Index = () => {
   // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
   const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
   const cameraReinitInFlightRef = useRef<boolean>(false);
-  // Frame-loop watchdog: tracks last successful captureOneFrame tick so
-  // we can soft-restart the loop (NOT the camera) if the page tab was
-  // backgrounded, the rVFC chain stalled, or motion gating somehow held
-  // the loop. We only touch the camera if the underlying MediaStreamTrack
-  // is actually dead (readyState === 'ended' or no live video track).
+  // Frame-loop watchdog: driven entirely by requestVideoFrameCallback.
+  // No setInterval / no requestAnimationFrame polling. Each rVFC tick
+  // updates `lastFrameAtRef` and inspects the inter-frame gap to decide
+  // whether the previous frame was "late" (loop stalled and self-recovered).
+  // Truly dead streams are caught event-driven via MediaStreamTrack
+  // listeners (`onended`, `onmute`) attached when the stream becomes ready,
+  // not by polling.
   const lastFrameAtRef = useRef<number>(0);
-  const watchdogTimerRef = useRef<number | null>(null);
   const softRestartCountRef = useRef<number>(0);
   const lastSoftRestartAtRef = useRef<number>(0);
   const lastSignalHealthCommitAtRef = useRef<number>(0);
+  // Listeners attached to the live video track so we can react to a dead
+  // stream the moment the platform tells us, instead of polling.
+  const trackListenersCleanupRef = useRef<(() => void) | null>(null);
   // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -613,23 +617,40 @@ const Index = () => {
       canvasSized = true;
     };
 
+    // Inline rVFC-driven stall detection: the moment a frame fires, we
+    // measure how long it has been since the previous frame. If that gap
+    // exceeds STALL_MS we assume the loop self-recovered (rVFC eventually
+    // fired) and just bookkeep a soft-restart event for telemetry. We do
+    // NOT use setInterval / requestAnimationFrame to poll — dead-stream
+    // detection is event-driven via track.onended / track.onmute below.
+    const STALL_MS = 1500;
+
     const captureOneFrame = (frameTimestamp: number) => {
       if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
       const video = cameraRef.current?.getVideoElement();
       if (!video || video.readyState < 2 || video.videoWidth === 0) {
-        frameLoopRef.current = requestAnimationFrame(() =>
-          captureOneFrame(performance.now())
-        );
+        // Wait for the next real video frame instead of polling rAF.
+        scheduleNext(video ?? null);
         return;
       }
       if (!canvasSized) sizeCanvasToVideo(video);
 
+      const nowMs = performance.now();
+      const prevFrameAt = lastFrameAtRef.current;
+      if (prevFrameAt > 0 && nowMs - prevFrameAt > STALL_MS) {
+        // The rVFC chain stalled and just recovered (browser tab returned
+        // to foreground, or the camera pipeline was momentarily blocked).
+        // No restart needed — rVFC is back. Just bookkeep for diagnostics.
+        softRestartCountRef.current++;
+        lastSoftRestartAtRef.current = nowMs;
+        console.warn('🔄 rVFC stall recovered:', (nowMs - prevFrameAt).toFixed(0), 'ms gap (#', softRestartCountRef.current, ')');
+      }
+      lastFrameAtRef.current = nowMs;
+
       try {
         // Motion gate: under sustained SEVERE motion, skip the heavy
-        // drawImage + getImageData + processFrame work, but log the drop
-        // so the rolling 50% drop-rate cap can hold us back when needed.
+        // drawImage + getImageData + processFrame work.
         const mc = motionClassifierRef.current;
-        const nowMs = performance.now();
         const drop = mc.shouldDropFrame(nowMs);
         mc.markFrame(nowMs, drop);
         if (!drop) {
@@ -637,21 +658,21 @@ const Index = () => {
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           processFrame(imageData, frameTimestamp);
         }
-        lastFrameAtRef.current = nowMs;
       } catch (e) {
-        const now = performance.now();
-        if (now - lastErrorLogAt > 2000) {
-          lastErrorLogAt = now;
+        if (nowMs - lastErrorLogAt > 2000) {
+          lastErrorLogAt = nowMs;
           console.error('Frame capture error:', e);
         }
       }
       scheduleNext(video);
     };
 
-    const scheduleNext = (video: HTMLVideoElement) => {
+    const scheduleNext = (video: HTMLVideoElement | null) => {
       if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
-      if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+      const v = video ?? cameraRef.current?.getVideoElement() ?? null;
+      if (!v) return; // nothing to schedule on; the camera-on effect will restart us
+      if ('requestVideoFrameCallback' in v) {
+        (v as any).requestVideoFrameCallback((_now: number, metadata: any) => {
           if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
           // mediaTime is in seconds (camera capture clock); presentationTime
           // is in DOMHighResTimeStamp ms; performance.now() is fallback.
@@ -662,13 +683,16 @@ const Index = () => {
           captureOneFrame(ts);
         });
       } else {
+        // Last-resort fallback for browsers without rVFC. Still no
+        // setInterval — we hop on the next animation frame instead.
         frameLoopRef.current = requestAnimationFrame(() =>
           captureOneFrame(performance.now())
         );
       }
     };
 
-    captureOneFrame(performance.now());
+    // Kick the chain off a true rVFC tick when possible (no rAF priming).
+    scheduleNext(null);
   }, [processFrame]);
 
   const stopFrameLoop = useCallback(() => {
@@ -732,60 +756,15 @@ const Index = () => {
     lastFrameAtRef.current = performance.now();
     softRestartCountRef.current = 0;
     lastSoftRestartAtRef.current = 0;
-    if (watchdogTimerRef.current !== null) {
-      window.clearInterval(watchdogTimerRef.current);
+    // Event-driven dead-stream detection. We no longer poll with
+    // setInterval — instead we listen for `ended` and `mute` on the live
+    // video track. rVFC drives in-loop stall recovery; if the track dies
+    // outright (user revokes permission, OS yanks the camera, hardware
+    // error), the platform fires these events and we bounce the camera.
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
     }
-    // Stall threshold: if no successful captureOneFrame in the last
-    // STALL_MS window, soft-restart the loop. We DO NOT touch the camera
-    // unless the underlying track is dead.
-    const STALL_MS = 1500;
-    const SOFT_RESTART_COOLDOWN_MS = 3000;
-    watchdogTimerRef.current = window.setInterval(() => {
-      if (!isProcessingRef.current) return;
-      const now = performance.now();
-      const sinceLast = now - (lastFrameAtRef.current || now);
-      if (sinceLast < STALL_MS) return;
-
-      // Is the stream actually dead? Only then re-open the camera.
-      // Pull the live stream from the video element so we never read a
-      // stale React state captured in closure.
-      const videoEl = cameraRef.current?.getVideoElement();
-      const stream = (videoEl?.srcObject as MediaStream | null) ?? null;
-      const tracks = stream?.getVideoTracks() ?? [];
-      const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
-      const cameraStatus = cameraRef.current?.getStreamStatus();
-      const inCameraWarmup = now - monitoringStartedAtRef.current < 10000;
-      if (!hasLiveTrack && (inCameraWarmup || cameraStatus?.starting || cameraStatus?.stoppingPending)) {
-        lastFrameAtRef.current = now;
-        return;
-      }
-      if (!stream || !hasLiveTrack) {
-        console.warn('🎥 Watchdog: stream dead — bouncing camera (last frame', sinceLast.toFixed(0), 'ms ago)');
-        setIsCameraOn(false);
-        window.setTimeout(() => { if (monitoringIntentRef.current && isProcessingRef.current) setIsCameraOn(true); }, 2800);
-        lastFrameAtRef.current = now;
-        return;
-      }
-
-      // Stream is alive but the loop stalled (tab backgrounded, rVFC chain
-      // dropped, motion gate over-aggressive). Soft-restart with cooldown.
-      if (now - lastSoftRestartAtRef.current < SOFT_RESTART_COOLDOWN_MS) return;
-      lastSoftRestartAtRef.current = now;
-      softRestartCountRef.current++;
-      console.warn('🔄 Watchdog: frame loop stalled', sinceLast.toFixed(0), 'ms — soft restart #', softRestartCountRef.current);
-      isProcessingRef.current = false;
-      if (frameLoopRef.current) {
-        cancelAnimationFrame(frameLoopRef.current);
-        frameLoopRef.current = null;
-      }
-      // Tiny defer so the in-flight rVFC tick finishes before we re-arm.
-      window.setTimeout(() => {
-        if (cameraRef.current?.getVideoElement()) {
-          startFrameLoop();
-          lastFrameAtRef.current = performance.now();
-        }
-      }, 50);
-    }, 500);
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
@@ -803,6 +782,38 @@ const Index = () => {
   const handleStreamReady = useCallback((stream: MediaStream) => {
     console.log('📹 Stream recibido');
     setCameraStream(stream);
+    // Event-driven dead-stream watchdog. The platform tells us when a
+    // MediaStreamTrack ends or is muted; no polling needed.
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
+    }
+    const tracks = stream.getVideoTracks();
+    const onDead = (reason: string) => () => {
+      if (!monitoringIntentRef.current) return;
+      console.warn('🎥 Track event:', reason, '— bouncing camera');
+      setIsCameraOn(false);
+      // Re-arm rVFC chain by re-mounting the camera stream.
+      window.setTimeout(() => {
+        if (monitoringIntentRef.current && isProcessingRef.current) {
+          setIsCameraOn(true);
+          lastFrameAtRef.current = performance.now();
+        }
+      }, 800);
+    };
+    const handlers: Array<() => void> = [];
+    tracks.forEach(track => {
+      const ended = onDead(`track.ended (${track.label || 'video'})`);
+      const muted = onDead(`track.muted (${track.label || 'video'})`);
+      track.addEventListener('ended', ended);
+      track.addEventListener('mute', muted);
+      handlers.push(() => {
+        track.removeEventListener('ended', ended);
+        track.removeEventListener('mute', muted);
+      });
+    });
+    trackListenersCleanupRef.current = () => handlers.forEach(fn => fn());
+
     setTimeout(() => {
       const video = cameraRef.current?.getVideoElement();
       if (video && video.readyState >= 2) {
@@ -829,9 +840,9 @@ const Index = () => {
     if (navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 200]);
     monitoringIntentRef.current = false;
     stopFrameLoop();
-    if (watchdogTimerRef.current !== null) {
-      window.clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
     }
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
@@ -873,9 +884,9 @@ const Index = () => {
     console.log('🔄 Reset completo...');
     monitoringIntentRef.current = false;
     stopFrameLoop();
-    if (watchdogTimerRef.current !== null) {
-      window.clearInterval(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
+    if (trackListenersCleanupRef.current) {
+      trackListenersCleanupRef.current();
+      trackListenersCleanupRef.current = null;
     }
     if (measurementTimerRef.current) {
       clearInterval(measurementTimerRef.current);
