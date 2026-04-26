@@ -1191,6 +1191,21 @@ const Index = () => {
           noiseSamples={noiseSamples}
         />
 
+        {showForensicOverlay && isMonitoring && noiseAlertActive && (
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="absolute top-16 left-1/2 -translate-x-1/2 z-40 pointer-events-none select-none"
+          >
+            <div className="px-4 py-2 rounded-md bg-red-600/90 border-2 border-red-300 text-white font-mono text-[12px] font-bold tracking-wider shadow-2xl animate-pulse">
+              ⚠ MIDIENDO RUIDO — TRIPLE-GATE {(noiseAlertPct * 100).toFixed(0)}% (&lt;25%)
+              <div className="text-[10px] font-normal text-red-100 mt-0.5 tracking-normal">
+                La cámara no detecta señal PPG válida. No publicar valores.
+              </div>
+            </div>
+          </div>
+        )}
+
         {isMonitoring && (() => {
           const pq = getPositionQuality();
           const isDrifting = pq.drifting;
