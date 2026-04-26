@@ -364,12 +364,6 @@ const Index = () => {
   const arrhythmiaDetectedRef = useRef(false);
   const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
   const cameraRef = useRef<CameraViewHandle>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
-  const frameLoopRef = useRef<number | null>(null);
-  const isProcessingRef = useRef(false);
-  const frameLoopGenerationRef = useRef(0);
-  const monitoringIntentRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
   // Motion classifier: drops frames during sustained SEVERE motion with a
   // hard 50% drop-rate cap so the operator never loses the live trace.
@@ -380,20 +374,7 @@ const Index = () => {
   // gate asks Index to bounce `isCameraOn` so the stream is re-negotiated.
   const cameraQualityRef = useRef<CameraQualityGate>(new CameraQualityGate());
   const cameraReinitInFlightRef = useRef<boolean>(false);
-  // Frame-loop watchdog: driven entirely by requestVideoFrameCallback.
-  // No setInterval / no requestAnimationFrame polling. Each rVFC tick
-  // updates `lastFrameAtRef` and inspects the inter-frame gap to decide
-  // whether the previous frame was "late" (loop stalled and self-recovered).
-  // Truly dead streams are caught event-driven via MediaStreamTrack
-  // listeners (`onended`, `onmute`) attached when the stream becomes ready,
-  // not by polling.
-  const lastFrameAtRef = useRef<number>(0);
-  const softRestartCountRef = useRef<number>(0);
-  const lastSoftRestartAtRef = useRef<number>(0);
   const lastSignalHealthCommitAtRef = useRef<number>(0);
-  // Listeners attached to the live video track so we can react to a dead
-  // stream the moment the platform tells us, instead of polling.
-  const trackListenersCleanupRef = useRef<(() => void) | null>(null);
   // Verbose per-frame decision logging when ?gateLog=1 is in the URL.
   useEffect(() => {
     if (typeof window === 'undefined') return;
