@@ -119,7 +119,7 @@ describe("SampleRateEstimator – stall detection", () => {
   it("recovers from stall once enough good consecutive deltas arrive", () => {
     const est = new SampleRateEstimator({ gapTimeoutMs: 200, recoveryFrames: 4 });
     for (const t of steadyStream(30, 40)) est.push(t);
-    let t = 2500;
+    let t = 5000; // huge gap from last (~2300 ms)
     est.push(t); // big gap → stall
     expect(est.read().stalled).toBe(true);
     // Resume clean 30 fps
