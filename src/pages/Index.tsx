@@ -1509,6 +1509,23 @@ const Index = () => {
               <span>streak {signalHealth.badStreak}</span>
               <span>warmup {Math.ceil(signalHealth.warmupRemainingMs / 1000)}s</span>
             </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 text-[10px]">
+              {(() => {
+                const s = cameraQualityRef.current.getDecisionSummary();
+                return (
+                  <span className="text-muted-foreground">
+                    OK {s.OK} · WARM {s.BAD_BUT_WARMUP} · STR {s.BAD_BUT_STREAK_SHORT} · CD {s.BAD_BUT_COOLDOWN} · NH {s.BAD_BUT_NON_HARD} · RE {s.REINIT}
+                  </span>
+                );
+              })()}
+              <button
+                type="button"
+                onClick={() => cameraQualityRef.current.downloadDecisionLog()}
+                className="ml-auto rounded border border-border bg-muted/50 px-2 py-0.5 text-foreground hover:bg-muted"
+              >
+                Descargar log
+              </button>
+            </div>
           </div>
         )}
 
