@@ -522,16 +522,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // Map extended state → standard ContactState for export
     switch (this.contactState) {
       case 'NO_CONTACT':
-        this.exportedContactState = 'NO_CONTACT';
+        // We are inside updateContactState only when liveness already passed,
+        // so a "no_contact" here actually means "optical contact present but
+        // no perfusion-based finger lock yet" → forensic LOW_PERFUSION state.
+        this.exportedContactState = 'OPTICAL_CONTACT_LOW_PERFUSION';
         break;
       case 'ACQUIRING_CONTACT':
       case 'UNSTABLE_CONTACT':
       case 'SATURATED_CONTACT':
       case 'EXCESSIVE_PRESSURE':
-        this.exportedContactState = 'UNSTABLE_CONTACT';
+        this.exportedContactState = 'OPTICAL_CONTACT_LOW_PERFUSION';
         break;
       case 'STABLE_CONTACT':
-        this.exportedContactState = 'STABLE_CONTACT';
+        this.exportedContactState = 'OPTICAL_CONTACT_GOOD_PERFUSION';
         break;
     }
 
