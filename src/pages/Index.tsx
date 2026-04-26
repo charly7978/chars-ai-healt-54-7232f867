@@ -721,6 +721,55 @@ const Index = () => {
     // V9.4 — reset camera quality watchdog for the new session.
     cameraQualityRef.current.reset();
     cameraReinitInFlightRef.current = false;
+    // Reset frame-loop watchdog state.
+    lastFrameAtRef.current = performance.now();
+    softRestartCountRef.current = 0;
+    lastSoftRestartAtRef.current = 0;
+    if (watchdogTimerRef.current !== null) {
+      window.clearInterval(watchdogTimerRef.current);
+    }
+    // Stall threshold: if no successful captureOneFrame in the last
+    // STALL_MS window, soft-restart the loop. We DO NOT touch the camera
+    // unless the underlying track is dead.
+    const STALL_MS = 1500;
+    const SOFT_RESTART_COOLDOWN_MS = 3000;
+    watchdogTimerRef.current = window.setInterval(() => {
+      if (!isProcessingRef.current) return;
+      const now = performance.now();
+      const sinceLast = now - (lastFrameAtRef.current || now);
+      if (sinceLast < STALL_MS) return;
+
+      // Is the stream actually dead? Only then re-open the camera.
+      const stream = streamRef.current;
+      const tracks = stream?.getVideoTracks() ?? [];
+      const hasLiveTrack = tracks.some(t => t.readyState === 'live' && t.enabled);
+      if (!stream || !hasLiveTrack) {
+        console.warn('🎥 Watchdog: stream dead — bouncing camera (last frame', sinceLast.toFixed(0), 'ms ago)');
+        setIsCameraOn(false);
+        window.setTimeout(() => { if (isProcessingRef.current) setIsCameraOn(true); }, 300);
+        lastFrameAtRef.current = now;
+        return;
+      }
+
+      // Stream is alive but the loop stalled (tab backgrounded, rVFC chain
+      // dropped, motion gate over-aggressive). Soft-restart with cooldown.
+      if (now - lastSoftRestartAtRef.current < SOFT_RESTART_COOLDOWN_MS) return;
+      lastSoftRestartAtRef.current = now;
+      softRestartCountRef.current++;
+      console.warn('🔄 Watchdog: frame loop stalled', sinceLast.toFixed(0), 'ms — soft restart #', softRestartCountRef.current);
+      isProcessingRef.current = false;
+      if (frameLoopRef.current) {
+        cancelAnimationFrame(frameLoopRef.current);
+        frameLoopRef.current = null;
+      }
+      // Tiny defer so the in-flight rVFC tick finishes before we re-arm.
+      window.setTimeout(() => {
+        if (cameraRef.current?.getVideoElement()) {
+          startFrameLoop();
+          lastFrameAtRef.current = performance.now();
+        }
+      }, 50);
+    }, 500);
     // Activar cámara
     setIsCameraOn(true);
     // Activar monitoreo
