@@ -10,6 +10,7 @@ import { useSaveMeasurement } from "@/hooks/useSaveMeasurement";
 import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
 import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
+import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -162,6 +163,8 @@ const Index = () => {
     processSignal: processHeartBeat, 
     setArrhythmiaState,
     reset: resetHeartBeat,
+    setFiducialParams,
+    getFiducialParams,
   } = useHeartBeatProcessor();
   
   const { 
