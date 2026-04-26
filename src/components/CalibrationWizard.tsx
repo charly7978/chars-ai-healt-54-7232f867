@@ -361,6 +361,30 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
           />
         </div>
 
+        {/* Pass-criteria HUD: live ✓/✗ for the current phase */}
+        <div className="rounded-md border border-border bg-muted/30 px-2 py-1.5 space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Criterios de paso
+          </div>
+          <ul className="space-y-0.5">
+            {buildCriteria(phase, live, bpmCount, spo2Count).map((c, idx) => (
+              <li key={idx} className="flex items-center gap-1.5 text-[11px]">
+                {c.ok
+                  ? <CheckCircle2 className="w-3 h-3 text-primary shrink-0" />
+                  : <Circle className="w-3 h-3 text-muted-foreground shrink-0" />}
+                <span className={c.ok ? 'text-foreground' : 'text-muted-foreground'}>
+                  {c.label}
+                </span>
+                {c.detail && (
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                    {c.detail}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+
         {/* Live readout */}
         <div className="grid grid-cols-3 gap-2 text-[11px]">
           <div className="rounded-md bg-muted/40 p-2">
