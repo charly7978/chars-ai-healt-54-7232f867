@@ -66,6 +66,10 @@ export class CameraQualityGate {
   private framesSeen = 0;
   private framesBad = 0;
   private lastVerdict: CameraQualityVerdict = { ok: true, reason: 'OK' };
+  /** Wall-clock of the most recent reset() — used as warm-up anchor. */
+  private warmupStart = performance.now();
+  /** No reinit recommendations during the first warmupMs after reset. */
+  private warmupMs = 5000;
 
   setConfig(patch: Partial<CameraQualityConfig>): void {
     this.cfg = { ...this.cfg, ...patch };
@@ -83,6 +87,10 @@ export class CameraQualityGate {
     }
     this.badStreak++;
     this.framesBad++;
+
+    // Warm-up window after reset/reinit: never recommend another reinit,
+    // just keep classifying so telemetry is honest.
+    if (nowMs - this.warmupStart < this.warmupMs) return false;
 
     if (this.badStreak < this.cfg.badFrameStreak) return false;
     if (nowMs - this.lastReinitAt < this.cfg.reinitCooldownMs) return false;
@@ -130,6 +138,7 @@ export class CameraQualityGate {
     this.framesSeen = 0;
     this.framesBad = 0;
     this.lastVerdict = { ok: true, reason: 'OK' };
+    this.warmupStart = performance.now();
     // lastReinitAt is intentionally preserved so the cooldown still applies
     // across short-lived reset() calls (e.g. between sessions).
   }
