@@ -1241,7 +1241,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
   private calculateACDC(): void {
     const n = Math.min(180, this.redBuf.length);
-    if (n < 36) return;
+    if (n < 8) return;
 
     this.redDC = this.redBuf.mean(n);
     this.greenDC = this.greenBuf.mean(n);
@@ -1453,13 +1453,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // ══════════════════════════════════════════════════════
 
   getRGBStats() {
+    const redDC = this.redDC || this.g1RawR;
+    const greenDC = this.greenDC || this.g1RawG;
+    const blueDC = this.blueDC || this.g1RawB;
     return {
-      redAC: this.redAC, redDC: this.redDC,
-      greenAC: this.greenAC, greenDC: this.greenDC,
-      blueAC: this.blueAC, blueDC: this.blueDC,
-      rgRatio: this.greenDC > 0 ? this.redDC / this.greenDC : 0,
-      ratioOfRatios: this.greenDC > 0 && this.greenAC > 0 && this.redDC > 0
-        ? (this.redAC / this.redDC) / (this.greenAC / this.greenDC) : 0,
+      redAC: this.redAC, redDC,
+      greenAC: this.greenAC, greenDC,
+      blueAC: this.blueAC, blueDC,
+      rgRatio: greenDC > 0 ? redDC / greenDC : 0,
+      ratioOfRatios: greenDC > 0 && this.greenAC > 0 && redDC > 0
+        ? (this.redAC / redDC) / (this.greenAC / greenDC) : 0,
     };
   }
 
