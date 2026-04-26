@@ -584,6 +584,14 @@ const Index = () => {
     noiseSamplesRef.current = 0;
     setValidSamples(0);
     setNoiseSamples(0);
+    // Reset noise-alert sliding window for the new session.
+    noiseWindowRef.current.fill(0);
+    noiseWindowFillRef.current = 0;
+    noiseWindowIdxRef.current = 0;
+    noiseAlertActiveRef.current = false;
+    lastNoiseBeepAtRef.current = 0;
+    setNoiseAlertActive(false);
+    setNoiseAlertPct(0);
     sessionStartIsoRef.current = new Date().toISOString();
     sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
