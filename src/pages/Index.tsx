@@ -553,144 +553,12 @@ const Index = () => {
     }
   }, [lastValidResults, isMonitoring]);
 
-  const startFrameLoop = useCallback(() => {
-    if (isProcessingRef.current) return;
-    isProcessingRef.current = true;
-    const generation = ++frameLoopGenerationRef.current;
-    
-    const canvas = canvasRef.current;
-    const ctx = ctxRef.current;
-    if (!canvas || !ctx) {
-      isProcessingRef.current = false;
-      return;
-    }
-
-    // Forensic capture loop — single hot path. No per-frame logging.
-    //
-    // Frame timing strategy (in priority order):
-    //   1. metadata.mediaTime (s) → ms, the camera's authoritative
-    //      capture clock; immune to main-thread jank.
-    //   2. metadata.presentationTime (ms) — DOMHighResTimeStamp at the
-    //      moment the frame was made available to the page.
-    //   3. performance.now() fallback for browsers without rVFC.
-    //
-    // Capture canvas is sized to (native_w / 2, native_h / 2) on first
-    // frame, capped at 640×480 pixels. This keeps the ROI mask working
-    // on a high-fidelity downscale without paying full-frame imageData
-    // cost on mobile GPUs.
-    let canvasSized = false;
-    let lastErrorLogAt = 0;
-
-    const sizeCanvasToVideo = (video: HTMLVideoElement) => {
-      const vw = video.videoWidth, vh = video.videoHeight;
-      if (!vw || !vh) return;
-      // Aim for ~2× the legacy 320×240 (= 4× the pixel count) but cap
-      // at 640×480 so getImageData stays under ~1.2 ms on mid-range phones.
-      const targetMaxW = 640;
-      const scale = Math.min(1, targetMaxW / vw);
-      const w = Math.max(320, Math.round(vw * scale));
-      const h = Math.max(240, Math.round(vh * scale));
-      if (canvas.width !== w) canvas.width = w;
-      if (canvas.height !== h) canvas.height = h;
-      canvasSized = true;
-    };
-
-    // Inline rVFC-driven stall detection: the moment a frame fires, we
-    // measure how long it has been since the previous frame. If that gap
-    // exceeds STALL_MS we assume the loop self-recovered (rVFC eventually
-    // fired) and just bookkeep a soft-restart event for telemetry. We do
-    // NOT use setInterval / requestAnimationFrame to poll — dead-stream
-    // detection is event-driven via track.onended / track.onmute below.
-    const STALL_MS = 1500;
-
-    const captureOneFrame = (frameTimestamp: number) => {
-      if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
-      const video = cameraRef.current?.getVideoElement();
-      if (!video || video.readyState < 2 || video.videoWidth === 0) {
-        // Wait for the next real video frame instead of polling rAF.
-        scheduleNext(video ?? null);
-        return;
-      }
-      if (!canvasSized) sizeCanvasToVideo(video);
-
-      const nowMs = performance.now();
-      const prevFrameAt = lastFrameAtRef.current;
-      if (prevFrameAt > 0 && nowMs - prevFrameAt > STALL_MS) {
-        // The rVFC chain stalled and just recovered (browser tab returned
-        // to foreground, or the camera pipeline was momentarily blocked).
-        // No restart needed — rVFC is back. Just bookkeep for diagnostics.
-        softRestartCountRef.current++;
-        lastSoftRestartAtRef.current = nowMs;
-        console.warn('🔄 rVFC stall recovered:', (nowMs - prevFrameAt).toFixed(0), 'ms gap (#', softRestartCountRef.current, ')');
-      }
-      lastFrameAtRef.current = nowMs;
-
-      try {
-        // Motion gate: under sustained SEVERE motion, skip the heavy
-        // drawImage + getImageData + processFrame work.
-        const mc = motionClassifierRef.current;
-        const drop = mc.shouldDropFrame(nowMs);
-        mc.markFrame(nowMs, drop);
-        if (!drop) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          processFrame(imageData, frameTimestamp);
-        }
-      } catch (e) {
-        if (nowMs - lastErrorLogAt > 2000) {
-          lastErrorLogAt = nowMs;
-          console.error('Frame capture error:', e);
-        }
-      }
-      scheduleNext(video);
-    };
-
-    const scheduleNext = (video: HTMLVideoElement | null) => {
-      if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
-      const v = video ?? cameraRef.current?.getVideoElement() ?? null;
-      if (!v) return; // nothing to schedule on; the camera-on effect will restart us
-      if ('requestVideoFrameCallback' in v) {
-        (v as any).requestVideoFrameCallback((_now: number, metadata: any) => {
-          if (!isProcessingRef.current || generation !== frameLoopGenerationRef.current) return;
-          // mediaTime is in seconds (camera capture clock); presentationTime
-          // is in DOMHighResTimeStamp ms; performance.now() is fallback.
-          const ts =
-            (typeof metadata?.mediaTime === 'number' ? metadata.mediaTime * 1000 : null)
-            ?? (typeof metadata?.presentationTime === 'number' ? metadata.presentationTime : null)
-            ?? performance.now();
-          captureOneFrame(ts);
-        });
-      } else {
-        // Last-resort fallback for browsers without rVFC. Still no
-        // setInterval — we hop on the next animation frame instead.
-        frameLoopRef.current = requestAnimationFrame(() =>
-          captureOneFrame(performance.now())
-        );
-      }
-    };
-
-    // Kick the chain off a true rVFC tick when possible (no rAF priming).
-    scheduleNext(null);
-  }, [processFrame]);
-
-  const stopFrameLoop = useCallback(() => {
-    isProcessingRef.current = false;
-    frameLoopGenerationRef.current++;
-    if (frameLoopRef.current) {
-      cancelAnimationFrame(frameLoopRef.current);
-      frameLoopRef.current = null;
-    }
-    // Release the devicemotion listener so the IMU sleeps between sessions.
-    motionClassifierRef.current.stop();
-  }, []);
-
   const startMonitoring = useCallback(() => {
     if (isMonitoring) return;
     monitoringStartedAtRef.current = performance.now();
     console.log('🚀 Iniciando monitoreo...');
     if (navigator.vibrate) navigator.vibrate([200]);
     enterFullScreen();
-    monitoringIntentRef.current = true;
     setShowResults(false);
     setMeasurementSummary(null);
     setElapsedTime(0);
@@ -730,21 +598,8 @@ const Index = () => {
     // V9.4 — reset camera quality watchdog for the new session.
     cameraQualityRef.current.reset();
     cameraReinitInFlightRef.current = false;
-    // Reset frame-loop watchdog state.
-    lastFrameAtRef.current = performance.now();
-    softRestartCountRef.current = 0;
-    lastSoftRestartAtRef.current = 0;
-    // Event-driven dead-stream detection. We no longer poll with
-    // setInterval — instead we listen for `ended` and `mute` on the live
-    // video track. rVFC drives in-loop stall recovery; if the track dies
-    // outright (user revokes permission, OS yanks the camera, hardware
-    // error), the platform fires these events and we bounce the camera.
-    if (trackListenersCleanupRef.current) {
-      trackListenersCleanupRef.current();
-      trackListenersCleanupRef.current = null;
-    }
-    // Activar cámara
-    setIsCameraOn(true);
+    // Hand camera + frame-loop ownership to the dedicated hook.
+    ppgCamera.start();
     // Activar monitoreo
     setIsMonitoring(true);
     if (measurementTimerRef.current) clearInterval(measurementTimerRef.current);
@@ -755,61 +610,7 @@ const Index = () => {
     // the first morphology-validated beat. CIVIL keeps the legacy 3s window.
     if (FORENSIC_MODE) setIsCalibrating(false);
     else setTimeout(() => setIsCalibrating(false), 3000);
-  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
-
-  const handleStreamReady = useCallback((stream: MediaStream) => {
-    console.log('📹 Stream recibido');
-    setCameraStream(stream);
-    // Event-driven dead-stream watchdog. The platform tells us when a
-    // MediaStreamTrack ends or is muted; no polling needed.
-    if (trackListenersCleanupRef.current) {
-      trackListenersCleanupRef.current();
-      trackListenersCleanupRef.current = null;
-    }
-    const tracks = stream.getVideoTracks();
-    const onDead = (reason: string) => () => {
-      if (!monitoringIntentRef.current) return;
-      console.warn('🎥 Track event:', reason, '— bouncing camera');
-      setIsCameraOn(false);
-      // Re-arm rVFC chain by re-mounting the camera stream.
-      window.setTimeout(() => {
-        if (monitoringIntentRef.current && isProcessingRef.current) {
-          setIsCameraOn(true);
-          lastFrameAtRef.current = performance.now();
-        }
-      }, 800);
-    };
-    const handlers: Array<() => void> = [];
-    tracks.forEach(track => {
-      const ended = onDead(`track.ended (${track.label || 'video'})`);
-      const muted = onDead(`track.muted (${track.label || 'video'})`);
-      track.addEventListener('ended', ended);
-      track.addEventListener('mute', muted);
-      handlers.push(() => {
-        track.removeEventListener('ended', ended);
-        track.removeEventListener('mute', muted);
-      });
-    });
-    trackListenersCleanupRef.current = () => handlers.forEach(fn => fn());
-
-    setTimeout(() => {
-      const video = cameraRef.current?.getVideoElement();
-      if (video && video.readyState >= 2) {
-        console.log('✅ Video listo:', video.videoWidth, 'x', video.videoHeight);
-        startFrameLoop();
-      } else {
-        const checkReady = setInterval(() => {
-          const v = cameraRef.current?.getVideoElement();
-          if (v && v.readyState >= 2 && v.videoWidth > 0) {
-            clearInterval(checkReady);
-            console.log('✅ Video listo (retry):', v.videoWidth, 'x', v.videoHeight);
-            startFrameLoop();
-          }
-        }, 100);
-        setTimeout(() => clearInterval(checkReady), 5000);
-      }
-    }, 500);
-  }, [startFrameLoop]);
+  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen, ppgCamera]);
 
   const finalizeMeasurement = useCallback(async () => {
     if (!isMonitoring) return;
