@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { CheckCircle2, Hand, Activity, Heart, Droplets, X, Loader2 } from "lucide-react";
+import { CheckCircle2, Circle, Hand, Activity, Heart, Droplets, X, Loader2 } from "lucide-react";
 
 /**
  * CalibrationWizard
@@ -59,6 +59,56 @@ const STABILITY_HOLD_MS = 5000;
 const BASELINE_COLLECT_MS = 10000;
 const MIN_SAMPLES = 30;
 
+/**
+ * Pass-criteria checklist driver: returns the live boolean state of each
+ * criterion the current phase is gating on. Used by the HUD section so
+ * the operator can see exactly which condition is still pending.
+ */
+function buildCriteria(
+  phase: CalibrationPhase,
+  l: CalibrationLiveInputs,
+  bpmCount: number,
+  spo2Count: number,
+): Array<{ label: string; ok: boolean; detail?: string }> {
+  switch (phase) {
+    case 'PLACEMENT':
+      return [
+        { label: 'Dedo detectado', ok: l.fingerDetected },
+        { label: 'Calidad ≥ 50',   ok: l.quality >= 50, detail: `${Math.round(l.quality)}/50` },
+      ];
+    case 'STABILITY':
+      return [
+        { label: 'Dedo detectado', ok: l.fingerDetected },
+        { label: 'Calidad ≥ 60',   ok: l.quality >= 60, detail: `${Math.round(l.quality)}/60` },
+        { label: 'Movimiento ≤ MICRO',
+          ok: l.motionLevel === 'STILL' || l.motionLevel === 'MICRO_MOTION',
+          detail: l.motionLevel.replace('_MOTION', '').toLowerCase() },
+      ];
+    case 'BPM_BASELINE':
+      return [
+        { label: 'Dedo detectado',  ok: l.fingerDetected },
+        { label: `Muestras ≥ ${MIN_SAMPLES}`,
+          ok: bpmCount >= MIN_SAMPLES,
+          detail: `${bpmCount}/${MIN_SAMPLES}` },
+        { label: 'BPM en rango (40–200)',
+          ok: l.bpm >= 40 && l.bpm <= 200,
+          detail: l.bpm > 0 ? `${Math.round(l.bpm)}` : '—' },
+      ];
+    case 'SPO2_BASELINE':
+      return [
+        { label: 'Dedo detectado', ok: l.fingerDetected },
+        { label: 'Recolectando SpO₂',
+          ok: spo2Count > 0,
+          detail: `${spo2Count} muestras` },
+        { label: 'SpO₂ en rango (70–100)',
+          ok: l.spo2 >= 70 && l.spo2 <= 100,
+          detail: l.spo2 > 0 ? `${Math.round(l.spo2)}` : '—' },
+      ];
+    case 'DONE':
+      return [{ label: 'Calibración guardada', ok: true }];
+  }
+}
+
 const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
 const sd = (xs: number[]) => {
   if (xs.length < 2) return 0;
@@ -70,6 +120,11 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
   const [phase, setPhase] = useState<CalibrationPhase>('PLACEMENT');
   const [progress, setProgress] = useState(0); // 0..1 within current phase
   const [statusMsg, setStatusMsg] = useState<string>('Coloque el dedo sobre la cámara y el flash.');
+  // Mirrors of the ref-stored sample counts so they appear in the HUD.
+  // Updated only when they change (every ~30 ms tick → ≤ ~33 setStates/sec
+  // for ~10 s, well within React's budget).
+  const [bpmCount, setBpmCount] = useState(0);
+  const [spo2Count, setSpo2Count] = useState(0);
 
   // Refs that survive re-renders inside the requestAnimationFrame loop.
   const phaseStartRef = useRef<number>(performance.now());
@@ -86,12 +141,14 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
     setStatusMsg(msg);
     setProgress(0);
     phaseStartRef.current = performance.now();
-    if (p === 'BPM_BASELINE') bpmSamplesRef.current = [];
-    if (p === 'SPO2_BASELINE') spo2SamplesRef.current = [];
+    if (p === 'BPM_BASELINE') { bpmSamplesRef.current = []; setBpmCount(0); }
+    if (p === 'SPO2_BASELINE') { spo2SamplesRef.current = []; setSpo2Count(0); }
     if (p === 'PLACEMENT' || p === 'STABILITY') {
       bpmSamplesRef.current = [];
       spo2SamplesRef.current = [];
       qualitySamplesRef.current = [];
+      setBpmCount(0);
+      setSpo2Count(0);
     }
   }, []);
 
@@ -171,7 +228,10 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
           }
           // Only record physiologically plausible BPM (40–200) so a
           // momentarily glitched 0 or 300 doesn't poison the baseline.
-          if (l.bpm >= 40 && l.bpm <= 200) bpmSamplesRef.current.push(l.bpm);
+          if (l.bpm >= 40 && l.bpm <= 200) {
+            bpmSamplesRef.current.push(l.bpm);
+            setBpmCount(bpmSamplesRef.current.length);
+          }
           if (l.quality > 0) qualitySamplesRef.current.push(l.quality);
           const p = Math.min(1, elapsed / BASELINE_COLLECT_MS);
           setProgress(p);
@@ -193,7 +253,10 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
             resetPhase('PLACEMENT', 'Contacto perdido durante la línea base.');
             break;
           }
-          if (l.spo2 >= 70 && l.spo2 <= 100) spo2SamplesRef.current.push(l.spo2);
+          if (l.spo2 >= 70 && l.spo2 <= 100) {
+            spo2SamplesRef.current.push(l.spo2);
+            setSpo2Count(spo2SamplesRef.current.length);
+          }
           if (l.quality > 0) qualitySamplesRef.current.push(l.quality);
           const p = Math.min(1, elapsed / BASELINE_COLLECT_MS);
           setProgress(p);
@@ -296,6 +359,30 @@ const CalibrationWizard: React.FC<Props> = ({ open, live, onCancel, onComplete }
             className="h-full bg-primary transition-[width] duration-150"
             style={{ width: `${Math.round(progress * 100)}%` }}
           />
+        </div>
+
+        {/* Pass-criteria HUD: live ✓/✗ for the current phase */}
+        <div className="rounded-md border border-border bg-muted/30 px-2 py-1.5 space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Criterios de paso
+          </div>
+          <ul className="space-y-0.5">
+            {buildCriteria(phase, live, bpmCount, spo2Count).map((c, idx) => (
+              <li key={idx} className="flex items-center gap-1.5 text-[11px]">
+                {c.ok
+                  ? <CheckCircle2 className="w-3 h-3 text-primary shrink-0" />
+                  : <Circle className="w-3 h-3 text-muted-foreground shrink-0" />}
+                <span className={c.ok ? 'text-foreground' : 'text-muted-foreground'}>
+                  {c.label}
+                </span>
+                {c.detail && (
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                    {c.detail}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
 
         {/* Live readout */}
