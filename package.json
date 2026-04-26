@@ -12,11 +12,12 @@
     "test": "vitest run",
     "test:forensic": "vitest run src/test/forensic-audit.test.ts",
     "audit:forensic": "node scripts/audit-forensic.mjs",
+    "audit:ppg": "node scripts/audit-ppg.mjs",
     "clean": "node scripts/clean-build.mjs",
     "typecheck": "node scripts/verify-signal-types.mjs",
     "telemetry:motion-tuning": "node scripts/motion-tuning-telemetry.mjs",
     "build:clean": "npm run clean && npm run typecheck && npm run build",
-    "ci:guard": "npm run clean && npm run typecheck && npm run audit:forensic && npm run test:forensic && npm run lint && npm run build"
+    "ci:guard": "npm run clean && npm run typecheck && npm run audit:forensic && npm run audit:ppg && npm run test:forensic && npm run lint && npm run build"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.1.0",
