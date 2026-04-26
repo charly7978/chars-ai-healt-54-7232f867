@@ -14,6 +14,7 @@
     "audit:forensic": "node scripts/audit-forensic.mjs",
     "clean": "node scripts/clean-build.mjs",
     "typecheck": "node scripts/verify-signal-types.mjs",
+    "telemetry:motion-tuning": "node scripts/motion-tuning-telemetry.mjs",
     "build:clean": "npm run clean && npm run typecheck && npm run build",
     "ci:guard": "npm run clean && npm run typecheck && npm run audit:forensic && npm run test:forensic && npm run lint && npm run build"
   },
