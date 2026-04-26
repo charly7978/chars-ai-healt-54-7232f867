@@ -63,6 +63,7 @@ const Index = () => {
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [rrIntervals, setRRIntervals] = useState<number[]>([]);
+  const monitoringStartedAtRef = useRef<number>(0);
   // Pin overlays whenever the operator likely needs status:
   // - not yet monitoring, no finger contact, low quality, or after results
   // Otherwise auto-hide after a few seconds so the waveform stays clean.
@@ -667,6 +668,7 @@ const Index = () => {
 
   const startMonitoring = useCallback(() => {
     if (isMonitoring) return;
+    monitoringStartedAtRef.current = performance.now();
     console.log('🚀 Iniciando monitoreo...');
     if (navigator.vibrate) navigator.vibrate([200]);
     enterFullScreen();
@@ -1429,7 +1431,13 @@ const Index = () => {
   }, [isCalibrating, getCalibrationProgress]);
 
   const handleToggleMonitoring = () => {
-    if (isMonitoring) finalizeMeasurement();
+    if (isMonitoring) {
+      // Mobile tap/preview layers can emit duplicate clicks right after
+      // starting. Ignore stop toggles during camera warm-up so the stream is
+      // not immediately torn down, which appears as "abre y cierra".
+      if (performance.now() - monitoringStartedAtRef.current < 8000) return;
+      finalizeMeasurement();
+    }
     else startMonitoring();
   };
 
