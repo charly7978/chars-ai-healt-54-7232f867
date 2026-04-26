@@ -516,5 +516,9 @@ export class AdaptiveROIMask {
     this.tileMeanB.fill(0);
     this.tileMeanInit = false;
     this.frameCount = 0;
+    // V5: clear adaptive ROI tracker so the next session starts at center.
+    this.roiCenterX = -1;
+    this.roiCenterY = -1;
+    this.roiSizeFrac = 0.85;
   }
 }
