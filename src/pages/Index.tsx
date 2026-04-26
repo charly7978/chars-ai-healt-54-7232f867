@@ -414,6 +414,11 @@ const Index = () => {
     lastAlertAtRef.current = {};
     forensicGateRef.current = null;
     lastOverlayCommitRef.current = 0;
+    // Reset session log for a fresh forensic export.
+    sessionLogRef.current = [];
+    setSessionLogSize(0);
+    sessionStartIsoRef.current = new Date().toISOString();
+    sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -596,6 +601,26 @@ const Index = () => {
       if (transitioned || nowMs - lastOverlayCommitRef.current >= OVERLAY_MIN_INTERVAL_MS) {
         lastOverlayCommitRef.current = nowMs;
         setForensicGate(snap);
+
+        // Append to the session log at the same throttled cadence.
+        const log = sessionLogRef.current;
+        log.push({
+          t_iso: new Date().toISOString(),
+          t_ms: Math.round(nowMs),
+          g1_optical: snap.gate1_optical,
+          g2_spectral: snap.gate2_spectral,
+          g3_morphology: snap.gate3_morphology,
+          pass_all: snap.passAll,
+          snr_db: +snap.cardiacSNRdB.toFixed(2),
+          peak_hz: +snap.spectralPeakHz.toFixed(3),
+          bpm_estimate: snap.spectralPeakHz > 0 ? Math.round(snap.spectralPeakHz * 60) : 0,
+          concentration: +snap.spectralConcentration.toFixed(3),
+          reason: snap.livenessReason,
+        });
+        if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
+        // Cheap state ping (only when buckets of 25 rounds elapse) so the
+        // export button counter updates without spamming React.
+        if (log.length % 25 === 0) setSessionLogSize(log.length);
       }
 
       // ── Gate transition alerts (haptic + toast) ──
