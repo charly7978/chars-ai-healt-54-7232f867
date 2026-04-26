@@ -323,7 +323,7 @@ const Index = () => {
     totalBeatsRef.current = 0;
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
-    frameTimestampHistoryRef.current = [];
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
     cachedSampleRateValidRef.current = false;
     cachedSampleRateRef.current = 30;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
@@ -387,7 +387,7 @@ const Index = () => {
     }
     setIsMonitoring(false);
     setIsCalibrating(false);
-    frameTimestampHistoryRef.current = [];
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
     if (savedResults) setVitalSigns(savedResults);
     setShowResults(true);
     const total = totalBeatsRef.current;
@@ -413,7 +413,7 @@ const Index = () => {
     fullResetVitalSigns();
     resetHeartBeat();
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
-    frameTimestampHistoryRef.current = [];
+    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30;
     setIsCameraOn(false);
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
