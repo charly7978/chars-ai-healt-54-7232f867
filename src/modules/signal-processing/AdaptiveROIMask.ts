@@ -86,6 +86,32 @@ export interface ROIMaskResult {
    * dedo está quieto, > 4 px cuando hay temblor / reposicionamiento.
    */
   trackerSigma: number;
+  /**
+   * V9: Selección de máscara por SNR estimado (tile-PI Welford incremental,
+   * 60 frames). Se calculan pesos `softmax` independientes para los canales
+   * R y G sobre los top-K=25 tiles cuyo `tilePI · centerBias · contiguityFlag`
+   * es máximo. La máscara efectiva por canal es DISTINTA — esto maximiza
+   * SNR por canal y queda expuesto al ranker para que CHROM/POS proyecten
+   * sobre las medias ponderadas top-K en lugar de sobre el promedio
+   * uniforme de la ROI.
+   */
+  topKTilePI_R: number;
+  topKTilePI_G: number;
+  /** Read-only: scratch interno reutilizado, NO mutar desde el caller. */
+  topKWeightsR: Float64Array;
+  topKWeightsG: Float64Array;
+  /** Promedios temporales por tile (necesarios para CHROM/POS top-K). */
+  tileMeanRArr: Float64Array;
+  tileMeanGArr: Float64Array;
+  tileMeanBArr: Float64Array;
+  /**
+   * V9: covarianza P del tracker Kalman 1D (σ²) sobre el centroide. Motion
+   * proxy óptico INDEPENDIENTE del IMU. Mientras `trackerSigma` reporta
+   * sqrt(P) en px (UI-friendly), este campo se mantiene para los gates.
+   */
+  kalmanCovariance: number;
+  /** Magnitud de la observación rechazada por el Kalman este frame (0 si OK). */
+  centroidJumpPx: number;
 }
 
 const GRID = 9; // V3: 9x9 grid for finer adaptive ROI
@@ -241,11 +267,39 @@ export class AdaptiveROIMask {
   private readonly ROI_SIZE_ALPHA = 0.25;   // EMA on size
 
   // --- V8: residual EMA of |observation − smoothed_state| as σ proxy ---
-  // Cheap online estimate: lo usamos como motion proxy óptico que no depende
-  // del IMU. EMA con α=0.2 → ~5-frame time constant (≈170 ms @30 fps).
-  private trackerResidualEMA = 0;
+  // V9: Kalman 1D real por dimensión (cx, cy, sizePx). Estado [pos, vel],
+  // Q=0.5 px² (proceso), R = 4·(1+clipHigh) px² (observación). Rechazo de
+  // observación si |obs−predict| > 3·sqrt(P+R) → mantiene predict (immune
+  // a glare flicker, micro-temblor). `trackerSigma` = sqrt(P_cx + P_cy).
+  private kfCx = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+  private kfCy = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+  private kfSz = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+  private kalmanCovariancePx2 = 0;
   private trackerSigmaPx = 0;
-  private readonly TRACKER_RES_ALPHA = 0.2;
+  private lastCentroidJumpPx = 0;
+  private readonly KF_Q = 0.5;
+  private readonly KF_R_BASE = 4;
+
+  // V9 — Tile-PI Welford incremental por canal R y G (ventana ~60 frames).
+  // Acumuladores por tile, cero-alloc.
+  private tileNObs = new Int32Array(TOTAL_TILES);
+  private tileMeanR_W = new Float64Array(TOTAL_TILES);
+  private tileM2R_W = new Float64Array(TOTAL_TILES);
+  private tileMeanG_W = new Float64Array(TOTAL_TILES);
+  private tileM2G_W = new Float64Array(TOTAL_TILES);
+  private tilePI_R = new Float64Array(TOTAL_TILES);
+  private tilePI_G = new Float64Array(TOTAL_TILES);
+  private readonly TILE_PI_WINDOW = 60;
+
+  // V9 — buffers de salida top-K (read-only para el caller).
+  private outTopKWeightsR = new Float64Array(TOTAL_TILES);
+  private outTopKWeightsG = new Float64Array(TOTAL_TILES);
+  // Scratch para ordenar tiles por score (idx, score). Cero-alloc.
+  private topKIdx = new Int32Array(TOTAL_TILES);
+  private topKScoreR = new Float64Array(TOTAL_TILES);
+  private topKScoreG = new Float64Array(TOTAL_TILES);
+  private readonly TOPK = 25;
+  private readonly SOFTMAX_TAU = 0.15;
 
   // --- V6: auto-tuned pre-pass thresholds ---
   // The 32×32 coarse pass used to require redDom≥12 and r≥70 for every skin
