@@ -21,6 +21,8 @@ interface Props {
   sampleCount?: number;
   cadenceMs?: ForensicCadenceMs;
   onCadenceChange?: (ms: ForensicCadenceMs) => void;
+  validSamples?: number;
+  noiseSamples?: number;
 }
 
 const pillBase =
@@ -40,6 +42,7 @@ function snrClass(db: number): string {
 
 const ForensicGateOverlay: React.FC<Props> = ({
   gate, visible, onExport, sampleCount, cadenceMs, onCadenceChange,
+  validSamples = 0, noiseSamples = 0,
 }) => {
   if (!visible) return null;
 
@@ -60,6 +63,14 @@ const ForensicGateOverlay: React.FC<Props> = ({
   const fullReason = prefix + reason;
   const reasonShort = fullReason.length > 60 ? fullReason.slice(0, 59) + "…" : fullReason;
   const bpmEstimate = peakHz > 0 ? Math.round(peakHz * 60) : 0;
+  const totalSamples = validSamples + noiseSamples;
+  const validPct = totalSamples > 0 ? (validSamples / totalSamples) * 100 : 0;
+  const validPctStr = totalSamples > 0 ? validPct.toFixed(1) + '%' : '—';
+  const validPctClass =
+    totalSamples === 0 ? 'text-zinc-400'
+    : validPct >= 60 ? 'text-emerald-300'
+    : validPct >= 25 ? 'text-amber-300'
+    : 'text-red-300';
 
   return (
     <div
@@ -113,6 +124,18 @@ const ForensicGateOverlay: React.FC<Props> = ({
         <div className="flex justify-between">
           <span className="text-zinc-400">Concentración</span>
           <span className="text-zinc-100">{Math.round(conc * 100)}%</span>
+        </div>
+        <div className="flex justify-between pt-1 mt-1 border-t border-zinc-700/60">
+          <span className="text-zinc-400">Válidas / Ruido</span>
+          <span className="text-zinc-100">
+            <span className="text-emerald-300">{validSamples}</span>
+            <span className="text-zinc-500"> / </span>
+            <span className="text-red-300">{noiseSamples}</span>
+          </span>
+        </div>
+        <div className="flex justify-between" title="Porcentaje de muestras con triple-gate (G1+G2+G3) completo durante la sesión">
+          <span className="text-zinc-400">Triple-gate %</span>
+          <span className={validPctClass + ' font-bold'}>{validPctStr}</span>
         </div>
         <div
           className="flex justify-between gap-2 pt-0.5 border-t border-zinc-700/60 mt-1"
