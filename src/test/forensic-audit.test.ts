@@ -167,4 +167,23 @@ describe("forensic-audit: no synthetic/fallback vital paths", () => {
     }
     expect(violations).toEqual([]);
   });
+
+  it("LIVENESS thresholds in PPGSignalProcessor are not strangler defaults", () => {
+    // Lock-in: reverting these back to TOTAL_I_MAX≤700 or TEXTURE_MIN≥0.008
+    // re-creates the deadlock where a real finger under torch is rejected
+    // as "FLAT_TEXTURE" / "LUZ DIRECTA" and the OD buffer never fills.
+    const src = readFileSync(
+      "src/modules/signal-processing/PPGSignalProcessor.ts",
+      "utf8",
+    );
+    const totalIMax = /TOTAL_I_MAX:\s*(\d+)/.exec(src);
+    const textureMin = /TEXTURE_MIN:\s*([\d.]+)/.exec(src);
+    const coverageMin = /COVERAGE_MIN:\s*([\d.]+)/.exec(src);
+    expect(totalIMax, "TOTAL_I_MAX literal not found").not.toBeNull();
+    expect(textureMin, "TEXTURE_MIN literal not found").not.toBeNull();
+    expect(coverageMin, "COVERAGE_MIN literal not found").not.toBeNull();
+    expect(Number(totalIMax![1])).toBeGreaterThanOrEqual(1200);
+    expect(Number(textureMin![1])).toBeLessThanOrEqual(0.003);
+    expect(Number(coverageMin![1])).toBeLessThanOrEqual(0.25);
+  });
 });
