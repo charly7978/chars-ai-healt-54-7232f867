@@ -86,6 +86,32 @@ export interface ROIMaskResult {
    * dedo está quieto, > 4 px cuando hay temblor / reposicionamiento.
    */
   trackerSigma: number;
+  /**
+   * V9: Selección de máscara por SNR estimado (tile-PI Welford incremental,
+   * 60 frames). Se calculan pesos `softmax` independientes para los canales
+   * R y G sobre los top-K=25 tiles cuyo `tilePI · centerBias · contiguityFlag`
+   * es máximo. La máscara efectiva por canal es DISTINTA — esto maximiza
+   * SNR por canal y queda expuesto al ranker para que CHROM/POS proyecten
+   * sobre las medias ponderadas top-K en lugar de sobre el promedio
+   * uniforme de la ROI.
+   */
+  topKTilePI_R: number;
+  topKTilePI_G: number;
+  /** Read-only: scratch interno reutilizado, NO mutar desde el caller. */
+  topKWeightsR: Float64Array;
+  topKWeightsG: Float64Array;
+  /** Promedios temporales por tile (necesarios para CHROM/POS top-K). */
+  tileMeanRArr: Float64Array;
+  tileMeanGArr: Float64Array;
+  tileMeanBArr: Float64Array;
+  /**
+   * V9: covarianza P del tracker Kalman 1D (σ²) sobre el centroide. Motion
+   * proxy óptico INDEPENDIENTE del IMU. Mientras `trackerSigma` reporta
+   * sqrt(P) en px (UI-friendly), este campo se mantiene para los gates.
+   */
+  kalmanCovariance: number;
+  /** Magnitud de la observación rechazada por el Kalman este frame (0 si OK). */
+  centroidJumpPx: number;
 }
 
 const GRID = 9; // V3: 9x9 grid for finer adaptive ROI
@@ -241,11 +267,39 @@ export class AdaptiveROIMask {
   private readonly ROI_SIZE_ALPHA = 0.25;   // EMA on size
 
   // --- V8: residual EMA of |observation − smoothed_state| as σ proxy ---
-  // Cheap online estimate: lo usamos como motion proxy óptico que no depende
-  // del IMU. EMA con α=0.2 → ~5-frame time constant (≈170 ms @30 fps).
-  private trackerResidualEMA = 0;
+  // V9: Kalman 1D real por dimensión (cx, cy, sizePx). Estado [pos, vel],
+  // Q=0.5 px² (proceso), R = 4·(1+clipHigh) px² (observación). Rechazo de
+  // observación si |obs−predict| > 3·sqrt(P+R) → mantiene predict (immune
+  // a glare flicker, micro-temblor). `trackerSigma` = sqrt(P_cx + P_cy).
+  private kfCx = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+  private kfCy = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+  private kfSz = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+  private kalmanCovariancePx2 = 0;
   private trackerSigmaPx = 0;
-  private readonly TRACKER_RES_ALPHA = 0.2;
+  private lastCentroidJumpPx = 0;
+  private readonly KF_Q = 0.5;
+  private readonly KF_R_BASE = 4;
+
+  // V9 — Tile-PI Welford incremental por canal R y G (ventana ~60 frames).
+  // Acumuladores por tile, cero-alloc.
+  private tileNObs = new Int32Array(TOTAL_TILES);
+  private tileMeanR_W = new Float64Array(TOTAL_TILES);
+  private tileM2R_W = new Float64Array(TOTAL_TILES);
+  private tileMeanG_W = new Float64Array(TOTAL_TILES);
+  private tileM2G_W = new Float64Array(TOTAL_TILES);
+  private tilePI_R = new Float64Array(TOTAL_TILES);
+  private tilePI_G = new Float64Array(TOTAL_TILES);
+  private readonly TILE_PI_WINDOW = 60;
+
+  // V9 — buffers de salida top-K (read-only para el caller).
+  private outTopKWeightsR = new Float64Array(TOTAL_TILES);
+  private outTopKWeightsG = new Float64Array(TOTAL_TILES);
+  // Scratch para ordenar tiles por score (idx, score). Cero-alloc.
+  private topKIdx = new Int32Array(TOTAL_TILES);
+  private topKScoreR = new Float64Array(TOTAL_TILES);
+  private topKScoreG = new Float64Array(TOTAL_TILES);
+  private readonly TOPK = 25;
+  private readonly SOFTMAX_TAU = 0.15;
 
   // --- V6: auto-tuned pre-pass thresholds ---
   // The 32×32 coarse pass used to require redDom≥12 and r≥70 for every skin
@@ -437,6 +491,48 @@ export class AdaptiveROIMask {
     }
   }
 
+  /**
+   * V9 — Kalman 1D step. Constant-velocity model, outlier-gated to 3σ.
+   * Returns the absolute residual (or rejection magnitude) so callers can
+   * publish `centroidJumpPx` for the motion-rejection module.
+   */
+  private kfStep(
+    kf: { x: number; v: number; P00: number; P01: number; P10: number; P11: number },
+    z: number, q: number, r: number,
+  ): { accepted: boolean; residual: number } {
+    const xPred = kf.x + kf.v;
+    const vPred = kf.v;
+    const P00p = kf.P00 + kf.P01 + kf.P10 + kf.P11 + q;
+    const P01p = kf.P01 + kf.P11;
+    const P10p = kf.P10 + kf.P11;
+    const P11p = kf.P11 + q * 0.25;
+    const y = z - xPred;
+    const S = P00p + r;
+    const gate = 3 * Math.sqrt(S);
+    if (Math.abs(y) > gate) {
+      kf.x = xPred; kf.v = vPred;
+      kf.P00 = P00p; kf.P01 = P01p; kf.P10 = P10p; kf.P11 = P11p;
+      return { accepted: false, residual: Math.abs(y) };
+    }
+    const K0 = P00p / S;
+    const K1 = P10p / S;
+    kf.x = xPred + K0 * y;
+    kf.v = vPred + K1 * y;
+    kf.P00 = (1 - K0) * P00p;
+    kf.P01 = (1 - K0) * P01p;
+    kf.P10 = P10p - K1 * P00p;
+    kf.P11 = P11p - K1 * P01p;
+    return { accepted: true, residual: Math.abs(y) };
+  }
+
+  private kfSeed(
+    kf: { x: number; v: number; P00: number; P01: number; P10: number; P11: number },
+    z: number,
+  ): void {
+    kf.x = z; kf.v = 0;
+    kf.P00 = 4; kf.P01 = 0; kf.P10 = 0; kf.P11 = 4;
+  }
+
   process(imageData: ImageData): ROIMaskResult {
     this.frameCount++;
     const data = imageData.data;
@@ -456,28 +552,38 @@ export class AdaptiveROIMask {
       this.roiCenterX = box.cx;
       this.roiCenterY = box.cy;
       this.roiSizeFrac = targetSizeFrac;
+      // V9 — seed Kalman filters to first observation (no transient).
+      this.kfSeed(this.kfCx, box.cx);
+      this.kfSeed(this.kfCy, box.cy);
+      this.kfSeed(this.kfSz, targetSizeFrac);
+      this.lastCentroidJumpPx = 0;
     } else if (box.mass > 0) {
-      // Smoothly follow the finger; don't snap.
-      // V8: track residual |observation − previous smoothed| as σ proxy.
-      const dxRes = box.cx - this.roiCenterX;
-      const dyRes = box.cy - this.roiCenterY;
-      const resMag = Math.sqrt(dxRes * dxRes + dyRes * dyRes);
-      this.trackerResidualEMA =
-        this.trackerResidualEMA * (1 - this.TRACKER_RES_ALPHA) +
-        resMag * this.TRACKER_RES_ALPHA;
-      this.trackerSigmaPx = this.trackerResidualEMA;
-      this.roiCenterX += (box.cx - this.roiCenterX) * this.ROI_CENTER_ALPHA;
-      this.roiCenterY += (box.cy - this.roiCenterY) * this.ROI_CENTER_ALPHA;
-      this.roiSizeFrac += (targetSizeFrac - this.roiSizeFrac) * this.ROI_SIZE_ALPHA;
+      // V9 — Kalman 1D update per dimension. Observation noise = base
+      // (clip-aware noise injection happens later via the per-frame
+      // clipHighRatio surfaced through PPGSignalProcessor's SQI).
+      const r = this.KF_R_BASE;
+      const stepCx = this.kfStep(this.kfCx, box.cx, this.KF_Q, r);
+      const stepCy = this.kfStep(this.kfCy, box.cy, this.KF_Q, r);
+      this.kfStep(this.kfSz, targetSizeFrac, this.KF_Q * 0.001, 0.01);
+      this.roiCenterX = this.kfCx.x;
+      this.roiCenterY = this.kfCy.x;
+      this.roiSizeFrac = Math.max(0.5, Math.min(0.95, this.kfSz.x));
+      this.kalmanCovariancePx2 = this.kfCx.P00 + this.kfCy.P00;
+      this.trackerSigmaPx = Math.sqrt(this.kalmanCovariancePx2);
+      // Use the largest residual of the two dims as the centroid jump proxy
+      // (rejected observations report the magnitude of the rejection).
+      this.lastCentroidJumpPx = Math.max(stepCx.residual, stepCy.residual);
     } else {
       // No finger evidence — drift gently back to the geometric center
       // so the next finger touch starts from a neutral position.
       this.roiCenterX += (w / 2 - this.roiCenterX) * 0.05;
       this.roiCenterY += (h / 2 - this.roiCenterY) * 0.05;
       this.roiSizeFrac += (0.85 - this.roiSizeFrac) * 0.05;
-      // Sin observación válida: relajar σ hacia 0.
-      this.trackerResidualEMA *= 0.85;
-      this.trackerSigmaPx = this.trackerResidualEMA;
+      // Sin observación válida: la covarianza Kalman crece; truncamos a una
+      // ventana razonable y seguimos reportando σ honestamente.
+      this.kalmanCovariancePx2 = Math.min(400, this.kalmanCovariancePx2 + this.KF_Q);
+      this.trackerSigmaPx = Math.sqrt(this.kalmanCovariancePx2);
+      this.lastCentroidJumpPx = 0;
     }
     const roiSize = minDim * this.roiSizeFrac;
     const half = roiSize / 2;
@@ -580,6 +686,36 @@ export class AdaptiveROIMask {
       const smR = this.tileMeanR[ti];
       const smG = this.tileMeanG[ti];
       const smB = this.tileMeanB[ti];
+      // V9 — Welford incremental por canal R y G (ventana ~60 muestras).
+      // Cuando el contador llega al máximo, decaemos M2 multiplicando por
+      // (n−1)/n para mantener una varianza "deslizante" sin re-alocar.
+      {
+        let n = this.tileNObs[ti];
+        if (n < this.TILE_PI_WINDOW) {
+          n++;
+          this.tileNObs[ti] = n;
+        } else {
+          // Ventana llena → decay suave de M2 (forgetting factor exponencial
+          // equivalente a una EWMA de varianza con tau ≈ window).
+          this.tileM2R_W[ti] *= (n - 1) / n;
+          this.tileM2G_W[ti] *= (n - 1) / n;
+        }
+        const dR = meanR - this.tileMeanR_W[ti];
+        this.tileMeanR_W[ti] += dR / n;
+        this.tileM2R_W[ti] += dR * (meanR - this.tileMeanR_W[ti]);
+        const dG = meanG - this.tileMeanG_W[ti];
+        this.tileMeanG_W[ti] += dG / n;
+        this.tileM2G_W[ti] += dG * (meanG - this.tileMeanG_W[ti]);
+        if (n >= 8) {
+          const muR_W = this.tileMeanR_W[ti];
+          const muG_W = this.tileMeanG_W[ti];
+          this.tilePI_R[ti] = muR_W > 1 ? Math.sqrt(this.tileM2R_W[ti] / n) / muR_W : 0;
+          this.tilePI_G[ti] = muG_W > 1 ? Math.sqrt(this.tileM2G_W[ti] / n) / muG_W : 0;
+        } else {
+          this.tilePI_R[ti] = 0;
+          this.tilePI_G[ti] = 0;
+        }
+      }
       const intensity = smR + smG + smB;
       const redDominance = smR - (smG + smB) / 2;
       const rgRatio = smG > 1 ? smR / smG : 0;
@@ -814,15 +950,12 @@ export class AdaptiveROIMask {
 
     // ── V7: COVERAGE CONTIGUITY (mayor componente conexa 8-conn / total) ─
     let coverageContiguity = 0;
+    let largestLab = -1;
     if (fingerTileCount > 0) {
       connectedComponents8(
         this.currentMask, GRID, GRID,
         this.ccLabels9, this.ccParent9, this.ccRank9,
       );
-      // Encontrar el label con más píxeles "1".
-      // #labels máx = TOTAL_TILES, usamos sortScratch como acumulador.
-      // No reutilizamos sortScratch para no chocar con su uso previo;
-      // este conteo es O(81) → un Int32Array temporal pequeño.
       const counts = new Int32Array(TOTAL_TILES);
       for (let ti = 0; ti < TOTAL_TILES; ti++) {
         if (!this.currentMask[ti]) continue;
@@ -831,13 +964,124 @@ export class AdaptiveROIMask {
       }
       let largest = 0;
       for (let k = 0; k < TOTAL_TILES; k++) {
-        if (counts[k] > largest) largest = counts[k];
+        if (counts[k] > largest) { largest = counts[k]; largestLab = k; }
       }
       coverageContiguity = largest / fingerTileCount;
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // V9 — SELECCIÓN DE MÁSCARA POR SNR ESTIMADO (top-K por canal)
+    //
+    // Por canal R y G computamos un score por tile:
+    //   score = tilePI_canal · centerBias · (∈ mayor CC ? 1.0 : 0.4)
+    // Tomamos los top-K=25 tiles, normalizamos vía softmax(score/τ) y
+    // exportamos los pesos. Las medias rgb por tile (`tileMeanR/G/B`) van
+    // expuestas como Float64Array para que el SignalSourceRanker proyecte
+    // CHROM/POS sobre la media ponderada del top-K en lugar del promedio
+    // uniforme de la ROI fine.
+    // ─────────────────────────────────────────────────────────────────
+    this.outTopKWeightsR.fill(0);
+    this.outTopKWeightsG.fill(0);
+    let topKMedianR = 0;
+    let topKMedianG = 0;
+    {
+      // Construir scores
+      let nValidPI = 0;
+      for (let ti = 0; ti < TOTAL_TILES; ti++) {
+        if (this.mValidPx[ti] === 0) {
+          this.topKScoreR[ti] = -1;
+          this.topKScoreG[ti] = -1;
+          continue;
+        }
+        const cb = this.mCenterBias[ti];
+        const inCC = (largestLab >= 0 && this.ccLabels9[ti] === largestLab) ? 1.0 : 0.4;
+        const sR = this.tilePI_R[ti] * cb * inCC;
+        const sG = this.tilePI_G[ti] * cb * inCC;
+        this.topKScoreR[ti] = sR;
+        this.topKScoreG[ti] = sG;
+        if (sR > 0 || sG > 0) nValidPI++;
+      }
+
+      if (nValidPI > 0) {
+        // Selección top-K vía índices ordenados por score (R y G separados).
+        // Reutilizamos topKIdx como scratch (TOTAL_TILES = 81 → barato).
+        for (let k = 0; k < TOTAL_TILES; k++) this.topKIdx[k] = k;
+        // Ordenar descendente por R
+        const idxR = Array.from(this.topKIdx);
+        idxR.sort((a, b) => this.topKScoreR[b] - this.topKScoreR[a]);
+        const idxG = Array.from(this.topKIdx);
+        idxG.sort((a, b) => this.topKScoreG[b] - this.topKScoreG[a]);
+
+        const Keff = Math.min(this.TOPK, nValidPI);
+
+        // Softmax sobre R top-K
+        let maxR = -Infinity;
+        for (let i = 0; i < Keff; i++) {
+          const s = this.topKScoreR[idxR[i]];
+          if (s > maxR) maxR = s;
+        }
+        let sumR = 0;
+        for (let i = 0; i < Keff; i++) {
+          const ti = idxR[i];
+          const e = Math.exp((this.topKScoreR[ti] - maxR) / this.SOFTMAX_TAU);
+          this.outTopKWeightsR[ti] = e;
+          sumR += e;
+        }
+        if (sumR > 0) {
+          for (let i = 0; i < Keff; i++) {
+            const ti = idxR[i];
+            this.outTopKWeightsR[ti] /= sumR;
+          }
+        }
+
+        // Softmax sobre G top-K
+        let maxG = -Infinity;
+        for (let i = 0; i < Keff; i++) {
+          const s = this.topKScoreG[idxG[i]];
+          if (s > maxG) maxG = s;
+        }
+        let sumG = 0;
+        for (let i = 0; i < Keff; i++) {
+          const ti = idxG[i];
+          const e = Math.exp((this.topKScoreG[ti] - maxG) / this.SOFTMAX_TAU);
+          this.outTopKWeightsG[ti] = e;
+          sumG += e;
+        }
+        if (sumG > 0) {
+          for (let i = 0; i < Keff; i++) {
+            const ti = idxG[i];
+            this.outTopKWeightsG[ti] /= sumG;
+          }
+        }
+
+        // Mediana topK PI (telemetría) — copia compacta y ordenamos.
+        const tmpR = new Float64Array(Keff);
+        const tmpG = new Float64Array(Keff);
+        for (let i = 0; i < Keff; i++) {
+          tmpR[i] = this.tilePI_R[idxR[i]];
+          tmpG[i] = this.tilePI_G[idxG[i]];
+        }
+        tmpR.sort(); tmpG.sort();
+        topKMedianR = tmpR[Keff >> 1];
+        topKMedianG = tmpG[Keff >> 1];
+      }
+    }
+
+    // V9 — Recompute rawRed/rawGreen con la máscara dinámica top-K cuando
+    // hay pesos válidos. Esto MAXIMIZA el SNR seleccionado por canal.
+    // rawBlue mantiene el promedio uniforme (B no es dominante en PPG).
+    let weightedR = 0, weightedG = 0, sumWR = 0, sumWG = 0;
+    for (let ti = 0; ti < TOTAL_TILES; ti++) {
+      const wR_ = this.outTopKWeightsR[ti];
+      const wG_ = this.outTopKWeightsG[ti];
+      if (wR_ > 0) { weightedR += this.tileMeanR[ti] * wR_; sumWR += wR_; }
+      if (wG_ > 0) { weightedG += this.tileMeanG[ti] * wG_; sumWG += wG_; }
+    }
+    const rawRed_v9 = sumWR > 0 ? weightedR / sumWR : rawRed;
+    const rawGreen_v9 = sumWG > 0 ? weightedG / sumWG : rawGreen;
+
     return {
-      rawRed, rawGreen, rawBlue,
+      rawRed: rawRed_v9, rawGreen: rawGreen_v9, rawBlue,
       coarseRed, coarseGreen, coarseBlue,
       coverageRatio,
       fingerScore: avgFingerScore,
@@ -869,6 +1113,15 @@ export class AdaptiveROIMask {
       coverageContiguity,
       maskIoU,
       trackerSigma: this.trackerSigmaPx,
+      topKTilePI_R: topKMedianR,
+      topKTilePI_G: topKMedianG,
+      topKWeightsR: this.outTopKWeightsR,
+      topKWeightsG: this.outTopKWeightsG,
+      tileMeanRArr: this.tileMeanR,
+      tileMeanGArr: this.tileMeanG,
+      tileMeanBArr: this.tileMeanB,
+      kalmanCovariance: this.kalmanCovariancePx2,
+      centroidJumpPx: this.lastCentroidJumpPx,
     };
   }
 
@@ -892,7 +1145,16 @@ export class AdaptiveROIMask {
     this.prepassRecentFilled = 0;
     this.prepassSuccessRate = 0;
     this.lastBox = { cx: 0, cy: 0, sizePx: 0, mass: 0 };
-    this.trackerResidualEMA = 0;
     this.trackerSigmaPx = 0;
+    this.kalmanCovariancePx2 = 0;
+    this.lastCentroidJumpPx = 0;
+    this.kfCx = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+    this.kfCy = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+    this.kfSz = { x: -1, v: 0, P00: 100, P01: 0, P10: 0, P11: 100 };
+    this.tileNObs.fill(0);
+    this.tileMeanR_W.fill(0); this.tileM2R_W.fill(0);
+    this.tileMeanG_W.fill(0); this.tileM2G_W.fill(0);
+    this.tilePI_R.fill(0); this.tilePI_G.fill(0);
+    this.outTopKWeightsR.fill(0); this.outTopKWeightsG.fill(0);
   }
 }
