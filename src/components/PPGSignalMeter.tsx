@@ -419,7 +419,12 @@ const PPGSignalMeter = ({
       }
       lastRenderTime = now;
       
-      const { value: signalValue, isFingerDetected: detected, arrhythmiaStatus: arrStatus, preserveResults: preserve, isPeak: peak } = propsRef.current;
+      const { value: signalValueRaw, isFingerDetected: detected, arrhythmiaStatus: arrStatus, preserveResults: preserve, isPeak: peakRaw, publicationGate: pubGate, rejectionReason: rejReason } = propsRef.current;
+      // FORENSIC: si la cadena triple-gate + evidencia óptica no autoriza
+      // publicación, el monitor pinta línea plana (valor=0) y suprime el
+      // marcador de peak. Nunca dibujamos una "onda" sobre aire/ruido.
+      const signalValue = pubGate ? signalValueRaw : 0;
+      const peak = pubGate ? peakRaw : false;
       const rhythm = parseRhythmStatus(arrStatus);
       const plot = getPlotArea();
       const { WINDOW_MS, COLORS } = CONFIG;
@@ -428,6 +433,26 @@ const PPGSignalMeter = ({
       drawAmplitudeScale(ctx);
       drawTimeScale(ctx);
       drawVitalInfo(ctx, now);
+
+      // Banner forense superior cuando no hay autorización de publicación.
+      if (!pubGate && rejReason) {
+        const bannerW = Math.min(900, CONFIG.CANVAS_WIDTH - 40);
+        const bx = (CONFIG.CANVAS_WIDTH - bannerW) / 2;
+        ctx.save();
+        ctx.fillStyle = 'rgba(153, 27, 27, 0.92)';
+        ctx.fillRect(bx, 8, bannerW, 56);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(bx, 8, bannerW, 56);
+        ctx.font = 'bold 18px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = '#fee2e2';
+        ctx.textAlign = 'center';
+        ctx.fillText('NO PUBLICAR — SIN EVIDENCIA ÓPTICA', CONFIG.CANVAS_WIDTH / 2, 30);
+        ctx.font = '14px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = '#fecaca';
+        ctx.fillText(rejReason, CONFIG.CANVAS_WIDTH / 2, 52);
+        ctx.restore();
+      }
       
       if (preserve && !detected) {
         animationRef.current = requestAnimationFrame(render);
