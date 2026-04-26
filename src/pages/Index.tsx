@@ -1477,6 +1477,35 @@ const Index = () => {
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
 
+        {isMonitoring && signalHealth && signalHealth.reason !== 'OK' && (
+          <div className="auto-hide absolute left-3 top-3 z-30 max-w-[calc(100vw-1.5rem)] rounded-md border border-border bg-background/90 p-3 font-mono text-[11px] text-foreground shadow-lg backdrop-blur-sm">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="font-bold tracking-wide text-primary">SIGNAL HEALTH</span>
+              <span className={signalHealth.shouldReinitialize ? 'font-bold text-destructive' : 'text-muted-foreground'}>
+                {signalHealth.shouldReinitialize ? 'REINIT PENDIENTE' : 'STREAM ACTIVO'}
+              </span>
+            </div>
+            <div className="mb-2 text-muted-foreground">{signalHealth.message}</div>
+            <div className="grid grid-cols-3 gap-2">
+              {[signalHealth.g1, signalHealth.g2, signalHealth.g3].map((g) => (
+                <div key={g.label} className="rounded border border-border/70 bg-muted/40 px-2 py-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold">{g.label}</span>
+                    <span className={g.ok ? 'text-primary' : 'text-destructive'}>{g.ok ? 'OK' : g.failure}</span>
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    {g.label === 'G3' ? g.value.toFixed(2) : g.value.toFixed(3)}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 flex justify-between gap-3 text-muted-foreground">
+              <span>streak {signalHealth.badStreak}</span>
+              <span>warmup {Math.ceil(signalHealth.warmupRemainingMs / 1000)}s</span>
+            </div>
+          </div>
+        )}
+
         {/* ════════════════════════════════════════════════════════════
             PPGSignalMeter - FULL SCREEN 100% - MONITOR CARDÍACO FORENSE
             ════════════════════════════════════════════════════════════ */}
