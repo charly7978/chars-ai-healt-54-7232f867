@@ -344,6 +344,9 @@ const Index = () => {
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
+  // Motion classifier: drops frames during sustained SEVERE motion with a
+  // hard 50% drop-rate cap so the operator never loses the live trace.
+  const motionClassifierRef = useRef<MotionClassifier>(new MotionClassifier());
   // Cached/last-trusted sample rate, used to keep delineation stable when
   // frame timestamps are momentarily missing, sparse or jittery.
   const cachedSampleRateRef = useRef<number>(30);
