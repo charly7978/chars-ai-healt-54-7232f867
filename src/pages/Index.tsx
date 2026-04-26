@@ -63,6 +63,11 @@ const Index = () => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("tuner") === "1";
   });
+  // Independent toggle for the SR diagnostics panel: ?srDiag=1
+  const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("srDiag") === "1";
+  });
   const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
     morphologyScore: 0,
     morphologyValidity: 0,
@@ -968,9 +973,12 @@ const Index = () => {
         liveStats={fiducialLive}
       />
 
-      {/* SR diagnostics — visible alongside the tuner so devs can see the
-          frame timing health (stall, recovery, last trusted SR) live. */}
-      <SRDiagnostics estimator={srEstimatorRef.current} hidden={!showFiducialTuner} />
+      {/* SR diagnostics — shown when the fiducial tuner is open OR when the
+          ?srDiag=1 URL flag is active (independent from the tuner). */}
+      <SRDiagnostics
+        estimator={srEstimatorRef.current}
+        hidden={!showFiducialTuner && !showSRDiag}
+      />
     </div>
   );
 };
