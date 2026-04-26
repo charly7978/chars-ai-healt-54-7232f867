@@ -59,6 +59,9 @@ const Index = () => {
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [rrIntervals, setRRIntervals] = useState<number[]>([]);
+  // Pin overlays whenever the operator likely needs status:
+  // - not yet monitoring, no finger contact, low quality, or after results
+  // Otherwise auto-hide after a few seconds so the waveform stays clean.
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
