@@ -1332,16 +1332,18 @@ const Index = () => {
                         <div className={`text-[10px] font-semibold mt-0.5 ${statusColor === 'emerald' ? 'text-emerald-400' : statusColor === 'yellow' ? 'text-yellow-400' : 'text-red-400'}`}>{statusText}</div>
                       </div>
                     </div>
-                    <button
-                      onClick={() => {
-                        analyzeVitals({ heartRate, vitalSigns, quality: lastSignal?.quality || 0 });
-                        setShowAIAnalysis(true);
-                      }}
-                      disabled={isAnalyzing}
-                      className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm transition-all disabled:opacity-50"
-                    >
-                      {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
-                    </button>
+                    {CIVIL_MODE && (
+                      <button
+                        onClick={() => {
+                          analyzeVitals({ heartRate, vitalSigns, quality: lastSignal?.quality || 0 });
+                          setShowAIAnalysis(true);
+                        }}
+                        disabled={isAnalyzing}
+                        className="w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-sm transition-all disabled:opacity-50"
+                      >
+                        {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
