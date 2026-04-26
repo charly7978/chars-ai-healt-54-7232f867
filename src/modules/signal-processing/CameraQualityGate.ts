@@ -98,6 +98,16 @@ export interface CameraGateDecision {
     | 'REINIT';
 }
 
+/** Persistent ring-buffer sample of G1/G2/G3 for forensic continuity. */
+export interface CameraGateSample {
+  t: number;
+  frame: number;
+  g1: number;   // greenDC (0..255)
+  g2: number;   // greenAC (raw magnitude)
+  g3: number;   // R/G perfusion ratio
+  ok: boolean;  // verdict.ok at sample time
+}
+
 export class CameraQualityGate {
   private cfg: CameraQualityConfig = { ...DEFAULT };
   private badStreak = 0;
@@ -115,6 +125,11 @@ export class CameraQualityGate {
   // export size stay predictable on long sessions.
   private static readonly DECISION_LOG_CAPACITY = 600; // ~20 s @ 30 fps
   private decisionLog: CameraGateDecision[] = [];
+  // Persistent G1/G2/G3 samples — survive every reset() so the operator
+  // can still inspect the last ~30 s of raw extraction across soft
+  // re-renders, frame-loop restarts, or wakeups from background.
+  private static readonly SAMPLE_LOG_CAPACITY = 900; // ~30 s @ 30 fps
+  private sampleLog: CameraGateSample[] = [];
   /** When true, every decision is also console.debug'd. Off by default. */
   private verbose = false;
   private lastVerboseLogAt = 0;
@@ -132,6 +147,20 @@ export class CameraQualityGate {
     this.lastInput = input;
     const verdict = this.classify(input);
     this.lastVerdict = verdict;
+
+    // ── Persistent G1/G2/G3 sample (independent of decision path). ──
+    const rgRatio = input.greenDC > 0 ? input.redDC / input.greenDC : 0;
+    this.sampleLog.push({
+      t: nowMs,
+      frame: this.framesSeen,
+      g1: input.greenDC,
+      g2: input.greenAC,
+      g3: rgRatio,
+      ok: verdict.ok,
+    });
+    if (this.sampleLog.length > CameraQualityGate.SAMPLE_LOG_CAPACITY) {
+      this.sampleLog.splice(0, this.sampleLog.length - CameraQualityGate.SAMPLE_LOG_CAPACITY);
+    }
 
     const recordDecision = (path: CameraGateDecision['decisionPath'], reinitRecommended: boolean) => {
       const rg = input.greenDC > 0 ? input.redDC / input.greenDC : 0;
@@ -284,11 +313,59 @@ export class CameraQualityGate {
     this.framesBad = 0;
     this.lastVerdict = { ok: true, reason: 'OK' };
     this.warmupStart = performance.now();
-    // decisionLog is intentionally preserved so the operator can inspect
-    // what happened across a reset/reinit boundary.
+    // decisionLog and sampleLog are intentionally preserved so the
+    // operator can inspect what happened across a reset/reinit boundary
+    // (e.g. soft frame-loop restart from the watchdog).
     // lastReinitAt is intentionally preserved so the cooldown still applies
     // across short-lived reset() calls (e.g. between sessions).
   }
+
+  /** Read-only snapshot of the persistent G1/G2/G3 sample buffer. */
+  getSampleLog(): readonly CameraGateSample[] {
+    return this.sampleLog;
+  }
+
+  /** Aggregated G1/G2/G3 stats over the last `windowMs` of samples. */
+  getRecentSampleStats(windowMs = 5000, nowMs = performance.now()): {
+    samples: number;
+    okRatio: number;
+    g1: { mean: number; min: number; max: number };
+    g2: { mean: number; min: number; max: number };
+    g3: { mean: number; min: number; max: number };
+  } {
+    const cutoff = nowMs - windowMs;
+    let n = 0, ok = 0;
+    let g1s = 0, g1Min = Infinity, g1Max = -Infinity;
+    let g2s = 0, g2Min = Infinity, g2Max = -Infinity;
+    let g3s = 0, g3Min = Infinity, g3Max = -Infinity;
+    for (let i = this.sampleLog.length - 1; i >= 0; i--) {
+      const s = this.sampleLog[i];
+      if (s.t < cutoff) break;
+      n++;
+      if (s.ok) ok++;
+      g1s += s.g1; if (s.g1 < g1Min) g1Min = s.g1; if (s.g1 > g1Max) g1Max = s.g1;
+      g2s += s.g2; if (s.g2 < g2Min) g2Min = s.g2; if (s.g2 > g2Max) g2Max = s.g2;
+      g3s += s.g3; if (s.g3 < g3Min) g3Min = s.g3; if (s.g3 > g3Max) g3Max = s.g3;
+    }
+    if (n === 0) {
+      return {
+        samples: 0, okRatio: 0,
+        g1: { mean: 0, min: 0, max: 0 },
+        g2: { mean: 0, min: 0, max: 0 },
+        g3: { mean: 0, min: 0, max: 0 },
+      };
+    }
+    return {
+      samples: n,
+      okRatio: ok / n,
+      g1: { mean: g1s / n, min: g1Min, max: g1Max },
+      g2: { mean: g2s / n, min: g2Min, max: g2Max },
+      g3: { mean: g3s / n, min: g3Min, max: g3Max },
+    };
+  }
+
+  /** Hard wipe — only call between sessions, NOT on soft re-renders. */
+  clearSampleLog(): void { this.sampleLog = []; }
 
   /** Read-only snapshot of the per-frame decision log. */
   getDecisionLog(): readonly CameraGateDecision[] {
