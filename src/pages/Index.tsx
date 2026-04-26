@@ -143,6 +143,30 @@ const Index = () => {
   const [validSamples, setValidSamples] = useState(0);
   const [noiseSamples, setNoiseSamples] = useState(0);
 
+  // Runtime-tunable safeguard thresholds for the beat-detection gate.
+  // Persisted in localStorage so calibration survives reloads.
+  const [acceptedRatioMin, setAcceptedRatioMin] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0.15;
+    const v = parseFloat(localStorage.getItem('forensic.acceptedRatioMin') || '');
+    return Number.isFinite(v) && v >= 0.10 && v <= 0.30 ? v : 0.15;
+  });
+  const [warmupSamples, setWarmupSamples] = useState<number>(() => {
+    if (typeof window === 'undefined') return 60;
+    const v = parseInt(localStorage.getItem('forensic.warmupSamples') || '', 10);
+    return Number.isFinite(v) && v >= 30 && v <= 150 ? v : 60;
+  });
+  const [showThresholdPanel, setShowThresholdPanel] = useState(false);
+  const acceptedRatioMinRef = useRef(acceptedRatioMin);
+  const warmupSamplesRef = useRef(warmupSamples);
+  useEffect(() => {
+    acceptedRatioMinRef.current = acceptedRatioMin;
+    try { localStorage.setItem('forensic.acceptedRatioMin', String(acceptedRatioMin)); } catch {}
+  }, [acceptedRatioMin]);
+  useEffect(() => {
+    warmupSamplesRef.current = warmupSamples;
+    try { localStorage.setItem('forensic.warmupSamples', String(warmupSamples)); } catch {}
+  }, [warmupSamples]);
+
   const vibrate = useCallback((pattern: number | number[]) => {
     try {
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
