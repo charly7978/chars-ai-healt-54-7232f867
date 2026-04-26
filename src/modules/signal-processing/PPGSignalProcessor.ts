@@ -7,6 +7,7 @@ import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
 import { CardiacBandVerifier } from './CardiacBandVerifier';
 import { OpticalEvidenceGate, type OpticalEvidence, type OpticalGateConfig } from './OpticalEvidenceGate';
+import { ROITelemetryLogger } from './ROITelemetryLogger';
 
 /**
  * Conversión sRGB (0..255) → intensidad lineal [0..1] según IEC 61966-2-1.
@@ -76,6 +77,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // Independiente de morfología, no bloquea por "forma de dedo".
   private opticalGate = new OpticalEvidenceGate();
   private lastOpticalEvidence: OpticalEvidence | null = null;
+
+  // V6: structured per-frame telemetry — exported on demand so the operator
+  // can audit ROI position/size, coverage and Liveness reasons after a
+  // session where the app says it isn't detecting pulses.
+  private roiTelemetry = new ROITelemetryLogger();
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
