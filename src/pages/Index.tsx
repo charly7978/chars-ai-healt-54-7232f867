@@ -18,7 +18,7 @@ import { supabase } from "@/integrations/supabase/client";
 import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 import { useAutoHideOverlays } from "@/hooks/useAutoHideOverlays";
 import { MotionClassifier } from "@/modules/signal-processing/MotionClassifier";
-import { CameraQualityGate } from "@/modules/signal-processing/CameraQualityGate";
+import { CameraQualityGate, type CameraSignalHealth } from "@/modules/signal-processing/CameraQualityGate";
 import CalibrationWizard, { type CalibrationBaseline } from "@/components/CalibrationWizard";
 import { useRecalibrationWatchdog } from "@/hooks/useRecalibrationWatchdog";
 
@@ -67,6 +67,7 @@ const Index = () => {
   // - not yet monitoring, no finger contact, low quality, or after results
   // Otherwise auto-hide after a few seconds so the waveform stays clean.
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [signalHealth, setSignalHealth] = useState<CameraSignalHealth | null>(null);
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
     arrhythmiaBeats: number;
