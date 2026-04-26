@@ -1138,8 +1138,13 @@ const Index = () => {
           {(() => {
             const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
             const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
-            const pulsePresent = isMonitoring && !noOptical && heartRate > 0;
-            const pi = lastSignal?.perfusionIndex || 0;
+            // FORENSIC: pulse is "present" ONLY when the triple-gate passes.
+            // Optical contact alone is NOT enough — Gate 2 (spectral SNR) and
+            // Gate 3 (morphology) must also be open.
+            const triplePass = !!forensicGate?.passAll;
+            const pulsePresent = isMonitoring && triplePass && heartRate > 0;
+            const pi = triplePass ? (lastSignal?.perfusionIndex || 0) : 0;
+            const blockedReason = forensicGate?.livenessReason || (noOptical ? 'SIN CONTACTO ÓPTICO' : 'BUSCANDO PULSO REAL');
             return (
               <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
                 {/* Forensic banner — always visible while monitoring */}
