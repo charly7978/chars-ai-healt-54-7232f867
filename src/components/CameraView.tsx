@@ -75,6 +75,11 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     let mounted = true;
 
     const stopCamera = async () => {
+      // Stop the FPS watchdog first so it doesn't keep referencing a dead video.
+      if (fpsWatchdogRef.current.rafId !== null) {
+        cancelAnimationFrame(fpsWatchdogRef.current.rafId);
+        fpsWatchdogRef.current.rafId = null;
+      }
       if (streamRef.current) {
         for (const track of streamRef.current.getVideoTracks()) {
           try {
