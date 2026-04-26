@@ -1389,6 +1389,21 @@ const Index = () => {
   const { visible: overlaysVisible, reveal: revealOverlays } =
     useAutoHideOverlays({ idleMs: 4000, initialMs: 4000, pinned: overlayPinned });
 
+  // Confidence watchdog — fires a recalibration toast (and flashes the CAL
+  // chip) when quality, motion, or BPM/SpO₂ drift sustain past hold windows.
+  // Suppressed while the wizard is open or when not actively monitoring.
+  useRecalibrationWatchdog(
+    {
+      enabled: isMonitoring && !showCalibration,
+      quality: lastSignal?.quality ?? 0,
+      bpm: heartRate,
+      spo2: vitalSigns.spo2,
+      motionLevel: motionClassifierRef.current.classify(),
+      baseline: calibrationBaseline,
+    },
+    { onPrompt: triggerCalPromptHighlight },
+  );
+
   return (
     <>
     <div
