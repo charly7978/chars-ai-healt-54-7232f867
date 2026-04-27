@@ -615,10 +615,13 @@ const Index = () => {
   }, [elapsedTime, isMonitoring, finalizeMeasurement]);
 
   useEffect(() => {
-    if (!showTelemetry || !isMonitoring) return;
-    const id = window.setInterval(() => setTelemetryTick(t => (t + 1) & 0xffff), 250);
+    // Drive HUD refresh (torch/ROI indicator) and telemetry panel from a single
+    // low-frequency ticker. Active while measuring so the indicator stays live
+    // even when the debug panel is closed.
+    if (!isMonitoring) return;
+    const id = window.setInterval(() => setTelemetryTick(t => (t + 1) & 0xffff), 300);
     return () => window.clearInterval(id);
-  }, [showTelemetry, isMonitoring]);
+  }, [isMonitoring]);
 
   const handleTelemetryTapZone = useCallback(() => {
     const now = performance.now();
