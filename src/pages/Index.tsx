@@ -615,10 +615,13 @@ const Index = () => {
   }, [elapsedTime, isMonitoring, finalizeMeasurement]);
 
   useEffect(() => {
-    if (!showTelemetry || !isMonitoring) return;
-    const id = window.setInterval(() => setTelemetryTick(t => (t + 1) & 0xffff), 250);
+    // Drive HUD refresh (torch/ROI indicator) and telemetry panel from a single
+    // low-frequency ticker. Active while measuring so the indicator stays live
+    // even when the debug panel is closed.
+    if (!isMonitoring) return;
+    const id = window.setInterval(() => setTelemetryTick(t => (t + 1) & 0xffff), 300);
     return () => window.clearInterval(id);
-  }, [showTelemetry, isMonitoring]);
+  }, [isMonitoring]);
 
   const handleTelemetryTapZone = useCallback(() => {
     const now = performance.now();
@@ -749,6 +752,71 @@ const Index = () => {
               </div>
             </div>
           ) : null;
+        })()}
+
+        {/* TORCH WATCHDOG + ROI STABILITY HUD ─────────────────────────────
+            Sits below the guidance banner. Updates ~3 Hz via telemetryTick. */}
+        {isMonitoring && (() => {
+          void telemetryTick;
+          const torch = cameraRef.current?.getTorchStatus?.() ?? {
+            supported: false, active: false, watchdogActive: false,
+            reArmCount: 0, lastReArmAt: 0, lastCheckAt: 0,
+          };
+          const pq = getPositionQuality();
+          // ROI stability score: high quality + no drift = 1; clamp to [0,1].
+          const driftPenalty = Math.min(1, Math.max(0, pq.positionDrift / 0.30));
+          const roiScore = Math.max(0, Math.min(1,
+            (pq.qualityScore || 0) * 0.7 + (pq.locked ? 0.3 : 0) - driftPenalty * 0.4
+          ));
+          const roiPct = Math.round(roiScore * 100);
+          const driftPct = Math.round(Math.min(1, pq.positionDrift) * 100);
+          const driftWarn = pq.drifting || driftPct >= 18;
+          const driftCrit = pq.drifting && driftPct >= 28;
+
+          // Torch tone:
+          //   green  = supported + active + watchdog armed
+          //   amber  = supported + active but recently re-armed (instability)
+          //   red    = supported but currently OFF
+          //   slate  = no torch hardware
+          const recentReArm = torch.lastReArmAt > 0 && (performance.now() - torch.lastReArmAt) < 4000;
+          const torchTone =
+            !torch.supported ? 'slate' :
+            !torch.active ? 'red' :
+            recentReArm ? 'amber' : 'emerald';
+          const torchToneCls =
+            torchTone === 'emerald' ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' :
+            torchTone === 'amber'   ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 animate-pulse' :
+            torchTone === 'red'     ? 'bg-red-500/15 border-red-500/40 text-red-300 animate-pulse' :
+                                      'bg-slate-500/15 border-slate-500/40 text-slate-300';
+
+          const roiToneCls =
+            driftCrit  ? 'bg-red-500/15 border-red-500/40 text-red-300 animate-pulse' :
+            driftWarn  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300' :
+            roiPct >= 70 ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' :
+                           'bg-slate-500/15 border-slate-500/40 text-slate-300';
+
+          const torchLabel =
+            !torch.supported ? 'NO TORCH' :
+            !torch.active ? 'TORCH OFF' :
+            torch.watchdogActive
+              ? (recentReArm ? `TORCH RE-ARM ×${torch.reArmCount}` : `TORCH ✓ WD ×${torch.reArmCount}`)
+              : 'TORCH ON';
+
+          return (
+            <div className="absolute top-9 left-0 right-0 z-20 flex justify-center gap-1.5 pointer-events-none">
+              <div className={`px-2 py-0.5 rounded-md text-[9px] font-mono font-bold tracking-wider shadow border ${torchToneCls}`}>
+                🔦 {torchLabel}
+              </div>
+              <div className={`px-2 py-0.5 rounded-md text-[9px] font-mono font-bold tracking-wider shadow border ${roiToneCls}`}>
+                ROI {roiPct}% · DRIFT {driftPct}%
+              </div>
+              {driftCrit && (
+                <div className="px-2 py-0.5 rounded-md text-[9px] font-mono font-bold tracking-wider shadow border bg-red-600/30 border-red-500/60 text-red-100 animate-pulse">
+                  ⚠ ESTABILICE EL DEDO
+                </div>
+              )}
+            </div>
+          );
         })()}
 
         <div className="relative z-10 h-full">
