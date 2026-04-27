@@ -913,6 +913,23 @@ const Index = () => {
           );
         })()}
 
+        {/* PERSISTENT ROI-STABILITY ALERT ──────────────────────────────────
+            Latches when N consecutive accepted beats fall below the ROI
+            stability threshold. Stays on screen until ROI recovers for
+            ROI_STABILITY_RECOVER_BEATS beats. Each transition is logged to
+            roiAuditLogRef for forensic audit. */}
+        {isMonitoring && roiAlertActive && (
+          <div className="absolute top-16 left-0 right-0 z-30 flex justify-center pointer-events-none">
+            <div className="px-3 py-1 rounded-md text-[10px] font-mono font-bold tracking-wider shadow-lg border bg-red-700/40 border-red-400/70 text-red-50 animate-pulse">
+              ⚠ ROI INESTABLE · {ROI_STABILITY_BEATS_N}+ LATIDOS · ESTABILICE EL DEDO
+              <span className="ml-2 opacity-80">
+                score {Math.round(lastBeatRoiScoreRef.current * 100)}% ·
+                drift {Math.round(Math.min(1, lastBeatDriftRef.current) * 100)}%
+              </span>
+            </div>
+          </div>
+        )}
+
         <div className="relative z-10 h-full">
           <div className="flex-1 h-full">
             <PPGSignalMeter 
