@@ -420,6 +420,12 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     unstableFrameCounter.current = 0;
+    lowStabilityStreakRef.current = 0;
+    goodStabilityStreakRef.current = 0;
+    lastBeatRoiScoreRef.current = 1;
+    lastBeatDriftRef.current = 0;
+    roiAuditLogRef.current = [];
+    setRoiAlertActive(false);
     setHeartbeatSignal(0);
     setBeatMarker(0);
     setRRIntervals([]);
