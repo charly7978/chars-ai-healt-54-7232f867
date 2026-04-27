@@ -10,12 +10,8 @@ import { useSaveMeasurement } from "@/hooks/useSaveMeasurement";
 import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
 import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
-import { FiducialTuner, type FiducialTunerLiveStats } from "@/components/FiducialTuner";
-import { SampleRateEstimator } from "@/modules/signal-processing/timing/SampleRateEstimator";
-import { SRDiagnostics } from "@/components/SRDiagnostics";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
-import ForensicGateOverlay, { type ForensicGateSnapshot, type ForensicCadenceMs } from "@/components/ForensicGateOverlay";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -24,13 +20,6 @@ const NON_ALERT_RHYTHMS = new Set([
   'CALIBRANDO...',
   'UNDETERMINED_LOW_QUALITY'
 ]);
-
-// FORENSIC MODE: civil (clinical-style) vitals are hidden by default.
-// They can be re-enabled with ?civil=1 (kept behind a flag, NOT clinical).
-const CIVIL_MODE = typeof window !== 'undefined'
-  && new URLSearchParams(window.location.search).get('civil') === '1';
-// FORENSIC MODE: bypass the mandatory 60s auto-finalize (continuous monitoring).
-const FORENSIC_MODE = !CIVIL_MODE;
 
 const Index = () => {
   const [isMonitoring, setIsMonitoring] = useState(false);
@@ -65,208 +54,6 @@ const Index = () => {
     normalPercent: number;
   } | null>(null);
 
-  // ── Fiducial tuner (dev/research panel) ──────────────────────────────────
-  // Toggle by triple-tapping the BPM card, or via ?tuner=1 URL flag.
-  const [showFiducialTuner, setShowFiducialTuner] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("tuner") === "1";
-  });
-  // Independent toggle for the SR diagnostics panel: ?srDiag=1
-  const [showSRDiag, setShowSRDiag] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("srDiag") === "1";
-  });
-  // Forensic gate overlay: visible by default in FORENSIC_MODE; can be forced
-  // via ?forensic=1 or hidden via ?forensic=0 regardless of mode.
-  const [showForensicOverlay] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    const v = new URLSearchParams(window.location.search).get("forensic");
-    if (v === "1") return true;
-    if (v === "0") return false;
-    return FORENSIC_MODE;
-  });
-  const [forensicGate, setForensicGate] = useState<ForensicGateSnapshot | null>(null);
-  // Throttling refs for the overlay: we keep the latest snapshot in a ref and
-  // only commit it to React state every ~150 ms. Heavy spectral fields are
-  // copied as-is (they are tiny numbers — no allocations in hot path).
-  const forensicGateRef = useRef<ForensicGateSnapshot | null>(null);
-  const lastOverlayCommitRef = useRef<number>(0);
-  // User-tunable cadence (overlay + session-log sampling). 150 ms keeps the
-  // camera preview smooth; 100 ms gives denser logs; 300/500/1000 ms shrink
-  // the export file. Persisted in localStorage so it survives reloads.
-  const [overlayCadenceMs, setOverlayCadenceMs] = useState<ForensicCadenceMs>(() => {
-    if (typeof window === 'undefined') return 150;
-    const stored = parseInt(window.localStorage.getItem('forensicCadenceMs') || '', 10);
-    return ([100, 150, 300, 500, 1000] as const).includes(stored as any) ? (stored as ForensicCadenceMs) : 150;
-  });
-  const overlayCadenceRef = useRef<number>(overlayCadenceMs);
-  useEffect(() => {
-    overlayCadenceRef.current = overlayCadenceMs;
-    try { window.localStorage.setItem('forensicCadenceMs', String(overlayCadenceMs)); } catch {}
-  }, [overlayCadenceMs]);
-  // Gate-transition tracking for alerts (toast + haptic). We only fire on
-  // RISING edge (false→true) for "open" alerts and FALLING edge (true→false)
-  // for "closed" alerts, with a per-gate cooldown so we don't spam.
-  const prevGatesRef = useRef<{ g1: boolean; g2: boolean; g3: boolean; all: boolean }>({
-    g1: false, g2: false, g3: false, all: false,
-  });
-  const lastAlertAtRef = useRef<Record<string, number>>({});
-  const ALERT_COOLDOWN_MS = 2500;
-
-  // ── Forensic session log (rolling ring buffer of overlay snapshots) ──
-  // Each entry mirrors the overlay payload + a timestamp + a session ID, so
-  // we can export a faithful trace of what the operator saw on screen.
-  type ForensicSessionEntry = {
-    t_iso: string;
-    t_ms: number;
-    g1_optical: boolean;
-    g2_spectral: boolean;
-    g3_morphology: boolean;
-    pass_all: boolean;
-    snr_db: number;
-    peak_hz: number;
-    bpm_estimate: number;
-    concentration: number;
-    reason: string;
-  };
-  const sessionLogRef = useRef<ForensicSessionEntry[]>([]);
-  const sessionStartIsoRef = useRef<string>("");
-  const sessionIdRef = useRef<string>("");
-  const SESSION_LOG_MAX = 4000; // ~10 min @ 1 sample / 150 ms
-  const [sessionLogSize, setSessionLogSize] = useState(0);
-
-  const vibrate = useCallback((pattern: number | number[]) => {
-    try {
-      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
-        (navigator as any).vibrate(pattern);
-      }
-    } catch {}
-  }, []);
-
-  const fireGateAlert = useCallback((key: string, kind: 'success' | 'fail', message: string) => {
-    const now = performance.now();
-    const last = lastAlertAtRef.current[key] || 0;
-    if (now - last < ALERT_COOLDOWN_MS) return;
-    lastAlertAtRef.current[key] = now;
-    if (kind === 'success') {
-      vibrate([40, 30, 80]);
-      toast({ title: '✓ ' + message, duration: 2200 });
-    } else {
-      vibrate(120);
-      toast({ title: '⚠ ' + message, description: 'Mantén el dedo firme y quieto.', variant: 'destructive', duration: 2400 });
-    }
-  }, [vibrate]);
-
-  // Build and download both a JSON and a CSV with the forensic session log.
-  const exportForensicSession = useCallback(() => {
-    const log = sessionLogRef.current;
-    if (log.length === 0) {
-      toast({
-        title: 'No hay datos para exportar',
-        description: 'Inicia una medición para registrar la sesión forense.',
-        duration: 2400,
-      });
-      return;
-    }
-
-    const sessionId = sessionIdRef.current || `forensic_${Date.now().toString(36)}`;
-    const startIso = sessionStartIsoRef.current || log[0].t_iso;
-    const endIso = log[log.length - 1].t_iso;
-
-    // Aggregate stats for the export header.
-    const passCount = log.reduce((n, e) => n + (e.pass_all ? 1 : 0), 0);
-    const snrValues = log.filter(e => e.snr_db !== 0).map(e => e.snr_db);
-    const snrAvg = snrValues.length ? snrValues.reduce((a, b) => a + b, 0) / snrValues.length : 0;
-    const snrMax = snrValues.length ? Math.max(...snrValues) : 0;
-    const peakValues = log.filter(e => e.peak_hz > 0).map(e => e.peak_hz);
-    const peakAvg = peakValues.length ? peakValues.reduce((a, b) => a + b, 0) / peakValues.length : 0;
-
-    const summary = {
-      session_id: sessionId,
-      started_at: startIso,
-      ended_at: endIso,
-      sample_count: log.length,
-      pass_all_samples: passCount,
-      pass_all_ratio: +(passCount / log.length).toFixed(3),
-      avg_cardiac_snr_db: +snrAvg.toFixed(2),
-      max_cardiac_snr_db: +snrMax.toFixed(2),
-      avg_peak_hz: +peakAvg.toFixed(3),
-      avg_bpm_estimate: peakAvg > 0 ? Math.round(peakAvg * 60) : 0,
-      schema: 'forensic_overlay_log/v1',
-    };
-
-    // Build JSON
-    const jsonBlob = new Blob(
-      [JSON.stringify({ summary, samples: log }, null, 2)],
-      { type: 'application/json' }
-    );
-
-    // Build CSV
-    const header = [
-      't_iso','t_ms','g1_optical','g2_spectral','g3_morphology','pass_all',
-      'snr_db','peak_hz','bpm_estimate','concentration','reason',
-    ];
-    const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
-    const csvRows = [
-      header.join(','),
-      ...log.map(e => [
-        e.t_iso, e.t_ms,
-        e.g1_optical ? 1 : 0,
-        e.g2_spectral ? 1 : 0,
-        e.g3_morphology ? 1 : 0,
-        e.pass_all ? 1 : 0,
-        e.snr_db, e.peak_hz, e.bpm_estimate, e.concentration,
-        escape(e.reason || ''),
-      ].join(',')),
-    ];
-    const csvBlob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
-
-    const stamp = (sessionStartIsoRef.current || endIso).replace(/[:.]/g, '-');
-    const downloadBlob = (blob: Blob, filename: string) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
-    };
-    downloadBlob(jsonBlob, `forensic-session-${stamp}.json`);
-    downloadBlob(csvBlob,  `forensic-session-${stamp}.csv`);
-
-    // Try the Web Share API too (mobile-first), best-effort.
-    try {
-      const csvFile = new File([csvBlob], `forensic-session-${stamp}.csv`, { type: 'text/csv' });
-      const navAny = navigator as any;
-      if (navAny.canShare && navAny.canShare({ files: [csvFile] })) {
-        navAny.share({
-          files: [csvFile],
-          title: 'Sesión Forense PPG',
-          text: `Sesión ${sessionId} · ${log.length} muestras`,
-        }).catch(() => {});
-      }
-    } catch {}
-
-    vibrate(60);
-    toast({
-      title: '✓ Sesión forense exportada',
-      description: `${log.length} muestras · JSON + CSV descargados`,
-      duration: 2600,
-    });
-    setSessionLogSize(log.length);
-  }, [vibrate]);
-  const [fiducialLive, setFiducialLive] = useState<FiducialTunerLiveStats>({
-    morphologyScore: 0,
-    morphologyValidity: 0,
-    notchDepth: 0,
-    riseTimeMs: 0,
-    pulseWidth50Ms: 0,
-    reflectionIndex: 0,
-    beatsAnalyzed: 0,
-  });
-  const fiducialBeatsCountRef = useRef(0);
-
   const measurementTimerRef = useRef<number | null>(null);
   const totalBeatsRef = useRef(0);
   const arrhythmiaBeatsRef = useRef(0);
@@ -279,17 +66,6 @@ const Index = () => {
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
-  // Cached/last-trusted sample rate, used to keep delineation stable when
-  // frame timestamps are momentarily missing, sparse or jittery.
-  const cachedSampleRateRef = useRef<number>(30);
-  const cachedSampleRateValidRef = useRef<boolean>(false);
-
-  // Auto-calibrating SR estimator with stall detection.
-  const srEstimatorRef = useRef<SampleRateEstimator>(new SampleRateEstimator());
-  // Timestamp (ms, performance.now) when the current monitoring session started.
-  const srCalibrationStartRef = useRef<number>(0);
-  const srCalibrationDoneRef = useRef<boolean>(false);
-  const SR_CALIBRATION_DURATION_MS = 4000; // ~4 s of timestamps to fingerprint jitter
 
   const EMA_ALPHA = 0.3;
   const emaRef = useRef({
@@ -304,31 +80,22 @@ const Index = () => {
   }, []);
 
   const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
-    // Fallback: if no valid timestamp, use performance.now() so we still feed
-    // a real monotonic clock instead of cold-starting at the default SR.
-    const ts = (typeof timestamp === 'number' && isFinite(timestamp))
-      ? timestamp
-      : performance.now();
-
-    const est = srEstimatorRef.current.push(ts, performance.now());
-
-    // Auto-calibration: after ~4s of timestamps, derive a window/MAD that
-    // matches the device's actual jitter and freeze the recommendation.
-    if (!srCalibrationDoneRef.current) {
-      if (srCalibrationStartRef.current === 0) {
-        srCalibrationStartRef.current = performance.now();
-      } else if (performance.now() - srCalibrationStartRef.current >= SR_CALIBRATION_DURATION_MS) {
-        const cal = srEstimatorRef.current.applyCalibration();
-        if (cal.acceptedSamples >= 8) {
-          srCalibrationDoneRef.current = true;
-        }
-      }
+    if (!timestamp || !isFinite(timestamp)) return 30;
+    const history = frameTimestampHistoryRef.current;
+    if (history.length === 0 || timestamp > history[history.length - 1]) {
+      history.push(timestamp);
+      if (history.length > 24) history.shift();
     }
-
-    // Mirror state into the legacy refs (other parts of Index still read them).
-    cachedSampleRateRef.current = est.sampleRate;
-    cachedSampleRateValidRef.current = est.valid;
-    return est.sampleRate;
+    if (history.length < 6) return 30;
+    const deltas: number[] = [];
+    for (let i = 1; i < history.length; i++) {
+      const d = history[i] - history[i - 1];
+      if (d >= 8 && d <= 120) deltas.push(d);
+    }
+    if (deltas.length < 4) return 30;
+    deltas.sort((a, b) => a - b);
+    const median = deltas[Math.floor(deltas.length / 2)];
+    return Math.max(15, Math.min(60, 1000 / Math.max(1, median)));
   }, []);
 
   const computeRRStability = useCallback((intervals: number[]): number => {
@@ -349,16 +116,12 @@ const Index = () => {
     framesProcessed,
     getRGBStats,
     getPositionQuality,
-    getMotionInfo,
-    setMorphologyGate,
   } = useSignalProcessor();
   
   const { 
     processSignal: processHeartBeat, 
     setArrhythmiaState,
     reset: resetHeartBeat,
-    setFiducialParams,
-    getFiducialParams,
   } = useHeartBeatProcessor();
   
   const { 
@@ -520,17 +283,7 @@ const Index = () => {
     totalBeatsRef.current = 0;
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
-    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
-    // Reset gate-alert state so users get fresh transitions in the new session.
-    prevGatesRef.current = { g1: false, g2: false, g3: false, all: false };
-    lastAlertAtRef.current = {};
-    forensicGateRef.current = null;
-    lastOverlayCommitRef.current = 0;
-    // Reset session log for a fresh forensic export.
-    sessionLogRef.current = [];
-    setSessionLogSize(0);
-    sessionStartIsoRef.current = new Date().toISOString();
-    sessionIdRef.current = `forensic_${Date.now().toString(36)}_${(performance.now() | 0).toString(36)}`;
+    frameTimestampHistoryRef.current = [];
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -539,10 +292,7 @@ const Index = () => {
     measurementTimerRef.current = window.setInterval(() => setElapsedTime(prev => prev + 1), 1000);
     setIsCalibrating(true);
     startCalibration();
-    // FORENSIC: skip the 3s "calibration" gate. Start reporting pulse from
-    // the first morphology-validated beat. CIVIL keeps the legacy 3s window.
-    if (FORENSIC_MODE) setIsCalibrating(false);
-    else setTimeout(() => setIsCalibrating(false), 3000);
+    setTimeout(() => setIsCalibrating(false), 3000);
   }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
 
   const handleStreamReady = useCallback((stream: MediaStream) => {
@@ -595,7 +345,7 @@ const Index = () => {
     }
     setIsMonitoring(false);
     setIsCalibrating(false);
-    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    frameTimestampHistoryRef.current = [];
     if (savedResults) setVitalSigns(savedResults);
     setShowResults(true);
     const total = totalBeatsRef.current;
@@ -621,7 +371,7 @@ const Index = () => {
     fullResetVitalSigns();
     resetHeartBeat();
     emaRef.current = { bpm: 0, spo2: 0, systolic: 0, diastolic: 0, glucose: 0, cholesterol: 0, triglycerides: 0 };
-    frameTimestampHistoryRef.current = []; cachedSampleRateValidRef.current = false; cachedSampleRateRef.current = 30; srEstimatorRef.current.reset(); srCalibrationStartRef.current = 0; srCalibrationDoneRef.current = false;
+    frameTimestampHistoryRef.current = [];
     setIsCameraOn(false);
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
@@ -669,138 +419,14 @@ const Index = () => {
     if (!lastSignal || !isMonitoring) return;
     
     const signalValue = lastSignal.filteredValue;
-    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'OPTICAL_CONTACT_GOOD_PERFUSION' : 'NO_OPTICAL_CONTACT');
-    const noOpticalContact = contactState === 'NO_OPTICAL_CONTACT' || contactState === 'NO_CONTACT';
-    const goodPerfusion = contactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' || contactState === 'STABLE_CONTACT';
+    const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
     const positionQuality = getPositionQuality();
-    const motionInfo = getMotionInfo();
+    const stableHumanSignal =
+      contactState === 'STABLE_CONTACT' &&
+      (lastSignal.quality || 0) >= 12 &&
+      (lastSignal.perfusionIndex || 0) >= 0.005;
 
-    // ════════════════════════════════════════════════════════════
-    //  FORENSIC TRIPLE GATE — single source of truth for the UI.
-    //  If passAll is false → zero everything. No waveform, no BPM, no
-    //  vitals. This is what physically prevents "measuring the air".
-    // ════════════════════════════════════════════════════════════
-    const fg = (lastSignal as any).forensicGate as
-      | { passAll: boolean; gate1_optical: boolean; gate2_spectral: boolean; gate3_morphology: boolean; livenessReason: string; cardiacSNRdB: number; spectralPeakHz: number }
-      | undefined;
-    const forensicPass = !!fg?.passAll;
-
-    // Mirror the gate snapshot into a ref every frame (cheap), but only
-    // commit it to React state at most every OVERLAY_MIN_INTERVAL_MS so the
-    // overlay re-render rate is decoupled from the camera frame rate. This
-    // keeps the camera preview perfectly smooth.
-    if (fg) {
-      const snap: ForensicGateSnapshot = {
-        gate1_optical: fg.gate1_optical,
-        gate2_spectral: fg.gate2_spectral,
-        gate3_morphology: fg.gate3_morphology,
-        passAll: fg.passAll,
-        cardiacSNRdB: fg.cardiacSNRdB,
-        spectralPeakHz: fg.spectralPeakHz,
-        spectralConcentration: (fg as any).spectralConcentration ?? 0,
-        livenessReason: fg.livenessReason,
-      };
-      forensicGateRef.current = snap;
-      const nowMs = performance.now();
-      const prev = prevGatesRef.current;
-      const transitioned =
-        prev.g1 !== snap.gate1_optical ||
-        prev.g2 !== snap.gate2_spectral ||
-        prev.g3 !== snap.gate3_morphology ||
-        prev.all !== snap.passAll;
-      // Commit on transitions immediately (so users see the pill flip), or
-      // throttle steady-state updates.
-      if (transitioned || nowMs - lastOverlayCommitRef.current >= overlayCadenceRef.current) {
-        lastOverlayCommitRef.current = nowMs;
-        setForensicGate(snap);
-
-        // Append to the session log at the same throttled cadence.
-        const log = sessionLogRef.current;
-        log.push({
-          t_iso: new Date().toISOString(),
-          t_ms: Math.round(nowMs),
-          g1_optical: snap.gate1_optical,
-          g2_spectral: snap.gate2_spectral,
-          g3_morphology: snap.gate3_morphology,
-          pass_all: snap.passAll,
-          snr_db: +snap.cardiacSNRdB.toFixed(2),
-          peak_hz: +snap.spectralPeakHz.toFixed(3),
-          bpm_estimate: snap.spectralPeakHz > 0 ? Math.round(snap.spectralPeakHz * 60) : 0,
-          concentration: +snap.spectralConcentration.toFixed(3),
-          reason: snap.livenessReason,
-        });
-        if (log.length > SESSION_LOG_MAX) log.splice(0, log.length - SESSION_LOG_MAX);
-        // Cheap state ping (only when buckets of 25 rounds elapse) so the
-        // export button counter updates without spamming React.
-        if (log.length % 25 === 0) setSessionLogSize(log.length);
-      }
-
-      // ── Gate transition alerts (haptic + toast) ──
-      // Rising edge → success alerts (each gate that just opened).
-      if (!prev.g1 && snap.gate1_optical) {
-        fireGateAlert('g1_open', 'success', 'Contacto óptico válido (G1)');
-      }
-      if (!prev.g2 && snap.gate2_spectral) {
-        fireGateAlert('g2_open', 'success', 'Señal cardíaca confirmada (G2)');
-      }
-      if (!prev.g3 && snap.gate3_morphology) {
-        fireGateAlert('g3_open', 'success', 'Morfología de pulso válida (G3)');
-      }
-      if (!prev.all && snap.passAll) {
-        // Strong celebratory haptic for the full triple-gate.
-        vibrate([60, 50, 60, 50, 120]);
-        fireGateAlert('all_open', 'success', 'PULSO REAL DETECTADO');
-      }
-      // Falling edge → per-gate failure alerts (only when we previously had it).
-      if (prev.g1 && !snap.gate1_optical) {
-        fireGateAlert('g1_fail', 'fail', 'Sin contacto óptico (G1)');
-      }
-      if (prev.g2 && !snap.gate2_spectral) {
-        fireGateAlert('g2_fail', 'fail', 'Señal cardíaca perdida (G2)');
-      }
-      if (prev.g3 && !snap.gate3_morphology) {
-        fireGateAlert('g3_fail', 'fail', 'Morfología inválida (G3)');
-      }
-      prevGatesRef.current = {
-        g1: snap.gate1_optical,
-        g2: snap.gate2_spectral,
-        g3: snap.gate3_morphology,
-        all: snap.passAll,
-      };
-    }
-
-    // FORENSIC: a "stable human signal" is just optical contact + minimal
-    // perfusion. We do NOT require GOOD perfusion (a victim in shock won't
-    // have it) and we do NOT block on motion (operator may be moving).
-    // What protects us against fake numbers is the upstream liveness gate:
-    // if there is no hemoglobin signature → contactState === NO_OPTICAL_CONTACT
-    // → we early-return below with everything zeroed.
-    const stableHumanSignal = !noOpticalContact && (lastSignal.quality || 0) >= 6;
-
-    if (noOpticalContact || !fg?.gate1_optical) {
-      // Hard forensic zero — never invent waveforms or numbers from air.
-      setHeartbeatSignal(0);
-      setHeartRate(0);
-      setBeatMarker(0);
-      setRRIntervals([]);
-      vitalSignsFrameCounter.current = 0;
-      if (vitalSigns.spo2 !== 0 || vitalSigns.glucose !== 0 ||
-          vitalSigns.pressure.systolic !== 0 || vitalSigns.pressure.diastolic !== 0) {
-        setVitalSigns(prev => ({
-          ...prev,
-          spo2: 0, glucose: 0,
-          pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
-          arrhythmiaCount: 0, arrhythmiaStatus: "SIN ARRITMIAS|0",
-          lipids: { totalCholesterol: 0, triglycerides: 0 },
-          lastArrhythmiaData: undefined,
-          signalQuality: 0,
-          measurementConfidence: 'INVALID',
-        }));
-      }
-      return;
-    }
-
-    const pressureOptimal = goodPerfusion && positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
+    const pressureOptimal = positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
@@ -811,7 +437,7 @@ const Index = () => {
       {
         quality: lastSignal.quality,
         contactState,
-        motionArtifact: lastSignal.motionArtifact || motionInfo.motionArtifact,
+        motionArtifact: lastSignal.motionArtifact,
         pressureState: pressureOptimal ? 'OPTIMAL_PRESSURE' : 'LOW_PRESSURE',
         clipHigh: 0,
         clipLow: 0,
@@ -820,16 +446,9 @@ const Index = () => {
       }
     );
 
-    // Gate #2 (spectral) must be open for the waveform to be drawn at all.
-    setHeartbeatSignal(forensicPass ? heartBeatResult.filteredValue : 0);
+    setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
 
-    // Push Gate #3 (morphology) verdict back into the processor so the next
-    // emitted signal frame carries the truthful triple-gate state.
-    const morphPass = !!(heartBeatResult as any).morphologyGatePass;
-    // Typed feedback path through the signal-processor hook — no globals.
-    setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE');
-
-    if (!forensicPass) {
+    if (!stableHumanSignal) {
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
         setHeartRate(0);
@@ -862,17 +481,9 @@ const Index = () => {
     }
 
     unstableFrameCounter.current = 0;
-    // FORENSIC: report the real instantaneous BPM (no EMA), but only when
-    // the heartbeat processor has enough morphology-validated confidence.
-    // Otherwise keep showing 0 → "BUSCANDO PULSO".
-    const forensicBpmOk = heartBeatResult.bpm > 0 && heartBeatResult.bpmConfidence >= 0.30;
-    if (forensicBpmOk) {
-      setHeartRate(Math.round(heartBeatResult.bpm));
-      emaRef.current.bpm = heartBeatResult.bpm;
-    } else if (!goodPerfusion) {
-      // In low-perfusion mode, don't display stale BPM either.
-      setHeartRate(0);
-    }
+    const smoothedBPM = applyEMA(emaRef.current.bpm, heartBeatResult.bpm);
+    emaRef.current.bpm = smoothedBPM;
+    setHeartRate(smoothedBPM);
 
     if (heartBeatResult.isPeak) {
       setBeatMarker(1);
@@ -891,9 +502,7 @@ const Index = () => {
 
     vitalSignsFrameCounter.current++;
 
-    // FORENSIC: only run civil vitals (SpO2/BP/glucose/lipids) when explicitly
-    // enabled via ?civil=1. By default the forensic operator only sees pulse.
-    if (CIVIL_MODE && vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
+    if (vitalSignsFrameCounter.current >= VITALS_PROCESS_EVERY_N_FRAMES) {
       vitalSignsFrameCounter.current = 0;
       const rgbStats = getRGBStats();
       const detectorAgreement = heartBeatResult.detectorAgreement || heartBeatResult.debug.detectorAgreement || 0;
@@ -914,43 +523,16 @@ const Index = () => {
           }))
         : undefined;
 
-      // Live tuner stats: pick the most recent beat that has fiducials
-      // attached. Updates immediately when params change because morphology
-      // boost is recomputed on the next pending fiducial evaluation.
-      if (showFiducialTuner) {
-        const accepted = heartBeatResult.debug.recentAcceptedBeats;
-        if (accepted && accepted.length > 0) {
-          for (let i = accepted.length - 1; i >= 0; i--) {
-            const b: any = accepted[i];
-            if (b.fiducials) {
-              fiducialBeatsCountRef.current = accepted.length;
-              setFiducialLive({
-                morphologyScore: b.morphologyScore || 0,
-                morphologyValidity: b.fiducials.morphologyValidity || 0,
-                notchDepth: b.fiducials.notchDepth || 0,
-                riseTimeMs: b.fiducials.riseTimeMs || 0,
-                pulseWidth50Ms: b.fiducials.pulseWidth50Ms || 0,
-                reflectionIndex: b.fiducials.reflectionIndex || 0,
-                beatsAnalyzed: accepted.length,
-              });
-              break;
-            }
-          }
-        }
-      }
-
       setUpstreamContext({
         contactStable: stableHumanSignal,
         pressureOptimal,
-        clipHighRatio: (lastSignal as any).clipHighRatio ?? 0,
+        clipHighRatio: 0,
         sourceStability,
         avgBeatSQI: heartBeatResult.beatSQI || heartBeatResult.debug.lastBeatSQI || 0,
         beatCount: heartBeatResult.debug.beatsAccepted || heartBeatResult.rrData?.intervals.length || 0,
         sampleRate,
         detectorAgreement,
         rrStability,
-        motionScore: motionInfo.motionScore,
-        motionArtifact: motionInfo.motionArtifact,
       });
 
       if (rgbStats.redDC > 0 && rgbStats.greenDC > 0) {
@@ -1019,11 +601,10 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, getMotionInfo, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount, showFiducialTuner]);
+  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount]);
 
   useEffect(() => {
-    // FORENSIC MODE: continuous monitoring — never auto-finalize.
-    if (CIVIL_MODE && isMonitoring && elapsedTime >= 60) {
+    if (isMonitoring && elapsedTime >= 60) {
       finalizeMeasurement();
     }
   }, [elapsedTime, isMonitoring, finalizeMeasurement]);
@@ -1075,15 +656,6 @@ const Index = () => {
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
 
-        <ForensicGateOverlay
-          gate={forensicGate}
-          visible={showForensicOverlay && isMonitoring}
-          onExport={exportForensicSession}
-          sampleCount={sessionLogSize}
-          cadenceMs={overlayCadenceMs}
-          onCadenceChange={setOverlayCadenceMs}
-        />
-
         {isMonitoring && (() => {
           const pq = getPositionQuality();
           const isDrifting = pq.drifting;
@@ -1126,71 +698,8 @@ const Index = () => {
             />
           </div>
 
-          {/* ════════════════════════════════════════════════════════════
-              FORENSIC PULSE PANEL — the only thing the operator sees by
-              default. Shows: PULSO DETECTADO / SIN PULSO + BPM + PI.
-              No SpO2/BP/glucose/lipids unless ?civil=1 is passed.
-              ════════════════════════════════════════════════════════════ */}
-          {(() => {
-            const cs: string = (lastSignal as any)?.contactState || 'NO_OPTICAL_CONTACT';
-            const noOptical = cs === 'NO_OPTICAL_CONTACT' || cs === 'NO_CONTACT';
-            const pulsePresent = isMonitoring && !noOptical && heartRate > 0;
-            const pi = lastSignal?.perfusionIndex || 0;
-            return (
-              <div className="absolute inset-x-0 top-[55%] bottom-[60px] px-3 py-4 flex flex-col items-center justify-start gap-3 pointer-events-none">
-                {/* Forensic banner — always visible while monitoring */}
-                {isMonitoring && (
-                  <div className="px-3 py-1 rounded-md bg-slate-900/80 border border-slate-700 text-[10px] text-slate-300 tracking-wider text-center max-w-[95%]">
-                    MODO FORENSE — DETECTOR DE PULSO PPG. NO MIDE SPO₂ / PRESIÓN / GLUCOSA / LÍPIDOS.
-                  </div>
-                )}
-                <div className={`w-[92%] rounded-xl px-4 py-3 border-2 backdrop-blur-sm ${
-                  pulsePresent
-                    ? 'bg-emerald-500/10 border-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.35)]'
-                    : 'bg-red-500/10 border-red-400'
-                }`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className={`text-xs font-bold tracking-widest ${pulsePresent ? 'text-emerald-300' : 'text-red-300'}`}>
-                        {pulsePresent ? '● PULSO DETECTADO' : '○ SIN PULSO'}
-                      </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">
-                        {noOptical
-                          ? (lastSignal?.diagnostics?.message || 'SIN CONTACTO ÓPTICO')
-                          : (cs === 'OPTICAL_CONTACT_LOW_PERFUSION' ? 'CONTACTO — BAJA PERFUSIÓN' : 'CONTACTO ESTABLE')}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className={`text-3xl font-bold leading-none ${pulsePresent ? 'text-emerald-300' : 'text-slate-500'}`}>
-                        {heartRate > 0 ? Math.round(heartRate) : '--'}
-                      </div>
-                      <div className="text-[9px] text-slate-400 tracking-wider mt-0.5">BPM</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50">
-                    <div className="flex-1">
-                      <div className="text-[8px] text-slate-500 tracking-wider">ÍNDICE DE PERFUSIÓN</div>
-                      <div className="text-sm font-mono text-slate-200">{pi > 0 ? pi.toFixed(2) : '--'}</div>
-                    </div>
-                    <div className="flex-1">
-                      <div className="text-[8px] text-slate-500 tracking-wider">CALIDAD SEÑAL</div>
-                      <div className="text-sm font-mono text-slate-200">{lastSignal?.quality ? Math.round(lastSignal.quality) : '--'}</div>
-                    </div>
-                    <div className="flex-1">
-                      <div className="text-[8px] text-slate-500 tracking-wider">TIEMPO</div>
-                      <div className="text-sm font-mono text-slate-200">{Math.floor(elapsedTime / 60)}:{String(elapsedTime % 60).padStart(2, '0')}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* CIVIL MODE — legacy clinical-style vitals (research only). */}
-          {CIVIL_MODE && (
-          <div className="absolute inset-x-0 top-[70%] bottom-[60px] bg-black/10 px-4 py-3">
-            <div className="text-[9px] text-amber-400 mb-1 tracking-widest text-center">⚠ CIVIL — ESTIMACIONES NO CLÍNICAS</div>
-            <div className="grid grid-cols-3 gap-2 place-items-center">
+          <div className="absolute inset-x-0 top-[55%] bottom-[60px] bg-black/10 px-4 py-6">
+            <div className="grid grid-cols-3 gap-4 place-items-center">
               <VitalSign label="FRECUENCIA CARDÍACA" value={heartRate > 0 ? Math.round(heartRate) : "--"} unit="BPM" highlighted={showResults} />
               <VitalSign label="SPO2" value={vitalSigns.spo2 > 0 ? vitalSigns.spo2 : "--"} unit="%" highlighted={showResults} />
               <VitalSign 
@@ -1211,7 +720,6 @@ const Index = () => {
               <VitalSign label="ARRITMIAS" value={vitalSigns.arrhythmiaStatus || "SIN ARRITMIAS|0"} highlighted={showResults} />
             </div>
           </div>
-          )}
 
           {showResults && measurementSummary && (() => {
             const { totalBeats, arrhythmiaBeats, normalPercent } = measurementSummary;
@@ -1372,28 +880,6 @@ const Index = () => {
           )}
         </div>
       </div>
-
-      {/* Hidden long-press toggle in the corner — opens the fiducial tuner. */}
-      <button
-        aria-label="Open fiducial tuner"
-        onClick={() => setShowFiducialTuner(v => !v)}
-        className="fixed bottom-1 left-1 z-40 w-6 h-6 rounded-full bg-muted/40 hover:bg-muted text-[10px] text-muted-foreground"
-      >·</button>
-
-      <FiducialTuner
-        open={showFiducialTuner}
-        onClose={() => setShowFiducialTuner(false)}
-        getParams={getFiducialParams}
-        setParams={setFiducialParams}
-        liveStats={fiducialLive}
-      />
-
-      {/* SR diagnostics — shown when the fiducial tuner is open OR when the
-          ?srDiag=1 URL flag is active (independent from the tuner). */}
-      <SRDiagnostics
-        estimator={srEstimatorRef.current}
-        hidden={!showFiducialTuner && !showSRDiag}
-      />
     </div>
   );
 };

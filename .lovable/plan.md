@@ -1,49 +1,89 @@
-## Goal
-1. **Add a live forensic debug overlay** showing Gate 1 / Gate 2 / Gate 3 status, the rejection reason, and live SNR / peak frequency / spectral concentration during measurement.
-2. **Harden the Gate-3 morphology feedback loop** so the morphology verdict always feeds back into `PPGSignalProcessor` frame-by-frame through a typed API, removing the current `(window as any).__ppgProcessor` indirection.
 
-## Bug found while reading the code
-- `PPGSignalProcessor.computeForensicGate()` already produces the full `forensicGate` payload (`gate1_optical`, `gate2_spectral`, `gate3_morphology`, `passAll`, `cardiacSNRdB`, `spectralPeakHz`, `spectralConcentration`, `livenessReason`) and stamps it on every emitted frame.
-- Gate 3 is set via `processor.setMorphologyGate(pass, reason)` — but `Index.tsx` calls it through `(window as any).__ppgProcessor?.setMorphologyGate?.()`, and **nothing in the codebase ever assigns `window.__ppgProcessor`**. So today Gate 3 stays at its initial `false` and `passAll` can never become true → the triple-gate is silently broken. This change fixes that.
 
-## Changes
+# Plan: Garantizar Lecturas PPG Reales — Eliminar Falsos Positivos
 
-### 1. `src/hooks/useSignalProcessor.ts`
-- Add a memoised `setMorphologyGate(pass: boolean, reason?: string)` callback that delegates to `processorRef.current?.setMorphologyGate(...)`.
-- Return it from the hook. Fully typed, no globals.
+## Problema Identificado
 
-### 2. `src/pages/Index.tsx`
-- Destructure `setMorphologyGate` from `useSignalProcessor()`.
-- Replace the `(window as any).__ppgProcessor?.setMorphologyGate?.(...)` block (around line 552–558) with a direct call: `setMorphologyGate(morphPass, morphPass ? 'OK' : 'MORFOLOGÍA INSUFICIENTE')`.
-- Track the latest `forensicGate` snapshot in a small ref + state tick so the overlay can re-render without thrashing the hot path (update on each `lastSignal` change, which already drives the existing effect).
-- Add a URL toggle: overlay is visible when `?forensic=1` is present, OR by default in FORENSIC_MODE. Disable with `?forensic=0`.
-- Mount the new `<ForensicGateOverlay />` when the toggle is on and `isMonitoring` is true.
+Tras auditar el pipeline completo, hay **5 puntos críticos** donde señales falsas (ruido ambiental, luz, movimiento) pueden disparar reacciones en la app como si fueran señal real:
 
-### 3. New component `src/components/ForensicGateOverlay.tsx`
-A compact, fixed-position panel (top-right, ~280 px wide, semi-transparent dark bg, monospace, pointer-events-none so it never blocks the camera view). Shows:
-- Three large status pills in a row: **G1 ÓPTICA**, **G2 ESPECTRAL**, **G3 MORFOLOGÍA** — green when pass, red when fail, grey when unknown/null.
-- One "VEREDICTO" line driven by `passAll`: green “PULSO REAL DETECTADO” / red “SIN PULSO VÁLIDO”.
-- Live numeric readouts (fixed-width rows):
-  - `SNR cardíaca: XX.X dB` (color: ≥6 green, 3–6 amber, <3 red)
-  - `Pico: X.XX Hz  (≈ XXX BPM)`  (BPM = `peakHz * 60`, hidden if `peakHz === 0`)
-  - `Concentración: XX %`
-  - `Razón: <livenessReason>` (truncated to 48 chars; full text in `title`)
-- Tiny legend footer: `G1 firma hemoglobina · G2 SNR ≥ 6 dB · G3 morfología 4/4`.
+### 1. Detección de dedo demasiado permisiva
+- `detectFingerInstant()` acepta `r > 25` y `coverage > 0.12` — valores que ruido ambiental o luz de habitación pueden alcanzar
+- `softHold` mantiene contacto con `smoothedCoverage > 0.08` — prácticamente cualquier imagen
+- No valida la **firma espectral de hemoglobina** (rojo debe dominar significativamente sobre verde/azul cuando hay dedo con flash)
 
-Props: `{ gate: ForensicGateSnapshot | null; visible: boolean }`. Pure presentational, no side effects, no timers.
+### 2. HeartBeatProcessor acepta señal sin energía mínima
+- `normalizeSignal` usa `range < 0.15` como umbral mínimo — demasiado bajo, ruido normalizado puede parecer pulsátil
+- `minScore = 25` para primeros picos — alcanzable por ruido con cualquier cruce por cero
+- No hay **gate de perfusión**: acepta "latidos" incluso cuando AC/DC es cero
 
-### 4. `src/types/signal.d.ts`
-- No schema change required (`forensicGate` already declared). Optionally export a `ForensicGateSnapshot` type alias of the existing inline shape so `ForensicGateOverlay` and `Index.tsx` share it.
+### 3. Frecuencia espectral reemplaza picos sin validación
+- Cuando `smoothBPM === 0`, la autocorrelación (`frequencyBPM`) se muestra directamente
+- La autocorrelación puede encontrar "periodicidad" en ruido con `bestScore > 0.15` — umbral muy bajo
+- Resultado: BPM aparece antes de detectar un solo latido real
 
-## Out of scope
-- No changes to gate thresholds, spectral verifier, or morphology rules.
-- No new tests (the morphology bug fix is verifiable directly via the overlay; can be added later if requested).
+### 4. Signos vitales se calculan sin gate de calidad
+- `processVitalSigns` se llama cuando hay ≥3 RR intervals, sin verificar si la calidad es suficiente
+- SpO2, presión, etc. se calculan sobre señal potencialmente ruidosa
 
-## Risk & verification
-- Removing the `window` global is strictly safer — today that call is a silent no-op.
-- After this change `passAll` will flip true only when there really are 4 morphology-valid beats with G1+G2 also passing — exactly the forensic spec.
-- Manual verification path:
-  1. No finger → G1 red, G2 red, G3 red, veredicto SIN PULSO VÁLIDO.
-  2. Finger placed → G1 turns green within ~5 frames.
-  3. After ~1.5 s of clean signal → G2 turns green, SNR shows ≥6 dB, peak in 0.7–3.5 Hz.
-  4. After 4 morphology-valid beats → G3 turns green, veredicto flips to PULSO REAL DETECTADO and the waveform/BPM start rendering.
+### 5. Canal CHROM amplifica ruido
+- `CHROM: (3R - 2G)` amplifica diferencias R-G que pueden ser ruido óptico puro cuando no hay dedo
+
+## Cambios Propuestos
+
+### A. `PPGSignalProcessor.ts` — Detección de dedo estricta
+
+**Umbrales de hemoglobina reales:**
+- `rawRed > 80` (no 25) — con flash y dedo, el rojo siempre supera 80
+- `rgRatio > 1.2` (no 0.8) — la hemoglobina absorbe verde/azul, rojo SIEMPRE domina
+- `redDominance > 20` (no 5) — diferencia real dedo vs ambiente
+- `coverage > 0.35` (no 0.12) — dedo cubre significativamente el sensor
+- `fingerScore > 0.4` (no 0.28)
+- Para mantener contacto: `coverage > 0.20`, `redDominance > 12`, `rgRatio > 1.1`
+
+**Nuevo requisito de perfusión mínima para STABLE_CONTACT:**
+- Solo transicionar a STABLE cuando `perfusionIndex > 0.01` (hay pulsatilidad real AC/DC)
+- Si hay contacto pero perfusión = 0, mantener en UNSTABLE
+
+**Eliminar canal CHROM del ranking** — es redundante y amplifica ruido sin dedo
+
+### B. `HeartBeatProcessor.ts` — Gate de señal real
+
+**Antes de detectar cualquier pico:**
+- Nuevo parámetro `minimumSignalRange = 0.8` — si el rango normalizado de la ventana es < 0.8, rechazar (ruido puro tiene rango bajo post-filtro)
+- `minScore = 40` siempre (no 25 para señal débil) — un latido real siempre tiene prominencia + morfología
+- `energy < 2000` en `estimatePeriodicity` en vez de 800 — evita que ruido de baja energía genere BPM espectral
+
+**Bloquear frequencyBPM sin validación cruzada:**
+- No mostrar `frequencyBPM` como displayBPM hasta que haya al menos 1 pico confirmado en tiempo
+- `periodicityScore` mínimo de 0.35 (no 0.15) para aceptar estimación espectral
+
+**Aumentar prominencia mínima:**
+- `prominence > 3.0` para aceptar pico (no cualquier valor > 0)
+- Pico debe tener `risingSlope > 1.0` Y `fallingSlope > 0.5` — morfología PPG real tiene subida rápida y bajada gradual
+
+### C. `Index.tsx` — Gate de calidad para signos vitales
+
+- Solo llamar `processVitalSigns` cuando `signalQuality > 25` Y `heartBeatResult.confidence > 0.2`
+- No mostrar BPM hasta `confidence > 0.3` y al menos 3 picos consecutivos
+
+### D. `PPGSignalProcessor.ts` — SQI más estricto
+
+- Si `perfusionIndex < 0.005`, SQI máximo = 15 (insuficiente para medición)
+- Si `redDominance < 15` en smoothed values, SQI = 0
+- Bonificar solo cuando hay evidencia de pulsatilidad real (AC > 0 en al menos un canal)
+
+## Archivos a Modificar
+
+| Archivo | Cambio |
+|---------|--------|
+| `src/modules/signal-processing/PPGSignalProcessor.ts` | Umbrales dedo estrictos, eliminar CHROM, gate perfusión, SQI estricto |
+| `src/modules/HeartBeatProcessor.ts` | Gate energía mínima, prominencia mínima, bloquear freq sin picos |
+| `src/pages/Index.tsx` | Gate calidad para vitals, no mostrar BPM sin confianza |
+
+## Resultado
+
+- **Sin dedo** → la app NO muestra BPM, NO detecta latidos, NO calcula vitales
+- **Con dedo pero sin pulso detectable** → muestra "buscando señal" sin inventar valores
+- **Con dedo y pulso real** → detecta y muestra datos reales con confianza
+- Filosofía: "sin lectura antes que lectura falsa"
+

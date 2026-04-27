@@ -146,20 +146,6 @@ export const useSignalProcessor = () => {
     return processorRef.current.getPositionQuality();
   }, []);
 
-  const getMotionInfo = useCallback(() => {
-    if (!processorRef.current) {
-      return { motionScore: 0, motionArtifact: false, motionHigh: false, motionGated: false, imuActive: false, eventCount: 0 };
-    }
-    return processorRef.current.getMotionInfo();
-  }, []);
-
-  // Forensic Gate #3 feedback: the heartbeat layer pushes the morphology
-  // verdict down here so the next emitted signal frame carries the truthful
-  // triple-gate state. Typed, no window globals.
-  const setMorphologyGate = useCallback((pass: boolean, reason?: string) => {
-    processorRef.current?.setMorphologyGate(pass, reason);
-  }, []);
-
   return {
     isProcessing,
     lastSignal,
@@ -171,8 +157,6 @@ export const useSignalProcessor = () => {
     processFrame,
     getRGBStats,
     getPositionQuality,
-    getMotionInfo,
-    setMorphologyGate,
     debugInfo: {
       sessionId: sessionIdRef.current,
       initializationState: initializationState.current,

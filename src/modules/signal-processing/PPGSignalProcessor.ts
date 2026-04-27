@@ -5,43 +5,9 @@ import { AdaptiveROIMask, type ROIMaskResult } from './AdaptiveROIMask';
 import { PressureProxyEstimator, type PressureState, type PressureEstimate } from './PressureProxyEstimator';
 import { SignalSourceRanker } from './SignalSourceRanker';
 import { computeGlobalSQI } from './SignalQualityEstimator';
-import { CardiacBandVerifier } from './CardiacBandVerifier';
 
 // Extended contact states
 type ExtendedContactState = ContactState | 'ACQUIRING_CONTACT' | 'SATURATED_CONTACT' | 'EXCESSIVE_PRESSURE';
-
-/**
- * FORENSIC LIVENESS THRESHOLDS — Gate #1 (hemoglobin signature + texture).
- *
- * This is the FIRST physical gate. A live finger covering the rear camera
- * with the torch on MUST satisfy ALL of the following simultaneously:
- *
- *   - R/(G+B) ≥ 1.35       hemoglobin absorbs G+B much more than R; a wall,
- *                          paper, mesa, ambient light or even another body
- *                          part NOT touching the lens will not reach 1.35.
- *   - R - (G+B)/2 ≥ 18     dominant red component on the raw 0..255 axis.
- *   - total intensity ∈ [180, 700]   skin-under-torch brightness band.
- *   - coverage ≥ 0.35      finger physically covers ≥35% of the frame.
- *   - sub-tile texture in [0.008, 0.06]   real fingertip has micro-texture
- *                          (sub-dermal vasculature, ridges); air/wall is
- *                          flat (≈0); violent reflection is high (>0.06).
- *   - sustained 12 frames (~400 ms) before locking; releases in 6 frames.
- *
- * If ANY criterion fails → gate1_optical = false and ALL downstream output
- * is zeroed. This is what physically prevents the app from "measuring the
- * air".
- */
-const LIVENESS = {
-  ABSORPTION_MIN: 1.35,
-  RED_OVER_GB_MIN: 18,
-  TOTAL_I_MIN: 180,
-  TOTAL_I_MAX: 700,
-  COVERAGE_MIN: 0.35,
-  TEXTURE_MIN: 0.008, // stdR / meanR — flat surface gives ~0
-  TEXTURE_MAX: 0.06,  // glare / motion gives >0.06
-  CONFIRM_FRAMES: 12,
-  RELEASE_FRAMES: 6,
-} as const;
 
 /**
  * PPG SIGNAL PROCESSOR V2
@@ -62,8 +28,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private roiMask = new AdaptiveROIMask();
   private pressureEstimator = new PressureProxyEstimator();
   private sourceRanker = new SignalSourceRanker();
-  // Forensic Gate #2 — cardiac-band SNR verifier on the raw red channel.
-  private cardiacVerifier = new CardiacBandVerifier();
 
   // --- Ring buffers (zero-alloc) ---
   private readonly BUF_SIZE = 300;
@@ -104,35 +68,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private readonly STABLE_THRESHOLD = 40; // ~1.3s for STABLE
   private readonly UNSTABLE_GRACE = 160;
 
-  // --- Forensic optical liveness ---
-  // Independent of the perfusion-based finger detector. Verifies that what
-  // the camera sees has a hemoglobin signature; if not, NO numeric output
-  // is ever produced.
-  private livenessConfirmCount = 0;
-  private livenessLostCount = 0;
-  private opticalLive = false;
-  private lastLivenessReason = 'AIRE / SIN TEJIDO';
-
-  // --- Forensic Gate #2 telemetry ---
-  private gate2Pass = false;
-  private gate2SNRdB = 0;
-  private gate2PeakHz = 0;
-  private gate2Concentration = 0;
-  private gate2Reason = 'CALENTANDO';
-
-  // --- Forensic Gate #3 telemetry (filled by HeartBeatProcessor via setMorphologyGate) ---
-  private gate3Pass = false;
-  private gate3Reason = 'BUSCANDO LATIDOS';
-
-  /**
-   * Allow the heartbeat layer to push back gate #3 so the next emitted frame
-   * carries the truth about morphology validation. Called from useHeartBeatProcessor.
-   */
-  public setMorphologyGate(pass: boolean, reason?: string): void {
-    this.gate3Pass = pass;
-    if (reason) this.gate3Reason = reason;
-  }
-
   // --- Smoothed metrics (EWMA) ---
   private smoothedRed = 0;
   private smoothedGreen = 0;
@@ -161,20 +96,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private pressureState: PressureState = 'LOW_PRESSURE';
   private pressurePenalty = 1.0;
 
-  // --- Motion (IMU-based gating) ---
-  // motionScore is an EWMA-filtered RMS of accelerometer delta + gyroscope rate.
-  // Levels:
-  //   < MOTION_THRESH       → quiet, no penalty
-  //   ≥ MOTION_THRESH       → motionArtifact flag set (down-weight downstream)
-  //   ≥ MOTION_HIGH_THRESH  → strong down-weight: quality halved, no peak validation
-  //   ≥ MOTION_GATE_THRESH  → SUSPEND: skip baseline/buffer/source updates entirely
+  // --- Motion ---
   private motionScore = 0;
   private motionListenerActive = false;
   private lastAccel = { x: 0, y: 0, z: 0 };
-  private motionEventCount = 0;
   private readonly MOTION_THRESH = 0.6;
-  private readonly MOTION_HIGH_THRESH = 0.95;
-  private readonly MOTION_GATE_THRESH = 1.6;
 
   // --- Debug / telemetry ---
   private debugEnabled = false;
@@ -229,104 +155,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.spatialUniformity = roi.spatialUniformity;
     this.centerCoverage = roi.centerCoverage;
 
-    // ════════════════════════════════════════════════════════════
-    //  FORENSIC OPTICAL LIVENESS GATE
-    //  This runs BEFORE anything else. If the camera is looking at air,
-    //  ambient light, a wall, a desk, or anything that lacks a hemoglobin
-    //  optical signature → emit NO_OPTICAL_CONTACT with rawValue=0,
-    //  filteredValue=0, quality=0 and DO NOT update buffers, baselines
-    //  or filters. This is the single line of defense that stops the app
-    //  from inventing a "cardiac wave" out of camera noise / autoexposure.
-    // ════════════════════════════════════════════════════════════
-    const lr = roi.rawRed;
-    const lg = roi.rawGreen;
-    const lb = roi.rawBlue;
-    const lAbsorption = (lg + lb) > 1 ? lr / (lg + lb) : 0;
-    const lRedDom = lr - (lg + lb) / 2;
-    const lTotalI = lr + lg + lb;
-    // Spatial texture from ROI (1 - spatialUniformity) acts as the std/mean
-    // proxy: a real fingertip pressed on the lens has micro-texture (>0.008
-    // and <0.06); a wall/air/glare is either perfectly flat (~0) or wildly
-    // non-uniform (>0.06). spatialUniformity in [0..1] inverts to texture.
-    const textureProxy = Math.max(0, 1 - roi.spatialUniformity);
-    const textureOk = textureProxy >= LIVENESS.TEXTURE_MIN && textureProxy <= LIVENESS.TEXTURE_MAX;
-    const livenessInstant =
-      lAbsorption >= LIVENESS.ABSORPTION_MIN &&
-      lRedDom >= LIVENESS.RED_OVER_GB_MIN &&
-      lTotalI >= LIVENESS.TOTAL_I_MIN &&
-      lTotalI <= LIVENESS.TOTAL_I_MAX &&
-      roi.coverageRatio >= LIVENESS.COVERAGE_MIN &&
-      textureOk;
-
-    if (livenessInstant) {
-      this.livenessConfirmCount = Math.min(this.livenessConfirmCount + 1, 200);
-      this.livenessLostCount = 0;
-      if (!this.opticalLive && this.livenessConfirmCount >= LIVENESS.CONFIRM_FRAMES) {
-        this.opticalLive = true;
-      }
-    } else {
-      this.livenessLostCount = Math.min(this.livenessLostCount + 1, 200);
-      this.livenessConfirmCount = Math.max(0, this.livenessConfirmCount - 1);
-      if (this.opticalLive && this.livenessLostCount >= LIVENESS.RELEASE_FRAMES) {
-        this.opticalLive = false;
-      }
-      // Build forensic reason string for the diagnostic banner
-      if (lTotalI < LIVENESS.TOTAL_I_MIN) this.lastLivenessReason = 'OSCURO / SIN CONTACTO';
-      else if (lTotalI > LIVENESS.TOTAL_I_MAX) this.lastLivenessReason = 'LUZ DIRECTA / NO ES TEJIDO';
-      else if (lAbsorption < LIVENESS.ABSORPTION_MIN) this.lastLivenessReason = `SIN FIRMA DE HEMOGLOBINA (R/(G+B)=${lAbsorption.toFixed(2)})`;
-      else if (lRedDom < LIVENESS.RED_OVER_GB_MIN) this.lastLivenessReason = 'ROJO INSUFICIENTE — NO ES TEJIDO';
-      else if (roi.coverageRatio < LIVENESS.COVERAGE_MIN) this.lastLivenessReason = 'CUBRA EL LENTE CON EL DEDO';
-      else if (!textureOk) this.lastLivenessReason = textureProxy < LIVENESS.TEXTURE_MIN
-        ? 'SUPERFICIE PLANA — NO ES PIEL'
-        : 'TEXTURA INESTABLE — REFLEJO/MOVIMIENTO';
-      else this.lastLivenessReason = 'SIN CONTACTO ÓPTICO';
-    }
-
-    if (!this.opticalLive) {
-      // HARD FORENSIC ZERO. No buffers, no filter step, no source ranking.
-      // Reset transient detector counters so when liveness returns we start clean.
-      this.fingerDetected = false;
-      this.fingerConfidenceCount = 0;
-      this.stableContactCount = 0;
-      this.contactState = 'NO_CONTACT';
-      this.exportedContactState = 'NO_OPTICAL_CONTACT';
-      this.signalQuality = 0;
-      // Reset spectral verifier so a fresh contact starts cleanly.
-      this.cardiacVerifier.reset();
-      this.gate2Pass = false; this.gate2Reason = 'SIN SEÑAL';
-      this.gate3Pass = false; this.gate3Reason = 'SIN SEÑAL';
-      this.onSignalReady({
-        timestamp,
-        rawValue: 0,
-        filteredValue: 0,
-        quality: 0,
-        fingerDetected: false,
-        contactState: 'NO_OPTICAL_CONTACT',
-        motionArtifact: false,
-        roi: { x: 0, y: 0, width: imageData.width, height: imageData.height },
-        perfusionIndex: 0,
-        rawRed: lr,
-        rawGreen: lg,
-        diagnostics: {
-          message: `SIN PULSO — ${this.lastLivenessReason}`,
-          hasPulsatility: false,
-          pulsatilityValue: 0,
-        },
-        forensicGate: {
-          gate1_optical: false,
-          gate2_spectral: false,
-          gate3_morphology: false,
-          passAll: false,
-          cardiacSNRdB: 0,
-          spectralPeakHz: 0,
-          spectralConcentration: 0,
-          livenessReason: this.lastLivenessReason,
-        },
-      });
-      this.processingTimeMs = performance.now() - t0;
-      return;
-    }
-
     // --- PRESSURE ESTIMATION ---
     const pressure = this.pressureEstimator.estimate({
       coverageRatio: roi.coverageRatio,
@@ -344,13 +172,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // --- CONTACT STATE ---
     this.updateContactState(roi, pressure);
     const motionArtifact = this.motionScore > this.MOTION_THRESH;
-    const motionHigh = this.motionScore > this.MOTION_HIGH_THRESH;
-    // FORENSIC: motion is NEVER a hard gate. The forensic operator may move
-    // the phone while examining a victim. Heavy motion only down-weights SQI
-    // (handled below), it does NOT freeze the pipeline.
-    const motionGated = false;
 
-    if (this.exportedContactState === 'NO_CONTACT' || this.exportedContactState === 'NO_OPTICAL_CONTACT') {
+    if (this.exportedContactState === 'NO_CONTACT') {
       this.signalQuality = 0;
       this.onSignalReady({
         timestamp,
@@ -358,43 +181,14 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         filteredValue: 0,
         quality: 0,
         fingerDetected: false,
-        contactState: this.exportedContactState,
+        contactState: 'NO_CONTACT',
         motionArtifact,
         roi: { x: 0, y: 0, width: imageData.width, height: imageData.height },
         perfusionIndex: 0,
         rawRed: roi.rawRed,
         rawGreen: roi.rawGreen,
         diagnostics: {
-          message: `BUSCANDO DEDO C:${(roi.coverageRatio * 100).toFixed(0)}% P:${pressure.state}${motionArtifact ? ' MOV' : ''}`,
-          hasPulsatility: false,
-          pulsatilityValue: 0,
-        },
-      });
-      this.processingTimeMs = performance.now() - t0;
-      return;
-    }
-
-    // --- MOTION GATE: if device shaking hard, freeze signal extraction ---
-    // Buffers, baselines and source ranking are NOT updated → no contamination.
-    // We still emit a signal frame (so UI / downstream see continuity) but with
-    // quality=0, motionArtifact=true and the last filtered value held.
-    if (motionGated) {
-      const lastFiltered = this.filteredBuf.length > 0 ? this.filteredBuf.get(this.filteredBuf.length - 1) : 0;
-      this.signalQuality = 0;
-      this.onSignalReady({
-        timestamp,
-        rawValue: 0,
-        filteredValue: lastFiltered,
-        quality: 0,
-        fingerDetected: this.fingerDetected,
-        contactState: 'UNSTABLE_CONTACT',
-        motionArtifact: true,
-        roi: { x: 0, y: 0, width: imageData.width, height: imageData.height },
-        perfusionIndex: 0,
-        rawRed: roi.rawRed,
-        rawGreen: roi.rawGreen,
-        diagnostics: {
-          message: `MOV ALTO m=${this.motionScore.toFixed(2)} - SOSTENGA EL TELÉFONO QUIETO`,
+          message: `BUSCANDO DEDO C:${(roi.coverageRatio * 100).toFixed(0)}% P:${pressure.state}`,
           hasPulsatility: false,
           pulsatilityValue: 0,
         },
@@ -476,13 +270,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     // Gate: drift penalty
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
-    // Motion penalty applied on top of contact/drift gating
-    const motionQualPenalty = motionHigh ? 0.40 : (motionArtifact ? 0.70 : 1.0);
-    const isGoodPerfusion = this.exportedContactState === 'OPTICAL_CONTACT_GOOD_PERFUSION';
-    const gatedQuality = isGoodPerfusion && perfusionIndex >= 0.005
+    const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.005
       ? this.signalQuality * driftPenalty
       : Math.min(18, this.signalQuality * 0.45);
-    const finalQuality = gatedQuality * motionQualPenalty;
 
     // --- LOGGING ---
     const now = performance.now();
@@ -501,7 +291,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       timestamp,
       rawValue: source.value,
       filteredValue: filtered,
-      quality: finalQuality,
+      quality: gatedQuality,
       fingerDetected: this.fingerDetected,
       contactState: this.exportedContactState,
       motionArtifact,
@@ -513,43 +303,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
-          `${motionArtifact ? (motionHigh ? ' MOV+' : ' MOV') : ''}`,
-        hasPulsatility: isGoodPerfusion && perfusionIndex >= 0.05,
-        pulsatilityValue: isGoodPerfusion ? perfusionIndex : 0,
+          `${motionArtifact ? ' MOV' : ''}`,
+        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.05,
+        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' ? perfusionIndex : 0,
       },
-      forensicGate: this.computeForensicGate(roi.rawRed, timestamp),
     });
-  }
-
-  /**
-   * Run Gate #2 (cardiac SNR) on the latest red sample and merge with the
-   * already-known Gate #1 + Gate #3 state into the unified verdict the UI
-   * uses to decide whether ANYTHING gets rendered.
-   */
-  private computeForensicGate(rawRed: number, nowMs: number) {
-    const g2 = this.cardiacVerifier.update(rawRed, this.estimatedSampleRate, nowMs);
-    this.gate2Pass = g2.passes;
-    this.gate2SNRdB = g2.snrDb;
-    this.gate2PeakHz = g2.peakHz;
-    this.gate2Concentration = g2.concentration;
-    this.gate2Reason = g2.reason;
-
-    const passAll = this.opticalLive && this.gate2Pass && this.gate3Pass;
-    let livenessReason = 'OK';
-    if (!this.opticalLive) livenessReason = this.lastLivenessReason;
-    else if (!this.gate2Pass) livenessReason = this.gate2Reason;
-    else if (!this.gate3Pass) livenessReason = this.gate3Reason;
-
-    return {
-      gate1_optical: this.opticalLive,
-      gate2_spectral: this.gate2Pass,
-      gate3_morphology: this.gate3Pass,
-      passAll,
-      cardiacSNRdB: this.gate2SNRdB,
-      spectralPeakHz: this.gate2PeakHz,
-      spectralConcentration: this.gate2Concentration,
-      livenessReason,
-    };
   }
 
   // ══════════════════════════════════════════════════════
@@ -613,19 +371,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     // Map extended state → standard ContactState for export
     switch (this.contactState) {
       case 'NO_CONTACT':
-        // We are inside updateContactState only when liveness already passed,
-        // so a "no_contact" here actually means "optical contact present but
-        // no perfusion-based finger lock yet" → forensic LOW_PERFUSION state.
-        this.exportedContactState = 'OPTICAL_CONTACT_LOW_PERFUSION';
+        this.exportedContactState = 'NO_CONTACT';
         break;
       case 'ACQUIRING_CONTACT':
       case 'UNSTABLE_CONTACT':
       case 'SATURATED_CONTACT':
       case 'EXCESSIVE_PRESSURE':
-        this.exportedContactState = 'OPTICAL_CONTACT_LOW_PERFUSION';
+        this.exportedContactState = 'UNSTABLE_CONTACT';
         break;
       case 'STABLE_CONTACT':
-        this.exportedContactState = 'OPTICAL_CONTACT_GOOD_PERFUSION';
+        this.exportedContactState = 'STABLE_CONTACT';
         break;
     }
 
@@ -663,28 +418,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const rgRatio = r / Math.max(1, g);
     const totalI = r + g + b;
     const notBlownOut = !(r > 253 && g > 252 && b > 252);
-    // V3: hemoglobin-specific absorption ratio R/(G+B) — higher = more red blood
-    const absorption = (g + b) > 1 ? r / (g + b) : 0;
-    // V3: require temporally-stable mask (no frame-to-frame ROI flipping)
-    const maskStable = roi.maskStability > 0.65;
 
     if (this.fingerDetected) {
-      // MAINTAIN — moderately strict; tolerate brief mask churn
-      return r > 55 && rgRatio > 1.10 && redDominance > 12 &&
-        absorption > 0.62 &&
-        this.smoothedCoverage > 0.15 && this.smoothedFingerScore > 0.18 &&
+      // MAINTAIN — moderately strict
+      return r > 50 && rgRatio > 1.08 && redDominance > 10 &&
+        this.smoothedCoverage > 0.15 && this.smoothedFingerScore > 0.15 &&
         notBlownOut;
     } else {
-      // V3 ACQUIRE — strict, hemoglobin signature + spatial + temporal stability
-      return r > 95 && rgRatio > 1.28 && redDominance > 28 &&
-        absorption > 0.78 &&
-        totalI > 160 && totalI < 700 &&
-        this.smoothedCoverage > 0.42 && this.smoothedFingerScore > 0.42 &&
-        roi.spatialUniformity > 0.42 &&
-        roi.centerCoverage > 0.30 &&
-        roi.clipHighRatio < 0.25 &&
+      // ACQUIRE — very strict, only optimal placement
+      return r > 90 && rgRatio > 1.25 && redDominance > 25 &&
+        totalI > 150 && totalI < 720 &&
+        this.smoothedCoverage > 0.40 && this.smoothedFingerScore > 0.40 &&
+        roi.clipHighRatio < 0.3 &&
         this.motionScore < 1.0 &&
-        maskStable &&
         notBlownOut;
     }
   }
@@ -787,25 +533,17 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       this.redBaseline = r; this.greenBaseline = g; this.blueBaseline = b;
       return;
     }
-    const alpha = motion ? 0.008 : this.exportedContactState === 'OPTICAL_CONTACT_GOOD_PERFUSION' ? 0.02 : 0.04;
+    const alpha = motion ? 0.008 : this.exportedContactState === 'STABLE_CONTACT' ? 0.02 : 0.04;
     this.redBaseline += (r - this.redBaseline) * alpha;
     this.greenBaseline += (g - this.greenBaseline) * alpha;
     this.blueBaseline += (b - this.blueBaseline) * alpha;
   }
 
   private getBaselineDrift(): number {
-    // V4: True drift = |mean(recent 30) − mean(older 30)| / baseline.
-    // The previous "olderMean = mean(60) − mean(30)" was algebraically wrong
-    // (mean of 60 minus mean of 30 ≠ mean of older 30 unless windows are same size).
     if (this.redBuf.length < 60) return 0;
     const recentMean = this.redBuf.mean(30);
-    // Older 30 = first half of last 60 samples
-    const totalLen = this.redBuf.length;
-    let olderSum = 0;
-    const olderStart = totalLen - 60;
-    for (let i = 0; i < 30; i++) olderSum += this.redBuf.get(olderStart + i);
-    const olderMean = olderSum / 30;
-    return Math.abs(recentMean - olderMean) / (this.redBaseline + 1);
+    const olderMean = this.redBuf.mean(60) - recentMean; // approximate
+    return Math.abs(olderMean) / (this.redBaseline + 1);
   }
 
   private calculateACDC(): void {
@@ -852,35 +590,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private estimatePeriodicityFromFiltered(): number {
     if (this.filteredBuf.length < 60) return 0;
     const n = Math.min(120, this.filteredBuf.length);
-    // V4: parabolic-refined autocorrelation peak in physiological cardiac range.
-    // Detects local maxima then refines via 3-point parabolic vertex; this is the
-    // same trick used in the source ranker → consistent SQI semantics.
-    let bestAc = 0;
-    let prevAc = 0, prevPrevAc = 0;
-    let pPrev = 0, pCurr = 0, pNext = 0;
-    let bestLag = 0;
+    // Search cardiac range lags
+    let best = 0;
     for (let lag = 8; lag <= 60; lag++) {
       const ac = this.filteredBuf.autocorrelation(lag, n);
-      if (lag >= 10 && prevAc > prevPrevAc && prevAc > ac) {
-        if (prevAc > bestAc) {
-          bestAc = prevAc;
-          bestLag = lag - 1;
-          pPrev = prevPrevAc; pCurr = prevAc; pNext = ac;
-        }
-      }
-      prevPrevAc = prevAc;
-      prevAc = ac;
+      if (ac > best) best = ac;
     }
-    if (bestLag > 0) {
-      const denom = pPrev - 2 * pCurr + pNext;
-      if (Math.abs(denom) > 1e-6) {
-        const offset = 0.5 * (pPrev - pNext) / denom;
-        if (Math.abs(offset) < 1) {
-          bestAc = pCurr - 0.25 * (pPrev - pNext) * offset;
-        }
-      }
-    }
-    return Math.max(0, Math.min(1, bestAc));
+    return Math.max(0, Math.min(1, best));
   }
 
   // ══════════════════════════════════════════════════════
@@ -947,36 +663,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   // ══════════════════════════════════════════════════════
 
   private handleMotionEvent = (event: DeviceMotionEvent) => {
-    // Prefer linear acceleration (gravity removed) when available; fall back to
-    // accelerationIncludingGravity with a discrete-difference high-pass to cancel gravity.
-    const lin = event.acceleration;
-    let accelMag = 0;
-    if (lin && lin.x !== null && lin.y !== null && lin.z !== null) {
-      const ax = lin.x ?? 0, ay = lin.y ?? 0, az = lin.z ?? 0;
-      accelMag = Math.sqrt(ax * ax + ay * ay + az * az);
-    } else {
-      const acc = event.accelerationIncludingGravity;
-      if (!acc || acc.x === null || acc.y === null || acc.z === null) return;
-      const dx = (acc.x ?? 0) - this.lastAccel.x;
-      const dy = (acc.y ?? 0) - this.lastAccel.y;
-      const dz = (acc.z ?? 0) - this.lastAccel.z;
-      this.lastAccel = { x: acc.x ?? 0, y: acc.y ?? 0, z: acc.z ?? 0 };
-      // Δa per event ≈ jerk × dt; magnitudes ~0.05 quiet, >0.6 hand tremor, >2 strong shake
-      accelMag = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    }
-
+    const acc = event.accelerationIncludingGravity;
+    if (!acc || acc.x === null || acc.y === null || acc.z === null) return;
+    const dx = (acc.x ?? 0) - this.lastAccel.x;
+    const dy = (acc.y ?? 0) - this.lastAccel.y;
+    const dz = (acc.z ?? 0) - this.lastAccel.z;
+    this.lastAccel = { x: acc.x ?? 0, y: acc.y ?? 0, z: acc.z ?? 0 };
+    const accelRMS = Math.sqrt(dx * dx + dy * dy + dz * dz);
     const rot = event.rotationRate;
-    let gyroMag = 0;
-    if (rot && (rot.alpha !== null || rot.beta !== null || rot.gamma !== null)) {
-      // deg/s normalised by 120 → ~unit at brisk wrist rotation
-      gyroMag = Math.sqrt((rot.alpha ?? 0) ** 2 + (rot.beta ?? 0) ** 2 + (rot.gamma ?? 0) ** 2) / 120;
+    let gyroRMS = 0;
+    if (rot && rot.alpha !== null && rot.beta !== null && rot.gamma !== null) {
+      gyroRMS = Math.sqrt((rot.alpha ?? 0) ** 2 + (rot.beta ?? 0) ** 2 + (rot.gamma ?? 0) ** 2) / 120;
     }
-
-    // Composite motion: weighted RMS of accel + gyro, EWMA-smoothed.
-    // α=0.18 → ~5-event time constant (≈250 ms at 20 Hz devicemotion).
-    const instant = accelMag * 0.6 + gyroMag * 0.4;
-    this.motionScore = this.motionScore * 0.82 + instant * 0.18;
-    this.motionEventCount++;
+    this.motionScore = this.motionScore * 0.85 + (accelRMS * 0.5 + gyroRMS * 0.3) * 0.15;
   };
 
   private startMotionListener(): void {
@@ -1004,7 +703,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     window.removeEventListener('devicemotion', this.handleMotionEvent);
     this.motionListenerActive = false;
     this.motionScore = 0;
-    this.motionEventCount = 0;
   }
 
   // ══════════════════════════════════════════════════════
@@ -1030,18 +728,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       positionDrift: this.positionDrift,
       guidance: this.positionGuidance,
       qualityScore: this.positionQualityScore,
-    };
-  }
-
-  /** IMU-derived motion telemetry for upstream gating */
-  getMotionInfo() {
-    return {
-      motionScore: this.motionScore,
-      motionArtifact: this.motionScore > this.MOTION_THRESH,
-      motionHigh: this.motionScore > this.MOTION_HIGH_THRESH,
-      motionGated: this.motionScore > this.MOTION_GATE_THRESH,
-      imuActive: this.motionListenerActive && this.motionEventCount > 5,
-      eventCount: this.motionEventCount,
     };
   }
 

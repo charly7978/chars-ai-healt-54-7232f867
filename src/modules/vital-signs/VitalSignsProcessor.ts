@@ -95,8 +95,6 @@ export class VitalSignsProcessor {
     sampleRate: 30,
     detectorAgreement: 0,
     rrStability: 0,
-    motionScore: 0,
-    motionArtifact: false,
   };
 
   private lastRhythm: RhythmResult | null = null;
@@ -145,8 +143,6 @@ export class VitalSignsProcessor {
     sampleRate?: number;
     detectorAgreement?: number;
     rrStability?: number;
-    motionScore?: number;
-    motionArtifact?: boolean;
   }): void {
     if (ctx.contactStable !== undefined) this.upstreamContext.contactStable = ctx.contactStable;
     if (ctx.pressureOptimal !== undefined) this.upstreamContext.pressureOptimal = ctx.pressureOptimal;
@@ -157,18 +153,6 @@ export class VitalSignsProcessor {
     if (ctx.sampleRate !== undefined && isFinite(ctx.sampleRate)) this.upstreamContext.sampleRate = Math.max(15, Math.min(60, ctx.sampleRate));
     if (ctx.detectorAgreement !== undefined) this.upstreamContext.detectorAgreement = ctx.detectorAgreement;
     if (ctx.rrStability !== undefined) this.upstreamContext.rrStability = ctx.rrStability;
-    if (ctx.motionScore !== undefined) this.upstreamContext.motionScore = ctx.motionScore;
-    if (ctx.motionArtifact !== undefined) this.upstreamContext.motionArtifact = ctx.motionArtifact;
-    // Motion down-weights effective contact / source stability for downstream gates.
-    if (ctx.motionScore !== undefined) {
-      if (ctx.motionScore > 0.95) {
-        // High motion: contact treated as unstable for vital-signs gating
-        this.upstreamContext.contactStable = false;
-        this.upstreamContext.sourceStability = Math.min(this.upstreamContext.sourceStability, 0.25);
-      } else if (ctx.motionScore > 0.6) {
-        this.upstreamContext.sourceStability = Math.min(this.upstreamContext.sourceStability, 0.55);
-      }
-    }
   }
 
   processSignal(

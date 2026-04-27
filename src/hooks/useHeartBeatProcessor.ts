@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
 import type { ContactState } from '../types/signal';
 import type { HeartBeatResult } from '../types/beat';
-import type { FiducialParams } from '../modules/beats/FiducialDelineator';
 
 /**
  * HOOK DE PROCESAMIENTO CARDÍACO V2
@@ -110,32 +109,12 @@ export const useHeartBeatProcessor = () => {
 
     setSignalQuality(roundedSQI);
 
-    // FORENSIC GATE #3 (morphology): only publish BPM if the last 4 accepted
-    // beats are morphologically valid AND fused confidence is high enough.
-    // 0.12 was noise-prone; 0.45 forces real, periodic, well-shaped beats.
-    const recent = result.debug.recentAcceptedBeats || [];
-    const last4 = recent.slice(-4);
-    const morphologyOk =
-      last4.length >= 4 &&
-      last4.every(b => (b.morphologyScore || 0) >= 0.55 &&
-                       (b.fiducials?.riseTimeMs ?? 0) >= 60 &&
-                       (b.fiducials?.riseTimeMs ?? 9999) <= 350);
-    const bpmOk = result.bpm > 0 && result.bpmConfidence >= 0.45 && morphologyOk;
-
-    if (bpmOk) {
+    if (result.bpm > 0 && result.bpmConfidence >= 0.12) {
       setCurrentBPM(Math.round(result.bpm));
       setConfidence(result.bpmConfidence);
     } else if (result.bpmConfidence > 0) {
       setConfidence(result.bpmConfidence);
     }
-
-    // Re-export the morphology verdict on the result so callers can use it
-    // directly without re-deriving the rule.
-    (result as any).pulseDetected = bpmOk;
-    (result as any).pulseConfidence = bpmOk
-      ? (result.bpmConfidence >= 0.7 ? 'HIGH' : result.bpmConfidence >= 0.55 ? 'MEDIUM' : 'LOW')
-      : 'NONE';
-    (result as any).morphologyGatePass = morphologyOk;
 
     return result;
   }, []);
@@ -158,14 +137,6 @@ export const useHeartBeatProcessor = () => {
 
   const setArrhythmiaState = useCallback((_isArrhythmiaDetected: boolean) => {}, []);
 
-  const setFiducialParams = useCallback((patch: Partial<FiducialParams>) => {
-    processorRef.current?.setFiducialParams(patch);
-  }, []);
-
-  const getFiducialParams = useCallback((): FiducialParams | null => {
-    return processorRef.current?.getFiducialParams() ?? null;
-  }, []);
-
   return {
     currentBPM,
     confidence,
@@ -173,8 +144,6 @@ export const useHeartBeatProcessor = () => {
     processSignal,
     reset,
     setArrhythmiaState,
-    setFiducialParams,
-    getFiducialParams,
     debugInfo: {
       sessionId: sessionIdRef.current,
       processingState: processingStateRef.current,

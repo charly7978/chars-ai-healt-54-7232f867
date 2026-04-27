@@ -1,21 +1,6 @@
 import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
 
-/**
- * Forensic-aware contact states.
- *
- * Legacy names ('NO_CONTACT' | 'UNSTABLE_CONTACT' | 'STABLE_CONTACT') are kept
- * so existing modules keep compiling. The new states give the forensic mode
- * granularity to distinguish "no optical contact at all" (camera looking at
- * air / objects / ambient light) from "finger present but very low perfusion"
- * (cold / shock / hypothermia) — the latter MUST NOT be silently rejected.
- */
-export type ContactState =
-  | 'NO_CONTACT'
-  | 'UNSTABLE_CONTACT'
-  | 'STABLE_CONTACT'
-  | 'NO_OPTICAL_CONTACT'
-  | 'OPTICAL_CONTACT_LOW_PERFUSION'
-  | 'OPTICAL_CONTACT_GOOD_PERFUSION';
+export type ContactState = 'NO_CONTACT' | 'UNSTABLE_CONTACT' | 'STABLE_CONTACT';
 
 export interface ProcessedSignal {
   timestamp: number;
@@ -38,28 +23,6 @@ export interface ProcessedSignal {
     message: string;
     hasPulsatility: boolean;
     pulsatilityValue: number;
-  };
-  /**
-   * Forensic triple-gate verdict — the ONLY thing that authorises the UI
-   * to render BPM, the PPG waveform, or any vital sign.
-   *
-   *   gate1_optical   : hardened hemoglobin signature + spatial texture
-   *   gate2_spectral  : cardiac-band SNR ≥ 6 dB sustained 1.5 s
-   *   gate3_morphology: 4 consecutive morphology-valid beats
-   *   passAll         : AND of the three (frame-level go/no-go)
-   *
-   * `livenessReason` is a human-readable Spanish sentence describing why the
-   * gate is closed (or 'OK' when open). UI surfaces it directly.
-   */
-  forensicGate?: {
-    gate1_optical: boolean;
-    gate2_spectral: boolean;
-    gate3_morphology: boolean;
-    passAll: boolean;
-    cardiacSNRdB: number;
-    spectralPeakHz: number;
-    spectralConcentration: number;
-    livenessReason: string;
   };
 }
 

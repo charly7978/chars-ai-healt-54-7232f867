@@ -1,7 +1,6 @@
 /**
  * BEAT TYPES — Formal structures for beat-level processing
  */
-import type { BeatFiducials } from './fiducials';
 
 export interface BeatCandidate {
   timestamp: number;
@@ -40,8 +39,6 @@ export interface AcceptedBeat {
   templateScore: number;
   sourceConsistencyScore: number;
   flags: BeatFlags;
-  /** Optional per-beat fiducial landmarks (foot/peak/notch/diastolic) and morphology metrics. */
-  fiducials?: BeatFiducials;
 }
 
 export interface BeatFlags {
@@ -107,8 +104,5 @@ export interface HeartBeatDebug {
     detectorAgreement: number;
     amplitude?: number;
     flags: BeatFlags;
-    fiducials?: BeatFiducials;
   }>;
-  /** Most recent fiducial set (debug overlay / morphology UI). */
-  lastFiducials?: BeatFiducials;
 }

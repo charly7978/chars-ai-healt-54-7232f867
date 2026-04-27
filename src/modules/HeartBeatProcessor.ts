@@ -6,8 +6,6 @@ import type {
   BeatCandidate, AcceptedBeat, BeatFlags, BPMHypothesis,
   HeartBeatResult, HeartBeatDebug
 } from '../types/beat';
-import type { BeatFiducials } from '../types/fiducials';
-import { FiducialDelineator, type FiducialParams, DEFAULT_FIDUCIAL_PARAMS } from './beats/FiducialDelineator';
 
 export class HeartBeatProcessor {
   private signalBuf = new RingBuffer(360);
@@ -24,29 +22,6 @@ export class HeartBeatProcessor {
   private templateLen = 0;
   private templateValid = false;
   private readonly TEMPLATE_WINDOW = 25;
-
-  // ── Fiducial delineation ──────────────────────────────────────────────
-  private fiducialDelineator = new FiducialDelineator();
-
-  /** Live-update the delineator's tunable parameters. Effective on the next beat. */
-  setFiducialParams(patch: Partial<FiducialParams>): void {
-    this.fiducialDelineator.setParams(patch);
-  }
-
-  getFiducialParams(): FiducialParams {
-    return this.fiducialDelineator.getParams();
-  }
-  /** Reusable scratch window for delineation (≥ pre+post samples). */
-  private fiducialWindow: Float64Array = new Float64Array(96);
-  private readonly FIDUCIAL_PRE_SAMPLES = 30;   // ~500 ms @ 60 fps for foot search
-  private readonly FIDUCIAL_POST_SAMPLES = 60;  // ~1000 ms for notch + diastolic
-  /**
-   * Beats whose fiducials are not yet computable because their post-peak window
-   * has not fully arrived. Each entry references the AcceptedBeat already pushed
-   * to `acceptedBeats` so we can mutate it in-place once samples are ready.
-   */
-  private pendingFiducialBeats: Array<{ beat: AcceptedBeat; peakSampleIndex: number }> = [];
-  private lastFiducials: BeatFiducials | null = null;
 
   private smoothBPM = 0;
   private spectralBPM = 0;
@@ -120,11 +95,6 @@ export class HeartBeatProcessor {
     const ssf = this.computeSlopeSum();
     this.slopeSum.push(ssf);
 
-    // Drain any pending fiducial computations whose post-peak window is now ready.
-    if (this.pendingFiducialBeats.length > 0) {
-      this.processPendingFiducials();
-    }
-
     if (this.signalBuf.length < 25) {
       return this.makeEmptyResult(0);
     }
@@ -193,15 +163,6 @@ export class HeartBeatProcessor {
         if (this.acceptedBeats.length > this.MAX_ACCEPTED) this.acceptedBeats.shift();
         this.beatsAccepted++;
 
-        // Queue this beat for deferred fiducial delineation. The post-peak window
-        // (notch + diastolic peak) hasn't arrived yet — drained once enough
-        // samples are buffered in `processPendingFiducials()`.
-        this.pendingFiducialBeats.push({
-          beat: accepted,
-          peakSampleIndex: this.frameCount,
-        });
-        if (this.pendingFiducialBeats.length > 8) this.pendingFiducialBeats.shift();
-
         if (currentBeatSQI > 50) {
           this.updateTemplate();
         }
@@ -249,9 +210,7 @@ export class HeartBeatProcessor {
         detectorAgreement: beat.detectorAgreementScore,
         amplitude: undefined,
         flags: beat.flags,
-        fiducials: beat.fiducials,
       })),
-      lastFiducials: this.lastFiducials ?? undefined,
     };
 
     return {
@@ -776,75 +735,18 @@ export class HeartBeatProcessor {
     return out;
   }
 
-  /**
-   * Robust sample-rate estimator.
-   * - Uses real frame timestamps from timestampBuf as the primary source.
-   * - Rejects outliers via MAD (median absolute deviation) to survive jitter,
-   *   dropped frames and bursts.
-   * - Caches the last trusted SR so delineation/morphology stay stable when
-   *   timestamps are momentarily sparse or noisy (variable frame rate).
-   * - Falls back, in order, to: cached SR -> last instantaneous estimate -> 30.
-   */
-  private cachedSampleRate: number = 30;
-  private cachedSampleRateValid: boolean = false;
-  private lastSampleRateUpdateFrame: number = -1;
-
   private estimateSampleRate(): number {
-    // Cheap memoization within the same frame (called several times per tick).
-    if (this.lastSampleRateUpdateFrame === this.frameCount && this.cachedSampleRateValid) {
-      return this.cachedSampleRate;
-    }
-
-    const tsLen = this.timestampBuf.length;
-    if (tsLen < 6) {
-      return this.cachedSampleRateValid ? this.cachedSampleRate : 30;
-    }
-
-    // Use a wider window (up to 90 deltas) so variable frame rates average out.
-    const n = Math.min(90, tsLen);
-    const start = tsLen - n;
-    const raw: number[] = [];
+    if (this.timestampBuf.length < 10) return 30;
+    const n = Math.min(50, this.timestampBuf.length);
+    const intervals: number[] = [];
     for (let i = 1; i < n; i++) {
-      const d = this.timestampBuf.get(start + i) - this.timestampBuf.get(start + i - 1);
-      // Accept 8..120 ms (≈ 8–125 fps) — anything else is a dropped frame or stall.
-      if (d >= 8 && d <= 120 && isFinite(d)) raw.push(d);
+      const d = this.timestampBuf.get(this.timestampBuf.length - n + i) - this.timestampBuf.get(this.timestampBuf.length - n + i - 1);
+      if (d >= 8 && d <= 120) intervals.push(d);
     }
-    if (raw.length < 5) {
-      return this.cachedSampleRateValid ? this.cachedSampleRate : 30;
-    }
-
-    // Median + MAD outlier rejection.
-    const sorted = raw.slice().sort((a, b) => a - b);
-    const median = sorted[sorted.length >> 1];
-    const devs = new Array(sorted.length);
-    for (let i = 0; i < sorted.length; i++) devs[i] = Math.abs(sorted[i] - median);
-    devs.sort((a, b) => a - b);
-    const mad = devs[devs.length >> 1] || 1;
-    const lo = median - 3 * mad;
-    const hi = median + 3 * mad;
-
-    let sum = 0, count = 0;
-    for (let i = 0; i < raw.length; i++) {
-      const v = raw[i];
-      if (v >= lo && v <= hi) { sum += v; count++; }
-    }
-    const robustMs = count >= 4 ? sum / count : median;
-    const instantSR = clamp(1000 / Math.max(1, robustMs), 15, 60);
-
-    // Smooth against cached value to avoid step-jumps under variable FPS.
-    const next = this.cachedSampleRateValid
-      ? this.cachedSampleRate * 0.7 + instantSR * 0.3
-      : instantSR;
-
-    this.cachedSampleRate = next;
-    this.cachedSampleRateValid = true;
-    this.lastSampleRateUpdateFrame = this.frameCount;
-    return next;
-  }
-
-  /** Public accessor for downstream modules (fiducial delineation, BP, etc.) */
-  public getSampleRate(): number {
-    return this.estimateSampleRate();
+    if (intervals.length < 6) return 30;
+    intervals.sort((a, b) => a - b);
+    const median = intervals[Math.floor(intervals.length / 2)];
+    return clamp(1000 / median, 15, 60);
   }
 
   private updateThreshold(range: number): void {
@@ -932,12 +834,6 @@ export class HeartBeatProcessor {
     this.timestampBuf.clear();
     this.rrIntervals = [];
     this.acceptedBeats = [];
-    this.pendingFiducialBeats.length = 0;
-    this.lastFiducials = null;
-    // Keep cached SR across short stalls (variable FPS) but invalidate on full reset.
-    this.cachedSampleRateValid = false;
-    this.cachedSampleRate = 30;
-    this.lastSampleRateUpdateFrame = -1;
     this.smoothBPM = 0;
     this.spectralBPM = 0;
     this.autocorrBPM = 0;
@@ -960,75 +856,6 @@ export class HeartBeatProcessor {
 
   dispose(): void {
     if (this.audioContext) this.audioContext.close().catch(() => {});
-  }
-
-  // ════════════════════════════════════════════════════════════════════
-  //  FIDUCIAL DELINEATION — deferred per-beat
-  // ════════════════════════════════════════════════════════════════════
-
-  /**
-   * Drain pending beats whose post-peak window has fully arrived in `signalBuf`.
-   * For each ready beat, copy a [pre, post] window into `fiducialWindow`,
-   * run the FiducialDelineator, store the result on the AcceptedBeat, and
-   * boost the beat's morphologyScore when validity is high.
-   *
-   * Hot-path safe: bounded pending queue (≤8), no allocations beyond the
-   * already-allocated scratch window.
-   */
-  private processPendingFiducials(): void {
-    const currentSampleIdx = this.frameCount;
-    const pre = this.FIDUCIAL_PRE_SAMPLES;
-    const post = this.FIDUCIAL_POST_SAMPLES;
-    const ringLen = this.signalBuf.length;
-
-    // Process from oldest to newest; remove processed entries in-place.
-    let writeIdx = 0;
-    for (let readIdx = 0; readIdx < this.pendingFiducialBeats.length; readIdx++) {
-      const entry = this.pendingFiducialBeats[readIdx];
-      const samplesSincePeak = currentSampleIdx - entry.peakSampleIndex;
-
-      // Not enough post-peak samples yet → keep waiting.
-      if (samplesSincePeak < post) {
-        this.pendingFiducialBeats[writeIdx++] = entry;
-        continue;
-      }
-
-      // Beat too old to still be in the ring buffer → drop silently.
-      const peakOffsetFromHead = samplesSincePeak; // newest pushed sample is at signalBuf.length-1
-      if (peakOffsetFromHead + pre >= ringLen) {
-        continue; // drop
-      }
-
-      // Copy [peak-pre … peak+post] into the scratch window.
-      const peakPosInRing = ringLen - 1 - samplesSincePeak; // index into ring buffer of the peak sample
-      const startInRing = peakPosInRing - pre;
-      const winLen = pre + post + 1;
-      if (startInRing < 0 || startInRing + winLen > ringLen) {
-        continue; // drop, insufficient pre samples (very early beats)
-      }
-      // Ensure scratch capacity (allocated once at construction).
-      if (this.fiducialWindow.length < winLen) {
-        this.fiducialWindow = new Float64Array(winLen);
-      }
-      for (let i = 0; i < winLen; i++) {
-        this.fiducialWindow[i] = this.signalBuf.get(startInRing + i);
-      }
-
-      // Effective sample rate from recent timestamps.
-      const sr = this.estimateSampleRate();
-      const fid = this.fiducialDelineator.delineate(this.fiducialWindow, pre, sr);
-
-      entry.beat.fiducials = fid;
-      this.lastFiducials = fid;
-
-      // Morphology boost: high-validity fiducials retroactively raise the beat's
-      // morphology score (keeps beatSQI consistent with the richer evidence).
-      if (fid.morphologyValidity > 0.5) {
-        const boost = fid.morphologyValidity * 25; // up to +25 on a 0–100 scale
-        entry.beat.morphologyScore = Math.min(100, entry.beat.morphologyScore + boost);
-      }
-    }
-    this.pendingFiducialBeats.length = writeIdx;
   }
 }
 
