@@ -58,6 +58,9 @@ const Index = () => {
   const totalBeatsRef = useRef(0);
   const arrhythmiaBeatsRef = useRef(0);
   const lastArrhythmiaCountForBeatsRef = useRef(0);
+  const [showTelemetry, setShowTelemetry] = useState(false);
+  const lastTelemetryTapRef = useRef<number>(0);
+  const [telemetryTick, setTelemetryTick] = useState(0);
   const arrhythmiaDetectedRef = useRef(false);
   const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
   const cameraRef = useRef<CameraViewHandle>(null);
@@ -116,6 +119,8 @@ const Index = () => {
     framesProcessed,
     getRGBStats,
     getPositionQuality,
+    getDebugInfo,
+    getDroppedFrames,
   } = useSignalProcessor();
   
   const { 
