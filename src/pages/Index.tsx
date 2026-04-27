@@ -61,6 +61,28 @@ const Index = () => {
   const [showTelemetry, setShowTelemetry] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
+  // ── ROI stability persistent-alert state ──────────────────────────────
+  // Counts CONSECUTIVE accepted beats whose ROI stability score fell below
+  // ROI_STABILITY_THRESHOLD. When the streak reaches ROI_STABILITY_BEATS_N
+  // a persistent on-screen alert is raised and an audit entry is logged
+  // into the telemetry ring buffer for later forensic review.
+  const ROI_STABILITY_THRESHOLD = 0.55;       // [0..1] — below = "low"
+  const ROI_STABILITY_BEATS_N = 5;            // consecutive beats to trigger
+  const ROI_STABILITY_RECOVER_BEATS = 3;      // consecutive good beats to clear
+  const ROI_AUDIT_LOG_MAX = 64;
+  const lowStabilityStreakRef = useRef(0);
+  const goodStabilityStreakRef = useRef(0);
+  const lastBeatRoiScoreRef = useRef(1);
+  const lastBeatDriftRef = useRef(0);
+  const [roiAlertActive, setRoiAlertActive] = useState(false);
+  const roiAuditLogRef = useRef<Array<{
+    t: number;             // performance.now() at trigger/clear
+    kind: 'TRIGGER' | 'CLEAR' | 'SAMPLE';
+    roiScore: number;      // [0..1]
+    drift: number;         // [0..1+]
+    streak: number;        // streak length at the moment of the entry
+    beatIndex: number;     // totalBeatsRef snapshot
+  }>>([]);
   const arrhythmiaDetectedRef = useRef(false);
   const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
   const cameraRef = useRef<CameraViewHandle>(null);
