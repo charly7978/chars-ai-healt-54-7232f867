@@ -20,15 +20,15 @@ type InMsg =
   | { type: 'START' }
   | { type: 'STOP' }
   | { type: 'CALIBRATE' }
-  | { type: 'FRAME'; data: Uint8ClampedArray; width: number; height: number; ts: number; seq: number }
+  | { type: 'FRAME'; data: Uint8ClampedArray; width: number; height: number; ts: number; captureTs: number; seq: number }
   | { type: 'GET_RGB' }
   | { type: 'GET_POS' }
   | { type: 'GET_DEBUG' };
 
 type OutMsg =
   | { type: 'READY' }
-  | { type: 'SIGNAL'; signal: ProcessedSignal; seq: number; procMs: number }
-  | { type: 'FRAME_DONE'; seq: number }
+  | { type: 'SIGNAL'; signal: ProcessedSignal; seq: number; procMs: number; captureTs: number; emitTs: number }
+  | { type: 'FRAME_DONE'; seq: number; procMs: number; captureTs: number; emitTs: number }
   | { type: 'ERROR'; error: ProcessingError }
   | { type: 'RGB'; stats: ReturnType<PPGSignalProcessor['getRGBStats']> }
   | { type: 'POS'; quality: ReturnType<PPGSignalProcessor['getPositionQuality']> }
@@ -77,11 +77,17 @@ ctx.onmessage = (e: MessageEvent<InMsg>) => {
         lastSignal = null;
         p.processFrame(imgData, msg.ts);
         const procMs = performance.now() - t0;
+        const emitTs = performance.now();
         if (lastSignal) {
-          ctx.postMessage({ type: 'SIGNAL', signal: lastSignal, seq: msg.seq, procMs } satisfies OutMsg);
+          ctx.postMessage({
+            type: 'SIGNAL', signal: lastSignal, seq: msg.seq,
+            procMs, captureTs: msg.captureTs, emitTs,
+          } satisfies OutMsg);
         }
         // Always ACK so the main thread can release backpressure even when no signal was emitted.
-        ctx.postMessage({ type: 'FRAME_DONE', seq: msg.seq } satisfies OutMsg);
+        ctx.postMessage({
+          type: 'FRAME_DONE', seq: msg.seq, procMs, captureTs: msg.captureTs, emitTs,
+        } satisfies OutMsg);
         return;
       }
       case 'GET_RGB': {
