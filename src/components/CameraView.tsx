@@ -3,6 +3,7 @@ import React, { useRef, useEffect, forwardRef, useImperativeHandle } from "react
 export interface CameraViewHandle {
   getVideoElement: () => HTMLVideoElement | null;
   getDiagnostics: () => CameraDiagnostics;
+  getTorchStatus: () => TorchStatus;
 }
 
 export interface CameraDiagnostics {
@@ -16,6 +17,15 @@ export interface CameraDiagnostics {
   focusLocked: boolean;
   isoValue: number;
   supportedConstraints: string[];
+}
+
+export interface TorchStatus {
+  supported: boolean;
+  active: boolean;
+  watchdogActive: boolean;
+  reArmCount: number;
+  lastReArmAt: number; // performance.now()
+  lastCheckAt: number;
 }
 
 interface CameraViewProps {
@@ -41,6 +51,14 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const isStartingRef = useRef(false);
   const torchWatchdogRef = useRef<number | null>(null);
   const wakeLockRef = useRef<any>(null);
+  const torchStatusRef = useRef<TorchStatus>({
+    supported: false,
+    active: false,
+    watchdogActive: false,
+    reArmCount: 0,
+    lastReArmAt: 0,
+    lastCheckAt: 0,
+  });
   const diagnosticsRef = useRef<CameraDiagnostics>({
     deviceLabel: '',
     hasTorch: false,
@@ -57,6 +75,7 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   useImperativeHandle(ref, () => ({
     getVideoElement: () => videoRef.current,
     getDiagnostics: () => ({ ...diagnosticsRef.current }),
+    getTorchStatus: () => ({ ...torchStatusRef.current }),
   }), []);
 
   useEffect(() => {
@@ -67,6 +86,11 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         window.clearInterval(torchWatchdogRef.current);
         torchWatchdogRef.current = null;
       }
+      torchStatusRef.current = {
+        ...torchStatusRef.current,
+        watchdogActive: false,
+        active: false,
+      };
       if (wakeLockRef.current) {
         try { await wakeLockRef.current.release(); } catch {}
         wakeLockRef.current = null;
@@ -228,6 +252,15 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
           if (!torchOk) console.warn('⚠️ Torch failed after 5 attempts');
         }
 
+        torchStatusRef.current = {
+          supported: diagnosticsRef.current.hasTorch,
+          active: diagnosticsRef.current.torchActive,
+          watchdogActive: false,
+          reArmCount: 0,
+          lastReArmAt: 0,
+          lastCheckAt: performance.now(),
+        };
+
         // PHASE 4: Fine lock — apply each independently, log what succeeds
         await new Promise(r => setTimeout(r, 300));
         
@@ -296,14 +329,23 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
             const t = streamRef.current?.getVideoTracks()[0];
             if (!t || t.readyState !== 'live') return;
             const s = (t.getSettings?.() as any) || {};
+            torchStatusRef.current.lastCheckAt = performance.now();
             if (s.torch === false) {
               try {
                 await t.applyConstraints({ advanced: [{ torch: true } as any] });
                 diagnosticsRef.current.torchActive = true;
+                torchStatusRef.current.active = true;
+                torchStatusRef.current.reArmCount += 1;
+                torchStatusRef.current.lastReArmAt = performance.now();
                 console.log('🔦 Torch re-armed by watchdog');
-              } catch {}
+              } catch {
+                torchStatusRef.current.active = false;
+              }
+            } else if (s.torch === true) {
+              torchStatusRef.current.active = true;
             }
           }, 1500);
+          torchStatusRef.current.watchdogActive = true;
         }
 
         // Acquire a screen wake lock so the OS doesn't dim/sleep mid-measurement.
