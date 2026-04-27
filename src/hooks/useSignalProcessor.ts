@@ -1,150 +1,170 @@
-
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { PPGSignalProcessor } from '../modules/signal-processing/PPGSignalProcessor';
-import { ProcessedSignal, ProcessingError } from '../types/signal';
+import type { ProcessedSignal, ProcessingError } from '../types/signal';
 
 /**
- * HOOK ÚNICO Y DEFINITIVO - ELIMINADAS TODAS LAS DUPLICIDADES
- * Sistema completamente unificado con prevención absoluta de múltiples instancias
+ * SIGNAL PROCESSOR HOOK V3 — WEB WORKER EDITION
+ *
+ * Public API is preserved (drop-in replacement for the legacy in-thread hook).
+ * All heavy work (ROI mask, AC/DC, ranker, bandpass, SQI) runs in the worker.
+ * The main thread only:
+ *   - posts ImageData (transferable buffer when possible) with a sequence id
+ *   - tracks one-in-flight backpressure
+ *   - mirrors processor outputs to React state
+ *
+ * Telemetry queries (RGB stats, position quality, debug info) are answered
+ * with the LAST snapshot the worker pushed, so consumers stay synchronous.
  */
 export const useSignalProcessor = () => {
-  const processorRef = useRef<PPGSignalProcessor | null>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const inFlightRef = useRef<boolean>(false);
+  const seqRef = useRef<number>(0);
+  const droppedRef = useRef<number>(0);
+
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastSignal, setLastSignal] = useState<ProcessedSignal | null>(null);
   const [error, setError] = useState<ProcessingError | null>(null);
   const [framesProcessed, setFramesProcessed] = useState(0);
-  
-  // CONTROL ÚNICO DE INSTANCIA - PREVENIR DUPLICIDADES ABSOLUTAMENTE
-  const instanceLock = useRef<boolean>(false);
-  const sessionIdRef = useRef<string>("");
-  const initializationState = useRef<'IDLE' | 'INITIALIZING' | 'READY' | 'ERROR'>('IDLE');
-  
-  // INICIALIZACIÓN ÚNICA Y DEFINITIVA
+
+  const sessionIdRef = useRef<string>('');
+
+  // Cached telemetry snapshots (synchronous reads for UI/perf).
+  const rgbStatsRef = useRef({ redAC: 0, redDC: 0, greenAC: 0, greenDC: 0, rgRatio: 0, ratioOfRatios: 0 });
+  const posQualityRef = useRef({
+    locked: false, drifting: false, spatialUniformity: 0, centerCoverage: 0,
+    positionDrift: 0, guidance: 'COLOQUE SU DEDO', qualityScore: 0,
+  });
+  const debugInfoRef = useRef<any>({});
+
+  const processingRef = useRef(false);
+
+  // Periodic snapshot ticker for telemetry refresh from worker
   useEffect(() => {
-    // BLOQUEO DE MÚLTIPLES INSTANCIAS
-    if (instanceLock.current || initializationState.current !== 'IDLE') {
-      return;
-    }
-    
-    instanceLock.current = true;
-    initializationState.current = 'INITIALIZING';
-    
     const t = Date.now().toString(36);
     const p = (performance.now() | 0).toString(36);
     sessionIdRef.current = `sig_${t}_${p}`;
 
-    // CALLBACKS ÚNICOS SIN MEMORY LEAKS
-    const onSignalReady = (signal: ProcessedSignal) => {
-      if (initializationState.current !== 'READY') return;
-      
-      setLastSignal(signal);
-      setError(null);
-      // CRÍTICO: Limitar contador para evitar números infinitos que afectan rendimiento
-      setFramesProcessed(prev => (prev + 1) % 10000);
-    };
+    const worker = new Worker(new URL('../workers/ppgWorker.ts', import.meta.url), { type: 'module' });
+    workerRef.current = worker;
 
-    const onError = (error: ProcessingError) => {
-      console.error(`Error procesador: ${error.code}`);
-      setError(error);
-    };
-
-    // CREAR PROCESADOR ÚNICO
-    try {
-      processorRef.current = new PPGSignalProcessor(onSignalReady, onError);
-      initializationState.current = 'READY';
-    } catch (err) {
-      initializationState.current = 'ERROR';
-      instanceLock.current = false;
-    }
-    
-    return () => {
-      if (processorRef.current) {
-        processorRef.current.stop();
-        processorRef.current = null;
+    worker.onmessage = (e: MessageEvent<any>) => {
+      const msg = e.data;
+      switch (msg?.type) {
+        case 'READY':
+          break;
+        case 'SIGNAL': {
+          setLastSignal(msg.signal as ProcessedSignal);
+          setError(null);
+          setFramesProcessed(prev => (prev + 1) % 10000);
+          break;
+        }
+        case 'FRAME_DONE':
+          inFlightRef.current = false;
+          break;
+        case 'ERROR':
+          setError(msg.error as ProcessingError);
+          inFlightRef.current = false;
+          break;
+        case 'RGB':
+          rgbStatsRef.current = msg.stats;
+          break;
+        case 'POS':
+          posQualityRef.current = msg.quality;
+          break;
+        case 'DEBUG':
+          debugInfoRef.current = msg.info;
+          break;
       }
-      initializationState.current = 'IDLE';
-      instanceLock.current = false;
+    };
+
+    worker.onerror = (ev) => {
+      setError({
+        code: 'WORKER_FATAL',
+        message: ev.message || 'PPG worker crashed',
+        timestamp: Date.now(),
+      });
+      inFlightRef.current = false;
+    };
+
+    worker.postMessage({ type: 'INIT', sessionId: sessionIdRef.current });
+
+    // Telemetry snapshot loop — cheap, decoupled from frame rate.
+    const tickerId = window.setInterval(() => {
+      if (!workerRef.current || !processingRef.current) return;
+      workerRef.current.postMessage({ type: 'GET_RGB' });
+      workerRef.current.postMessage({ type: 'GET_POS' });
+      workerRef.current.postMessage({ type: 'GET_DEBUG' });
+    }, 200);
+
+    return () => {
+      window.clearInterval(tickerId);
+      try { worker.postMessage({ type: 'STOP' }); } catch {}
+      worker.terminate();
+      workerRef.current = null;
+      inFlightRef.current = false;
     };
   }, []);
 
-  // INICIO ÚNICO SIN DUPLICIDADES
   const startProcessing = useCallback(() => {
-    if (!processorRef.current || initializationState.current !== 'READY') {
-      return;
-    }
-
-    if (isProcessing) {
-      return;
-    }
-    
-    setIsProcessing(true);
+    if (!workerRef.current) return;
+    if (isProcessing) return;
+    seqRef.current = 0;
+    droppedRef.current = 0;
+    inFlightRef.current = false;
     setFramesProcessed(0);
     setError(null);
-    
-    processorRef.current.start();
+    processingRef.current = true;
+    workerRef.current.postMessage({ type: 'START' });
+    setIsProcessing(true);
   }, [isProcessing]);
 
-  // PARADA ÚNICA Y LIMPIA - SIN DEPENDER DE isProcessing STATE
   const stopProcessing = useCallback(() => {
-    if (!processorRef.current) {
-      return;
-    }
-    
-    // Primero detener el procesador, luego actualizar estado
-    processorRef.current.stop();
+    if (!workerRef.current) return;
+    workerRef.current.postMessage({ type: 'STOP' });
+    processingRef.current = false;
     setIsProcessing(false);
     setLastSignal(null);
-    setFramesProcessed(0);
+    inFlightRef.current = false;
   }, []);
 
-  // CALIBRACIÓN ÚNICA
   const calibrate = useCallback(async () => {
-    if (!processorRef.current || initializationState.current !== 'READY') {
-      return false;
-    }
-
-    try {
-      const success = await processorRef.current.calibrate();
-      return success;
-    } catch (error) {
-      return false;
-    }
+    if (!workerRef.current) return false;
+    workerRef.current.postMessage({ type: 'CALIBRATE' });
+    return true;
   }, []);
 
-  // PROCESAMIENTO DE FRAME ÚNICO — acepta timestamp real del frame
+  /**
+   * Feed a frame into the worker.
+   * Backpressure: if the worker is still processing the previous frame, drop this one.
+   * We TRANSFER the underlying buffer to avoid a copy across the worker boundary.
+   * We pass a defensive copy of the buffer to keep ImageData usable elsewhere if needed.
+   */
   const processFrame = useCallback((imageData: ImageData, frameTimestamp?: number) => {
-    if (!processorRef.current || initializationState.current !== 'READY' || !isProcessing) {
+    if (!workerRef.current || !processingRef.current) return;
+    if (inFlightRef.current) {
+      droppedRef.current++;
       return;
     }
-    
-    try {
-      processorRef.current.processFrame(imageData, frameTimestamp);
-    } catch (error) {
-      // Error silenciado para rendimiento
-    }
-  }, [isProcessing]);
-
-  // OBTENER ESTADÍSTICAS RGB REALES PARA SpO2
-  const getRGBStats = useCallback(() => {
-    if (!processorRef.current) {
-      return {
-        redAC: 0,
-        redDC: 0,
-        greenAC: 0,
-        greenDC: 0,
-        rgRatio: 0,
-        ratioOfRatios: 0
-      };
-    }
-    return processorRef.current.getRGBStats();
+    inFlightRef.current = true;
+    seqRef.current++;
+    // Copy the pixel buffer so we can transfer it without invalidating the canvas's ImageData.
+    const copy = new Uint8ClampedArray(imageData.data);
+    workerRef.current.postMessage(
+      {
+        type: 'FRAME',
+        data: copy,
+        width: imageData.width,
+        height: imageData.height,
+        ts: frameTimestamp ?? performance.now(),
+        seq: seqRef.current,
+      },
+      [copy.buffer]
+    );
   }, []);
 
-  const getPositionQuality = useCallback(() => {
-    if (!processorRef.current) {
-      return { locked: false, drifting: false, spatialUniformity: 0, centerCoverage: 0, positionDrift: 0, guidance: 'COLOQUE SU DEDO', qualityScore: 0 };
-    }
-    return processorRef.current.getPositionQuality();
-  }, []);
+  const getRGBStats = useCallback(() => rgbStatsRef.current, []);
+  const getPositionQuality = useCallback(() => posQualityRef.current, []);
+  const getDebugInfo = useCallback(() => debugInfoRef.current, []);
+  const getDroppedFrames = useCallback(() => droppedRef.current, []);
 
   return {
     isProcessing,
@@ -157,10 +177,12 @@ export const useSignalProcessor = () => {
     processFrame,
     getRGBStats,
     getPositionQuality,
+    getDebugInfo,
+    getDroppedFrames,
     debugInfo: {
       sessionId: sessionIdRef.current,
-      initializationState: initializationState.current,
-      instanceLocked: instanceLock.current
-    }
+      workerActive: !!workerRef.current,
+      backend: 'worker',
+    },
   };
 };

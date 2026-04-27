@@ -39,6 +39,8 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isStartingRef = useRef(false);
+  const torchWatchdogRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<any>(null);
   const diagnosticsRef = useRef<CameraDiagnostics>({
     deviceLabel: '',
     hasTorch: false,
@@ -61,6 +63,14 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
     let mounted = true;
 
     const stopCamera = async () => {
+      if (torchWatchdogRef.current != null) {
+        window.clearInterval(torchWatchdogRef.current);
+        torchWatchdogRef.current = null;
+      }
+      if (wakeLockRef.current) {
+        try { await wakeLockRef.current.release(); } catch {}
+        wakeLockRef.current = null;
+      }
       if (streamRef.current) {
         for (const track of streamRef.current.getVideoTracks()) {
           try {
@@ -277,6 +287,31 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
           '| Exp:', diagnosticsRef.current.exposureLocked,
           '| WB:', diagnosticsRef.current.wbLocked,
           '| ISO:', diagnosticsRef.current.isoValue);
+
+        // PHASE 5: Anti-flicker hardening — keep torch ON and re-apply if the
+        // OS or browser turns it off opportunistically (common on mid-range
+        // Android devices when battery saver / thermal throttling kicks in).
+        if (diagnosticsRef.current.hasTorch) {
+          torchWatchdogRef.current = window.setInterval(async () => {
+            const t = streamRef.current?.getVideoTracks()[0];
+            if (!t || t.readyState !== 'live') return;
+            const s = (t.getSettings?.() as any) || {};
+            if (s.torch === false) {
+              try {
+                await t.applyConstraints({ advanced: [{ torch: true } as any] });
+                diagnosticsRef.current.torchActive = true;
+                console.log('🔦 Torch re-armed by watchdog');
+              } catch {}
+            }
+          }, 1500);
+        }
+
+        // Acquire a screen wake lock so the OS doesn't dim/sleep mid-measurement.
+        try {
+          if ('wakeLock' in navigator) {
+            wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+          }
+        } catch {}
 
         onStreamReady?.(stream);
         isStartingRef.current = false;
