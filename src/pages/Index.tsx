@@ -311,6 +311,12 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     frameTimestampHistoryRef.current = [];
+    lowStabilityStreakRef.current = 0;
+    goodStabilityStreakRef.current = 0;
+    lastBeatRoiScoreRef.current = 1;
+    lastBeatDriftRef.current = 0;
+    roiAuditLogRef.current = [];
+    setRoiAlertActive(false);
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
