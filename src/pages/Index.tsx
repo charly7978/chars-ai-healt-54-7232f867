@@ -615,6 +615,22 @@ const Index = () => {
   }, [elapsedTime, isMonitoring, finalizeMeasurement]);
 
   useEffect(() => {
+    if (!showTelemetry || !isMonitoring) return;
+    const id = window.setInterval(() => setTelemetryTick(t => (t + 1) & 0xffff), 250);
+    return () => window.clearInterval(id);
+  }, [showTelemetry, isMonitoring]);
+
+  const handleTelemetryTapZone = useCallback(() => {
+    const now = performance.now();
+    if (now - lastTelemetryTapRef.current < 350) {
+      setShowTelemetry(s => !s);
+      lastTelemetryTapRef.current = 0;
+    } else {
+      lastTelemetryTapRef.current = now;
+    }
+  }, []);
+
+  useEffect(() => {
     if (!isCalibrating) return;
     const interval = setInterval(() => {
       const currentProgress = getCalibrationProgress();
@@ -660,6 +676,58 @@ const Index = () => {
         <div className="absolute inset-0">
           <CameraView ref={cameraRef} onStreamReady={handleStreamReady} isMonitoring={isCameraOn} />
         </div>
+
+        {/* Invisible double-tap zone (top-left) to toggle the forensic telemetry panel */}
+        <div
+          onClick={handleTelemetryTapZone}
+          className="absolute top-0 left-0 w-16 h-16 z-30"
+          style={{ background: 'transparent' }}
+          aria-hidden
+        />
+
+        {showTelemetry && isMonitoring && (() => {
+          // Re-read on every telemetryTick re-render
+          void telemetryTick;
+          const dbg = (getDebugInfo?.() || {}) as any;
+          const pq = getPositionQuality();
+          const rgb = getRGBStats();
+          const dropped = getDroppedFrames?.() ?? 0;
+          const fmt = (v: any, d = 2) => typeof v === 'number' && isFinite(v) ? v.toFixed(d) : '—';
+          const row = (k: string, v: any) => (
+            <div className="flex justify-between gap-2 leading-tight">
+              <span className="text-slate-400">{k}</span>
+              <span className="text-emerald-300 font-mono">{v}</span>
+            </div>
+          );
+          return (
+            <div className="absolute top-12 left-2 right-2 z-30 max-w-[280px] bg-black/85 border border-emerald-500/30 rounded-md p-2 text-[10px] text-white font-mono pointer-events-none shadow-2xl">
+              <div className="text-emerald-400 font-bold tracking-wider mb-1">PPG TELEMETRY · WORKER</div>
+              {row('contact', String(dbg.contactState ?? '—'))}
+              {row('exported', String(dbg.exportedState ?? '—'))}
+              {row('pressure', String(dbg.pressureState ?? '—'))}
+              {row('source', `${dbg.activeSource ?? '—'} (stab ${fmt(dbg.sourceStability)})`)}
+              {row('SQI', fmt(dbg.sqiGlobal, 0))}
+              {row('PI', fmt(dbg.perfusionIndex, 4))}
+              {row('clipHigh', fmt(dbg.clipHighRatio, 3))}
+              {row('clipLow', fmt(dbg.clipLowRatio, 3))}
+              {row('coverage', fmt(dbg.coverageRatio, 3))}
+              {row('uniformity', fmt(dbg.spatialUniformity, 3))}
+              {row('motion', fmt(dbg.motionScore, 3))}
+              {row('FPS real', fmt(dbg.realFps, 1))}
+              {row('proc ms', fmt(dbg.processingTimeMs, 2))}
+              {row('dropped', String(dropped))}
+              {row('locked', String(pq.locked))}
+              {row('drift', fmt(pq.positionDrift, 3))}
+              {row('R AC/DC', `${fmt(rgb.redAC, 2)} / ${fmt(rgb.redDC, 1)}`)}
+              {row('G AC/DC', `${fmt(rgb.greenAC, 2)} / ${fmt(rgb.greenDC, 1)}`)}
+              {row('R/G', fmt(rgb.rgRatio, 3))}
+              {row('RoR', fmt(rgb.ratioOfRatios, 3))}
+              <div className="mt-1 pt-1 border-t border-emerald-500/20 text-[9px] text-slate-500">
+                doble-tap esquina sup-izq para ocultar
+              </div>
+            </div>
+          );
+        })()}
 
         {isMonitoring && (() => {
           const pq = getPositionQuality();
