@@ -815,6 +815,9 @@ const Index = () => {
               {row('dropped', String(dropped))}
               {row('locked', String(pq.locked))}
               {row('drift', fmt(pq.positionDrift, 3))}
+              {row('ROI alert', roiAlertActive ? `ON (streak ${lowStabilityStreakRef.current})` : `off (low ${lowStabilityStreakRef.current}/good ${goodStabilityStreakRef.current})`)}
+              {row('beat ROI', `${fmt(lastBeatRoiScoreRef.current, 2)} · drift ${fmt(lastBeatDriftRef.current, 2)}`)}
+              {row('audit log', String(roiAuditLogRef.current.length))}
               {row('R AC/DC', `${fmt(rgb.redAC, 2)} / ${fmt(rgb.redDC, 1)}`)}
               {row('G AC/DC', `${fmt(rgb.greenAC, 2)} / ${fmt(rgb.greenDC, 1)}`)}
               {row('R/G', fmt(rgb.rgRatio, 3))}
