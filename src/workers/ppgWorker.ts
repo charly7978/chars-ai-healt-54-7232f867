@@ -72,7 +72,7 @@ ctx.onmessage = (e: MessageEvent<InMsg>) => {
       case 'FRAME': {
         const p = ensureProcessor();
         // Reconstruct ImageData inside the worker (zero-copy: we received the buffer transferred).
-        const imgData = new ImageData(msg.data, msg.width, msg.height);
+        const imgData = new ImageData(msg.data as unknown as Uint8ClampedArray<ArrayBuffer>, msg.width, msg.height);
         const t0 = performance.now();
         lastSignal = null;
         p.processFrame(imgData, msg.ts);
