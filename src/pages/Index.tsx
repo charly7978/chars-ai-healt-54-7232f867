@@ -521,6 +521,66 @@ const Index = () => {
         arrhythmiaBeatsRef.current++;
         lastArrhythmiaCountForBeatsRef.current = currentArrCount;
       }
+
+      // ── Per-beat ROI stability sampling ────────────────────────────
+      // Re-uses the same formula as the HUD to keep one source of truth.
+      const driftPenaltyBeat = Math.min(1, Math.max(0, (positionQuality.positionDrift || 0) / 0.30));
+      const roiScoreBeat = Math.max(0, Math.min(1,
+        (positionQuality.qualityScore || 0) * 0.7 +
+        (positionQuality.locked ? 0.3 : 0) -
+        driftPenaltyBeat * 0.4
+      ));
+      lastBeatRoiScoreRef.current = roiScoreBeat;
+      lastBeatDriftRef.current = positionQuality.positionDrift || 0;
+
+      if (roiScoreBeat < ROI_STABILITY_THRESHOLD) {
+        lowStabilityStreakRef.current++;
+        goodStabilityStreakRef.current = 0;
+        if (
+          !roiAlertActive &&
+          lowStabilityStreakRef.current >= ROI_STABILITY_BEATS_N
+        ) {
+          setRoiAlertActive(true);
+          const entry = {
+            t: performance.now(),
+            kind: 'TRIGGER' as const,
+            roiScore: roiScoreBeat,
+            drift: positionQuality.positionDrift || 0,
+            streak: lowStabilityStreakRef.current,
+            beatIndex: totalBeatsRef.current,
+          };
+          roiAuditLogRef.current.push(entry);
+          if (roiAuditLogRef.current.length > ROI_AUDIT_LOG_MAX) {
+            roiAuditLogRef.current.shift();
+          }
+          // Forensic console trace (kept terse, single line, structured).
+          console.warn('[ROI-AUDIT] LOW_STABILITY_TRIGGER', entry);
+        }
+      } else {
+        goodStabilityStreakRef.current++;
+        if (
+          roiAlertActive &&
+          goodStabilityStreakRef.current >= ROI_STABILITY_RECOVER_BEATS
+        ) {
+          setRoiAlertActive(false);
+          const entry = {
+            t: performance.now(),
+            kind: 'CLEAR' as const,
+            roiScore: roiScoreBeat,
+            drift: positionQuality.positionDrift || 0,
+            streak: goodStabilityStreakRef.current,
+            beatIndex: totalBeatsRef.current,
+          };
+          roiAuditLogRef.current.push(entry);
+          if (roiAuditLogRef.current.length > ROI_AUDIT_LOG_MAX) {
+            roiAuditLogRef.current.shift();
+          }
+          console.info('[ROI-AUDIT] STABILITY_RECOVERED', entry);
+        }
+        if (goodStabilityStreakRef.current >= ROI_STABILITY_RECOVER_BEATS) {
+          lowStabilityStreakRef.current = 0;
+        }
+      }
     }
 
     if (heartBeatResult.rrData?.intervals) {
