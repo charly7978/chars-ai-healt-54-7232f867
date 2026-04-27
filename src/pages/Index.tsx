@@ -61,6 +61,28 @@ const Index = () => {
   const [showTelemetry, setShowTelemetry] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
+  // ── ROI stability persistent-alert state ──────────────────────────────
+  // Counts CONSECUTIVE accepted beats whose ROI stability score fell below
+  // ROI_STABILITY_THRESHOLD. When the streak reaches ROI_STABILITY_BEATS_N
+  // a persistent on-screen alert is raised and an audit entry is logged
+  // into the telemetry ring buffer for later forensic review.
+  const ROI_STABILITY_THRESHOLD = 0.55;       // [0..1] — below = "low"
+  const ROI_STABILITY_BEATS_N = 5;            // consecutive beats to trigger
+  const ROI_STABILITY_RECOVER_BEATS = 3;      // consecutive good beats to clear
+  const ROI_AUDIT_LOG_MAX = 64;
+  const lowStabilityStreakRef = useRef(0);
+  const goodStabilityStreakRef = useRef(0);
+  const lastBeatRoiScoreRef = useRef(1);
+  const lastBeatDriftRef = useRef(0);
+  const [roiAlertActive, setRoiAlertActive] = useState(false);
+  const roiAuditLogRef = useRef<Array<{
+    t: number;             // performance.now() at trigger/clear
+    kind: 'TRIGGER' | 'CLEAR' | 'SAMPLE';
+    roiScore: number;      // [0..1]
+    drift: number;         // [0..1+]
+    streak: number;        // streak length at the moment of the entry
+    beatIndex: number;     // totalBeatsRef snapshot
+  }>>([]);
   const arrhythmiaDetectedRef = useRef(false);
   const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
   const cameraRef = useRef<CameraViewHandle>(null);
@@ -289,6 +311,12 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     frameTimestampHistoryRef.current = [];
+    lowStabilityStreakRef.current = 0;
+    goodStabilityStreakRef.current = 0;
+    lastBeatRoiScoreRef.current = 1;
+    lastBeatDriftRef.current = 0;
+    roiAuditLogRef.current = [];
+    setRoiAlertActive(false);
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     startProcessing();
     setIsCameraOn(true);
@@ -392,6 +420,12 @@ const Index = () => {
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
     unstableFrameCounter.current = 0;
+    lowStabilityStreakRef.current = 0;
+    goodStabilityStreakRef.current = 0;
+    lastBeatRoiScoreRef.current = 1;
+    lastBeatDriftRef.current = 0;
+    roiAuditLogRef.current = [];
+    setRoiAlertActive(false);
     setHeartbeatSignal(0);
     setBeatMarker(0);
     setRRIntervals([]);
@@ -498,6 +532,66 @@ const Index = () => {
       if (currentArrCount > lastArrhythmiaCountForBeatsRef.current) {
         arrhythmiaBeatsRef.current++;
         lastArrhythmiaCountForBeatsRef.current = currentArrCount;
+      }
+
+      // ── Per-beat ROI stability sampling ────────────────────────────
+      // Re-uses the same formula as the HUD to keep one source of truth.
+      const driftPenaltyBeat = Math.min(1, Math.max(0, (positionQuality.positionDrift || 0) / 0.30));
+      const roiScoreBeat = Math.max(0, Math.min(1,
+        (positionQuality.qualityScore || 0) * 0.7 +
+        (positionQuality.locked ? 0.3 : 0) -
+        driftPenaltyBeat * 0.4
+      ));
+      lastBeatRoiScoreRef.current = roiScoreBeat;
+      lastBeatDriftRef.current = positionQuality.positionDrift || 0;
+
+      if (roiScoreBeat < ROI_STABILITY_THRESHOLD) {
+        lowStabilityStreakRef.current++;
+        goodStabilityStreakRef.current = 0;
+        if (
+          !roiAlertActive &&
+          lowStabilityStreakRef.current >= ROI_STABILITY_BEATS_N
+        ) {
+          setRoiAlertActive(true);
+          const entry = {
+            t: performance.now(),
+            kind: 'TRIGGER' as const,
+            roiScore: roiScoreBeat,
+            drift: positionQuality.positionDrift || 0,
+            streak: lowStabilityStreakRef.current,
+            beatIndex: totalBeatsRef.current,
+          };
+          roiAuditLogRef.current.push(entry);
+          if (roiAuditLogRef.current.length > ROI_AUDIT_LOG_MAX) {
+            roiAuditLogRef.current.shift();
+          }
+          // Forensic console trace (kept terse, single line, structured).
+          console.warn('[ROI-AUDIT] LOW_STABILITY_TRIGGER', entry);
+        }
+      } else {
+        goodStabilityStreakRef.current++;
+        if (
+          roiAlertActive &&
+          goodStabilityStreakRef.current >= ROI_STABILITY_RECOVER_BEATS
+        ) {
+          setRoiAlertActive(false);
+          const entry = {
+            t: performance.now(),
+            kind: 'CLEAR' as const,
+            roiScore: roiScoreBeat,
+            drift: positionQuality.positionDrift || 0,
+            streak: goodStabilityStreakRef.current,
+            beatIndex: totalBeatsRef.current,
+          };
+          roiAuditLogRef.current.push(entry);
+          if (roiAuditLogRef.current.length > ROI_AUDIT_LOG_MAX) {
+            roiAuditLogRef.current.shift();
+          }
+          console.info('[ROI-AUDIT] STABILITY_RECOVERED', entry);
+        }
+        if (goodStabilityStreakRef.current >= ROI_STABILITY_RECOVER_BEATS) {
+          lowStabilityStreakRef.current = 0;
+        }
       }
     }
 
@@ -721,6 +815,9 @@ const Index = () => {
               {row('dropped', String(dropped))}
               {row('locked', String(pq.locked))}
               {row('drift', fmt(pq.positionDrift, 3))}
+              {row('ROI alert', roiAlertActive ? `ON (streak ${lowStabilityStreakRef.current})` : `off (low ${lowStabilityStreakRef.current}/good ${goodStabilityStreakRef.current})`)}
+              {row('beat ROI', `${fmt(lastBeatRoiScoreRef.current, 2)} · drift ${fmt(lastBeatDriftRef.current, 2)}`)}
+              {row('audit log', String(roiAuditLogRef.current.length))}
               {row('R AC/DC', `${fmt(rgb.redAC, 2)} / ${fmt(rgb.redDC, 1)}`)}
               {row('G AC/DC', `${fmt(rgb.greenAC, 2)} / ${fmt(rgb.greenDC, 1)}`)}
               {row('R/G', fmt(rgb.rgRatio, 3))}
@@ -818,6 +915,23 @@ const Index = () => {
             </div>
           );
         })()}
+
+        {/* PERSISTENT ROI-STABILITY ALERT ──────────────────────────────────
+            Latches when N consecutive accepted beats fall below the ROI
+            stability threshold. Stays on screen until ROI recovers for
+            ROI_STABILITY_RECOVER_BEATS beats. Each transition is logged to
+            roiAuditLogRef for forensic audit. */}
+        {isMonitoring && roiAlertActive && (
+          <div className="absolute top-16 left-0 right-0 z-30 flex justify-center pointer-events-none">
+            <div className="px-3 py-1 rounded-md text-[10px] font-mono font-bold tracking-wider shadow-lg border bg-red-700/40 border-red-400/70 text-red-50 animate-pulse">
+              ⚠ ROI INESTABLE · {ROI_STABILITY_BEATS_N}+ LATIDOS · ESTABILICE EL DEDO
+              <span className="ml-2 opacity-80">
+                score {Math.round(lastBeatRoiScoreRef.current * 100)}% ·
+                drift {Math.round(Math.min(1, lastBeatDriftRef.current) * 100)}%
+              </span>
+            </div>
+          </div>
+        )}
 
         <div className="relative z-10 h-full">
           <div className="flex-1 h-full">
