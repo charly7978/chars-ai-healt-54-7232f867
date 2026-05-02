@@ -896,7 +896,8 @@ const Index = () => {
                 const rec = recorderRef.current;
                 if (!rec) return null;
                 const s = rec.liveStats();
-                void recorderTick; // re-render hook
+                void recorderTick;   // future-proof manual tick
+                void telemetryTick;  // re-render at 3 Hz with the rest of the panel
                 const onExport = async () => {
                   if (exporting || !recorderRef.current) return;
                   setExporting(true);
