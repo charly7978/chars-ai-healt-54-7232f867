@@ -270,11 +270,17 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       sourceStability: this.sourceStability,
     });
 
-    // Gate: drift penalty
+    // Gate: drift penalty + physiological PI gate.
+    // PI must be inside the physiological 0.3..8 % window; outside that
+    // window we declare LOW quality regardless of any other signal.
+    // Lima & Bakker 2005 (Intensive Care Med 31:1316-1326): healthy
+    // finger PI is 0.5-5 %; we widen to 0.3-8 % to allow weak perfusion
+    // but reject noise (PI ~30-40 %) and full contact loss (PI ~0).
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
-    const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.005
+    const piPhysiological = perfusionIndex >= 0.3 && perfusionIndex <= 8;
+    const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && piPhysiological
       ? this.signalQuality * driftPenalty
-      : Math.min(18, this.signalQuality * 0.45);
+      : Math.min(15, this.signalQuality * 0.35);
 
     // --- LOGGING ---
     const now = performance.now();
@@ -308,8 +314,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
           `${motionArtifact ? ' MOV' : ''} ${roi.fingerPosition || '?' }`,
-        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.05,
-        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' ? perfusionIndex : 0,
+        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && piPhysiological,
+        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' && piPhysiological ? perfusionIndex : 0,
       },
     });
   }
@@ -574,6 +580,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     return Math.abs(olderMean) / (this.redBaseline + 1);
   }
 
+  /**
+   * AC/DC computation using the ISO 80601-2-61:2017 pulse-oximetry
+   * convention: AC = (Pmax - Pmin) of one cardiac cycle, DC = mean.
+   * In practice we use P95-P5 over a 6 s window as a robust, outlier-
+   * resistant approximation. Real fingertip PI is 0.5-5 % (Lima &
+   * Bakker 2005, Intensive Care Med 31:1316-1326). Anything above ~8 %
+   * is *physically impossible* and indicates either a saturated
+   * sensor or no finger contact at all.
+   */
   private calculateACDC(): void {
     const n = Math.min(180, this.redBuf.length);
     if (n < 36) return;
@@ -584,21 +599,22 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
 
     if (this.redDC < 5 || this.greenDC < 5) return;
 
-    const computeAC = (buf: RingBuffer, dc: number): number => {
-      const p5 = buf.percentile(0.05, n);
+    const computeAC = (buf: RingBuffer): number => {
+      const p5  = buf.percentile(0.05, n);
       const p95 = buf.percentile(0.95, n);
-      const p2p = p95 - p5;
-      const v = buf.variance(n);
-      const rms = Math.sqrt(v) * Math.sqrt(2);
-      return (rms + p2p * 0.5) / 2;
+      // Standard definition: AC amplitude is half the peak-to-peak
+      // of the pulsatile component over the analysis window.
+      return Math.max(0, (p95 - p5) * 0.5);
     };
 
-    this.redAC = computeAC(this.redBuf, this.redDC);
-    this.greenAC = computeAC(this.greenBuf, this.greenDC);
-    this.blueAC = computeAC(this.blueBuf, this.blueDC);
+    this.redAC = computeAC(this.redBuf);
+    this.greenAC = computeAC(this.greenBuf);
+    this.blueAC = computeAC(this.blueBuf);
 
-    // Reject if no real pulsatility
-    if ((this.redAC / this.redDC) < 0.0001 && (this.greenAC / this.greenDC) < 0.0001) {
+    // Reject obvious non-physiological PI (no finger / saturated sensor).
+    const piRed = this.redDC > 0 ? this.redAC / this.redDC : 0;
+    const piGreen = this.greenDC > 0 ? this.greenAC / this.greenDC : 0;
+    if (piRed < 0.0001 && piGreen < 0.0001) {
       this.redAC = 0; this.greenAC = 0;
     }
   }
