@@ -1,0 +1,196 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Medical Parameter Registry Schema",
+  "description": "Schema for PPG biomedical parameter configuration. All values must have explicit source, version, and justification.",
+  "type": "object",
+  "required": ["schemaVersion", "parameters"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of this schema"
+    },
+    "lastUpdated": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reviewedBy": {
+      "type": "string"
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "signalProcessing": {
+          "$ref": "#/definitions/SignalProcessingParams"
+        },
+        "calibrationModels": {
+          "$ref": "#/definitions/CalibrationModels"
+        },
+        "qualityThresholds": {
+          "$ref": "#/definitions/QualityThresholds"
+        },
+        "physiologicalLimits": {
+          "$ref": "#/definitions/PhysiologicalLimits"
+        },
+        "evidenceGate": {
+          "$ref": "#/definitions/EvidenceGateConfig"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "SignalProcessingParams": {
+      "type": "object",
+      "properties": {
+        "fps": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "number", "minimum": 1 },
+            "max": { "type": "number", "maximum": 120 },
+            "target": { "type": "number" },
+            "source": { "type": "string" },
+            "justification": { "type": "string" }
+          }
+        },
+        "contactDetection": {
+          "type": "object",
+          "properties": {
+            "fingerConfirmFrames": { "type": "integer", "minimum": 1 },
+            "fingerLostFrames": { "type": "integer", "minimum": 1 },
+            "stableContactThreshold": { "type": "integer" },
+            "source": { "type": "string" },
+            "justification": { "type": "string" }
+          }
+        },
+        "clippingThresholds": {
+          "type": "object",
+          "properties": {
+            "highSaturation": { "type": "integer", "minimum": 0, "maximum": 255 },
+            "lowSaturation": { "type": "integer", "minimum": 0, "maximum": 255 },
+            "highClipThreshold": { "type": "number" },
+            "source": { "type": "string" },
+            "justification": { "type": "string" }
+          }
+        }
+      }
+    },
+    "CalibrationModels": {
+      "type": "object",
+      "properties": {
+        "spo2": {
+          "$ref": "#/definitions/CalibrationModel"
+        },
+        "bloodPressure": {
+          "$ref": "#/definitions/CalibrationModel"
+        },
+        "glucose": {
+          "$ref": "#/definitions/CalibrationModel"
+        },
+        "lipids": {
+          "$ref": "#/definitions/CalibrationModel"
+        }
+      }
+    },
+    "CalibrationModel": {
+      "type": "object",
+      "required": ["modelType", "coefficients", "validationStatus", "source"],
+      "properties": {
+        "modelType": {
+          "type": "string",
+          "enum": ["population", "device_specific", "subject_calibrated", "research_only"]
+        },
+        "coefficients": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "referenceCenters": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "Population statistical centers for deviation calculation"
+        },
+        "validationStatus": {
+          "type": "string",
+          "enum": ["validated", "pending_validation", "research_only", "deprecated"]
+        },
+        "source": { "type": "string" },
+        "citation": { "type": "string" },
+        "justification": { "type": "string" },
+        "version": { "type": "string" },
+        "requiresCalibration": { "type": "boolean" },
+        "outputLabel": { "type": "string" }
+      }
+    },
+    "QualityThresholds": {
+      "type": "object",
+      "properties": {
+        "signalQualityIndex": {
+          "type": "object",
+          "properties": {
+            "high": { "type": "number", "minimum": 0, "maximum": 100 },
+            "medium": { "type": "number", "minimum": 0, "maximum": 100 },
+            "low": { "type": "number", "minimum": 0, "maximum": 100 },
+            "minimal": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        },
+        "perfusionIndex": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "number" },
+            "target": { "type": "number" },
+            "sufficient": { "type": "number" }
+          }
+        }
+      }
+    },
+    "PhysiologicalLimits": {
+      "type": "object",
+      "properties": {
+        "bpm": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "number", "minimum": 20 },
+            "max": { "type": "number", "maximum": 250 },
+            "source": { "type": "string" }
+          }
+        },
+        "rrInterval": {
+          "type": "object",
+          "properties": {
+            "minMs": { "type": "integer" },
+            "maxMs": { "type": "integer" },
+            "hardRefractoryMs": { "type": "integer" },
+            "source": { "type": "string" }
+          }
+        },
+        "spo2": {
+          "type": "object",
+          "properties": {
+            "min": { "type": "number", "minimum": 0, "maximum": 100 },
+            "max": { "type": "number", "minimum": 0, "maximum": 100 },
+            "source": { "type": "string" }
+          }
+        }
+      }
+    },
+    "EvidenceGateConfig": {
+      "type": "object",
+      "description": "Configuration for forensic evidence gate - when to block outputs",
+      "properties": {
+        "strictMode": { "type": "boolean", "default": true },
+        "requiredConditions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["contact", "saturation", "fps", "sqi", "calibration", "temporal_coherence"]
+          }
+        },
+        "failureMode": {
+          "type": "string",
+          "enum": ["zero_output", "null_output", "error_state", "last_valid"],
+          "description": "How to fail when conditions not met"
+        },
+        "showDiagnostics": { "type": "boolean", "default": true }
+      }
+    }
+  }
+}

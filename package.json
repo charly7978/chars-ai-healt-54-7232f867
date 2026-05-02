@@ -8,7 +8,13 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "audit:inventory": "echo '=== AUDIT: File Inventory ===' && git ls-files | grep -E '\\.(ts|tsx|js|jsx)$' | wc -l && echo 'TypeScript/JS files tracked'",
+    "audit:simulation": "echo '=== AUDIT: Simulation Check ===' && (grep -r 'Math\\.random\\|fake\\|mock\\|dummy\\|demo\\|stub\\|synthetic' src/ --include='*.ts' --include='*.tsx' 2>/dev/null || echo 'CLEAN: No simulation patterns found')",
+    "audit:hardcoded": "echo '=== AUDIT: Hardcoded Values ===' && grep -rn 'intercept.*=.*[0-9]\\+\\|threshold.*=.*[0-9]\\+\\|const.*=.*[0-9]\\{3,\\}' src/modules --include='*.ts' | head -20",
+    "audit:reachability": "echo '=== AUDIT: Entry Points ===' && test -f src/main.tsx && echo '✓ main.tsx exists' || echo '✗ main.tsx missing'",
+    "audit:all": "npm run audit:inventory && npm run audit:simulation && npm run audit:hardcoded && npm run audit:reachability && npm run build",
+    "security:check-env": "echo '=== SECURITY: Environment Check ===' && (test -f .env && echo '⚠ .env exists - ensure not committed' || echo '✓ .env not present') && test -f .env.example && echo '✓ .env.example exists' || echo '⚠ .env.example missing'"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.1.0",
