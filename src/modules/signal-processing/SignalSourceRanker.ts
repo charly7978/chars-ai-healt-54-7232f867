@@ -1,9 +1,18 @@
 /**
- * MULTI-SOURCE SIGNAL RANKER V2
- * 
- * Generates 6 candidate PPG signals, scores each by SQI metrics,
- * applies winner-take-all with temporal hysteresis.
- * No simulation — pure competitive extraction.
+ * MULTI-SOURCE SIGNAL RANKER V3
+ *
+ * Generates 8 candidate PPG signals, scores each by SQI metrics,
+ * applies winner-take-all with temporal hysteresis. No simulation —
+ * pure competitive extraction.
+ *
+ * V3 adds chrominance-based candidates that follow the well-validated
+ * remote-PPG literature:
+ *   - CHROM   (de Haan & Jeanne 2013 IEEE TBME) — rotated R-G plane
+ *   - POS     (Wang et al. 2017 IEEE TBME)      — plane orthogonal to skin
+ * These dramatically improve robustness when finger-tip pressure or
+ * ambient light makes a single-channel source noisy. They feed the
+ * same SQI gate as the legacy R/G/RG candidates, so the ranker still
+ * picks whatever is best at any given moment.
  */
 import { RingBuffer } from './RingBuffer';
 
@@ -32,9 +41,12 @@ export class SignalSourceRanker {
   private readonly HYSTERESIS_FRAMES = 90; // ~3s at 30fps
   private readonly BUFFER_SIZE = 180;
   private frameCount = 0;
+  // Online mean-square trackers for CHROM/POS adaptive ratios.
+  private chromXMS = 0; private chromYMS = 0;
+  private posS1MS = 0;  private posS2MS = 0;
 
   constructor() {
-    const labels = ['R', 'G', 'RG', 'absR', 'absG', 'diffRG'];
+    const labels = ['R', 'G', 'RG', 'absR', 'absG', 'diffRG', 'CHROM', 'POS'];
     for (const l of labels) {
       this.sources.set(l, {
         buffer: new RingBuffer(this.BUFFER_SIZE),
@@ -72,6 +84,34 @@ export class SignalSourceRanker {
     if (rawG > 245) { gW *= 0.4; rW = 1 - gW; }
     if (rawR > 245) { rW *= 0.4; gW = 1 - rW; }
 
+    // ── Chrominance sources (rPPG literature) ────────────────────────
+    // Build mean-normalised colour channels:
+    //   Cn = C / mean(C) - 1
+    // and combine them on planes that minimise the specular component.
+    const rNorm2 = baseR > 10 ? (rawR - baseR) / baseR : 0;  // signed Cn
+    const gNorm2 = baseG > 10 ? (rawG - baseG) / baseG : 0;
+    const bNorm2 = baseB > 10 ? (rawB - baseB) / baseB : 0;
+
+    // CHROM (de Haan & Jeanne 2013): X = 3R - 2G; Y = 1.5R + G - 1.5B
+    // PPG ≈ X - α·Y, with α = std(X)/std(Y) (robust online ratio).
+    const X = 3 * rNorm2 - 2 * gNorm2;
+    const Y = 1.5 * rNorm2 + gNorm2 - 1.5 * bNorm2;
+    if (this.chromXMS === 0 && Math.abs(X) > 1e-6) this.chromXMS = X * X;
+    if (this.chromYMS === 0 && Math.abs(Y) > 1e-6) this.chromYMS = Y * Y;
+    this.chromXMS = this.chromXMS * 0.95 + X * X * 0.05;
+    this.chromYMS = this.chromYMS * 0.95 + Y * Y * 0.05;
+    const alpha = this.chromYMS > 1e-9 ? Math.sqrt(this.chromXMS / this.chromYMS) : 1;
+    const chromValue = X - alpha * Y;
+
+    // POS (Wang et al. 2017): plane orthogonal to skin tone in RGB.
+    // S1 = G - B; S2 = G + B - 2R; PPG ≈ S1 + (std(S1)/std(S2)) · S2
+    const S1 = gNorm2 - bNorm2;
+    const S2 = gNorm2 + bNorm2 - 2 * rNorm2;
+    this.posS1MS = this.posS1MS * 0.95 + S1 * S1 * 0.05;
+    this.posS2MS = this.posS2MS * 0.95 + S2 * S2 * 0.05;
+    const beta = this.posS2MS > 1e-9 ? Math.sqrt(this.posS1MS / this.posS2MS) : 1;
+    const posValue = S1 + beta * S2;
+
     const candidates: Record<string, number> = {
       R: rPulse * 3200,
       G: gPulse * 3200,
@@ -79,6 +119,8 @@ export class SignalSourceRanker {
       absR: baseR > 10 ? -Math.log((rawR + eps) / baseR) * 2000 : 0,
       absG: baseG > 10 ? -Math.log((rawG + eps) / baseG) * 2000 : 0,
       diffRG: (rPulse - gPulse) * 2400,
+      CHROM: chromValue * 2800,
+      POS: posValue * 2800,
     };
 
     // Push values to buffers
@@ -181,5 +223,7 @@ export class SignalSourceRanker {
     this.activeSource = 'RG';
     this.lastSwitchFrame = 0;
     this.frameCount = 0;
+    this.chromXMS = 0; this.chromYMS = 0;
+    this.posS1MS = 0;  this.posS2MS = 0;
   }
 }
