@@ -696,9 +696,13 @@ const Index = () => {
     }
 
     unstableFrameCounter.current = 0;
-    const smoothedBPM = applyEMA(emaRef.current.bpm, heartBeatResult.bpm);
-    emaRef.current.bpm = smoothedBPM;
-    setHeartRate(smoothedBPM);
+    // CRITICAL: Show RAW values when no stable contact - proves real measurement
+    // Only smooth when we have confirmed human signal (prevents fake "normal" values)
+    const displayBPM = stableHumanSignal 
+      ? applyEMA(emaRef.current.bpm, heartBeatResult.bpm)  // Smooth only with good signal
+      : heartBeatResult.bpm;  // RAW when uncertain - shows real measurement
+    emaRef.current.bpm = displayBPM;
+    setHeartRate(displayBPM);
 
     if (heartBeatResult.isPeak) {
       setBeatMarker(1);
@@ -852,28 +856,34 @@ const Index = () => {
       const vitals = processVitalSigns(lastSignal.filteredValue, usableRRData, beatInputs);
 
       const e = emaRef.current;
-      const smoothed: typeof vitals = {
-        ...vitals,
-        spo2: applyEMA(e.spo2, vitals.spo2),
-        glucose: applyEMA(e.glucose, vitals.glucose),
-        pressure: {
-          ...vitals.pressure,
-          systolic: applyEMA(e.systolic, vitals.pressure.systolic),
-          diastolic: applyEMA(e.diastolic, vitals.pressure.diastolic),
-        },
-        lipids: {
-          totalCholesterol: applyEMA(e.cholesterol, vitals.lipids.totalCholesterol),
-          triglycerides: applyEMA(e.triglycerides, vitals.lipids.triglycerides),
-        },
-      };
-      e.spo2 = smoothed.spo2;
-      e.glucose = smoothed.glucose;
-      e.systolic = smoothed.pressure.systolic;
-      e.diastolic = smoothed.pressure.diastolic;
-      e.cholesterol = smoothed.lipids.totalCholesterol;
-      e.triglycerides = smoothed.lipids.triglycerides;
+      // CRITICAL: RAW values when no stable contact - proves real measurement
+      // This exposes fake "normal" values that come from processing background noise
+      const displayVitals: typeof vitals = stableHumanSignal
+        ? {
+            // Smooth only with confirmed finger contact
+            ...vitals,
+            spo2: applyEMA(e.spo2, vitals.spo2),
+            glucose: applyEMA(e.glucose, vitals.glucose),
+            pressure: {
+              ...vitals.pressure,
+              systolic: applyEMA(e.systolic, vitals.pressure.systolic),
+              diastolic: applyEMA(e.diastolic, vitals.pressure.diastolic),
+            },
+            lipids: {
+              totalCholesterol: applyEMA(e.cholesterol, vitals.lipids.totalCholesterol),
+              triglycerides: applyEMA(e.triglycerides, vitals.lipids.triglycerides),
+            },
+          }
+        : vitals; // RAW when uncertain - shows real measurement from camera
+      
+      e.spo2 = displayVitals.spo2;
+      e.glucose = displayVitals.glucose;
+      e.systolic = displayVitals.pressure.systolic;
+      e.diastolic = displayVitals.pressure.diastolic;
+      e.cholesterol = displayVitals.lipids.totalCholesterol;
+      e.triglycerides = displayVitals.lipids.triglycerides;
 
-      setVitalSigns(smoothed);
+      setVitalSigns(displayVitals);
 
       if (usableRRData && vitals.measurementConfidence !== 'INVALID') {
         const arrhythmiaStatus = vitals.arrhythmiaStatus;
