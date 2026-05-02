@@ -891,6 +891,57 @@ const Index = () => {
               {row('ROI alert', roiAlertActive ? `ON (streak ${lowStabilityStreakRef.current})` : `off (low ${lowStabilityStreakRef.current}/good ${goodStabilityStreakRef.current})`)}
               {row('beat ROI', `${fmt(lastBeatRoiScoreRef.current, 2)} · drift ${fmt(lastBeatDriftRef.current, 2)}`)}
               {row('audit log', String(roiAuditLogRef.current.length))}
+              {/* ── Forensic session panel ────────────────────────────── */}
+              {(() => {
+                const rec = recorderRef.current;
+                if (!rec) return null;
+                const s = rec.liveStats();
+                void recorderTick; // re-render hook
+                const onExport = async () => {
+                  if (exporting || !recorderRef.current) return;
+                  setExporting(true);
+                  try {
+                    recorderRef.current.finalize();
+                    const bundle = await recorderRef.current.buildBundle();
+                    downloadForensicBundle(bundle, recorderRef.current.sessionId);
+                    setLastSeal({ sha: bundle.sha256, sessionId: recorderRef.current.sessionId });
+                  } catch (err) {
+                    console.error('[FORENSIC] export failed', err);
+                  } finally {
+                    setExporting(false);
+                  }
+                };
+                return (
+                  <div className="mt-2 pt-1 border-t border-amber-500/30">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-amber-400 font-bold tracking-wider text-[9px]">FORENSIC SESSION</span>
+                      <button
+                        type="button"
+                        onClick={onExport}
+                        disabled={exporting || s.samples === 0}
+                        className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                        title="Sealed JSON + 3× CSV + report.txt + SHA-256"
+                      >
+                        {exporting ? '…' : 'EXPORT'}
+                      </button>
+                    </div>
+                    <div className="text-[9px] text-slate-400 leading-tight break-all">
+                      sid {s.sessionId.slice(0, 8)}…
+                    </div>
+                    {row('dur (s)', s.durationS.toFixed(1))}
+                    {row('samples', `${s.samples} (✓${s.valid} ✗${s.rejected})`)}
+                    {row('drop samp', String(s.droppedSamples))}
+                    {row('beats rec', String(s.beats))}
+                    {row('events', String(s.events))}
+                    {row('FPS avg', s.fpsAvg.toFixed(1))}
+                    {lastSeal && (
+                      <div className="mt-1 text-[9px] text-emerald-400 break-all">
+                        ✓ sealed sha256:{lastSeal.sha.slice(0, 12)}…
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {/* ── ROI audit timeline (last 16) ─────────────────────── */}
               {(() => {
                 const log = roiAuditLogRef.current;
