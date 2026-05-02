@@ -123,12 +123,21 @@ export class HeartBeatProcessorOptimized {
     const hyst = parameterRegistry.getSignalProcessingParam('beatDetection.hysteresisFactor');
 
     this.config = {
-      refractoryHardMs: refractoryHard ?? 250,
-      refractorySoftFactor: refractorySoft ?? 0.55,
+      // Hard refractory raised 250 → 300ms (max 200 BPM) — kills the
+      // very-short-IBI doubles caused by the dicrotic notch.
+      refractoryHardMs: Math.max(refractoryHard ?? 250, 300),
+      // Soft refractory raised so beats inside 70% of the expected RR
+      // are scrutinised instead of accepted on morphology alone.
+      refractorySoftFactor: Math.max(refractorySoft ?? 0.55, 0.70),
       minBPM: 30,
-      maxBPM: 220,
+      maxBPM: 200,
       adaptiveThresholdFactor: adaptive ?? 0.6,
-      hysteresisFactor: hyst ?? 0.3,
+      // Hysteresis raised 0.3 → 0.45 so the valley threshold sits
+      // ABOVE typical dicrotic notches (which dip ~50-65% of systolic
+      // amplitude). Without this the state-machine resets at every
+      // notch and counts the dicrotic rebound as a new systolic peak,
+      // doubling the BPM.
+      hysteresisFactor: Math.max(hyst ?? 0.3, 0.45),
       kalmanProcessNoise: 0.01,
       kalmanMeasurementNoise: 0.1,
       templateWindowSize: 30,
@@ -591,7 +600,16 @@ export class HeartBeatProcessorOptimized {
       return { accepted: false, reason: 'refractory_hard' };
     }
     if (expectedRR > 0 && timeSinceLast < expectedRR * this.config.refractorySoftFactor) {
-      if (c.morphologyScore < 70) {
+      // Inside soft refractory: this is the *dicrotic notch* danger zone.
+      // Zong et al. 2003 and Charlton 2022 both showed the dicrotic
+      // notch is rejected by SSF (its slope-sum on the diastolic
+      // upstroke is ~3-5× smaller than on the systolic upstroke).
+      // Therefore: inside soft refractory we REQUIRE SSF support.
+      if (c.detectorAgreement < 0.9) {
+        this.doublePeakCount++;
+        return { accepted: false, reason: 'dicrotic_notch_suspect' };
+      }
+      if (c.morphologyScore < 60) {
         this.doublePeakCount++;
         return { accepted: false, reason: 'double_peak_suspect' };
       }
@@ -670,7 +688,23 @@ export class HeartBeatProcessorOptimized {
     const peakDomainReliable = hasEnoughPeaks && this.getAvgBeatSQI() > 40;
 
     if (peakDomainReliable && fromMedianIBI > 0) {
-      const peakBpm = fromTrimmedIBI > 0 ? fromTrimmedIBI : fromMedianIBI;
+      let peakBpm = fromTrimmedIBI > 0 ? fromTrimmedIBI : fromMedianIBI;
+
+      // Harmonic-ambiguity check: if the peak-derived BPM is ~2× the
+      // autocorrelation BPM, the peak detector is almost certainly
+      // counting dicrotic notches. Trust autocorrelation in that case.
+      // (Classic "frequency doubling" failure mode of threshold
+      // detectors on PPG — Charlton 2022 §IV-C.)
+      if (fromAutocorrelation > 0) {
+        const ratio = peakBpm / fromAutocorrelation;
+        if (ratio > 1.7 && ratio < 2.3) {
+          peakBpm = fromAutocorrelation;
+        } else if (ratio > 0.43 && ratio < 0.59) {
+          // Inverse case: peak BPM half of autocorrelation (missed beats)
+          peakBpm = fromAutocorrelation;
+        }
+      }
+
       if (fromAutocorrelation > 0 && Math.abs(peakBpm - fromAutocorrelation) < peakBpm * 0.15) {
         finalBpm = peakBpm * 0.75 + fromAutocorrelation * 0.25;
       } else {
