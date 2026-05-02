@@ -270,15 +270,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       sourceStability: this.sourceStability,
     });
 
-    // Gate: drift penalty + physiological PI gate.
-    // PI must be inside the physiological 0.3..8 % window; outside that
-    // window we declare LOW quality regardless of any other signal.
-    // Lima & Bakker 2005 (Intensive Care Med 31:1316-1326): healthy
-    // finger PI is 0.5-5 %; we widen to 0.3-8 % to allow weak perfusion
-    // but reject noise (PI ~30-40 %) and full contact loss (PI ~0).
+    // Gate: drift penalty + physiological PI sanity check.
+    // Lima & Bakker 2005: healthy finger PI is 0.5-5 %, but with
+    // weak perfusion or marginal pressure on a phone camera it can
+    // dip to 0.05 %. Anything > 12 % is the sensor saturating, not
+    // physiology — that gets penalised hard. The contact-state
+    // classifier is the primary contact gate; PI is a sanity check.
     const driftPenalty = this.positionDrifting ? 0.15 : 1.0;
-    const piPhysiological = perfusionIndex >= 0.3 && perfusionIndex <= 8;
-    const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && piPhysiological
+    const piPlausible = perfusionIndex >= 0.05 && perfusionIndex <= 12;
+    const gatedQuality = this.exportedContactState === 'STABLE_CONTACT' && piPlausible
       ? this.signalQuality * driftPenalty
       : Math.min(15, this.signalQuality * 0.35);
 
@@ -314,8 +314,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
           `${motionArtifact ? ' MOV' : ''} ${roi.fingerPosition || '?' }`,
-        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && piPhysiological,
-        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' && piPhysiological ? perfusionIndex : 0,
+        hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && piPlausible,
+        pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' && piPlausible ? perfusionIndex : 0,
       },
     });
   }

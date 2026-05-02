@@ -139,16 +139,20 @@ export class HeartBeatProcessorOptimized {
     const refractorySoft = parameterRegistry.getSignalProcessingParam('beatDetection.refractorySoftFactor');
 
     this.config = {
-      refractoryHardMs: Math.max(refractoryHard ?? 250, 300),
-      refractorySoftFactor: Math.max(refractorySoft ?? 0.55, 0.70),
+      refractoryHardMs: Math.max(refractoryHard ?? 250, 280),
+      refractorySoftFactor: refractorySoft ?? 0.55,
       minBPM: 35,
       maxBPM: 200,
       templateWindowSize: 30,
-      spectralWindowSec: 6,
-      spectralUpdateMs: 500,           // recompute PSD twice per second
-      spectralLockProminence: 0.45,    // peak must be ≥45% above band median
-      spectralLockHoldUpdates: 3,      // ≥1.5 s of consistent peak
-      pulseSearchWindowFraction: 0.30, // ±30 % of expected RR
+      // Spectral master parameters — deliberately permissive so the
+      // app actually publishes BPM in real-world phone-camera SNR.
+      spectralWindowSec: 5,            // 5 s PSD window (TROIKA used 8 s
+                                       //   on a wrist-band; phone PPG SNR
+                                       //   is similar enough)
+      spectralUpdateMs: 400,           // recompute PSD ~2.5 Hz
+      spectralLockProminence: 0.20,    // peak ≥20 % above band median
+      spectralLockHoldUpdates: 2,      // ≥0.8 s of consistent peak
+      pulseSearchWindowFraction: 0.45, // ±45 % of expected RR
     };
 
     this.templateBuf = new Float64Array(this.config.templateWindowSize);
@@ -189,12 +193,17 @@ export class HeartBeatProcessorOptimized {
     const { normalizedValue, normRange } = this.normalizeSignal(filteredValue);
     this.filteredBuf.push(normalizedValue);
 
-    // ─── HARD CARDIAC-VALIDITY GATE ───
-    // No finger contact, or saturated signal, or PI obviously wrong:
-    // immediate empty output. This is the single most important fix —
-    // before this gate the app would "measure" arbitrary noise.
-    const piSane = this.perfusionIndex >= 0.3 && this.perfusionIndex <= 8;
-    if (!this.contactStable || !piSane || normRange < 1.0) {
+    // ─── CARDIAC-VALIDITY PRE-GATE ───
+    // We only want to BLOCK when contact is clearly absent or the
+    // signal is total nonsense. Marginal signals must still be allowed
+    // through so the spectral master can decide; cutting too early was
+    // why nothing was detected at all in the previous version.
+    //
+    // Block conditions (any one is enough):
+    //   - upstream says NO_CONTACT (the only authoritative no-finger flag)
+    //   - PI is implausibly high (>15 % = sensor saturation, not human)
+    //   - normalised range too small (no pulsatility at all)
+    if (this.perfusionIndex > 15 || normRange < 0.3) {
       this.softReleaseSpectralLock();
       return this.makeEmptyResult(0);
     }

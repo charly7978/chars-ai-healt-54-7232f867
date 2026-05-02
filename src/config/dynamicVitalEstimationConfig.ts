@@ -16,9 +16,15 @@
  */
 export const STABLE_SIGNAL_GATE = {
   /** Minimum global SQI (0-100) at which signal is considered HUMAN. */
-  MIN_QUALITY: 12,
-  /** Minimum perfusion index (AC/DC fraction) for any AC/DC math. */
-  MIN_PERFUSION: 0.005,
+  MIN_QUALITY: 8,
+  /**
+   * Minimum perfusion index in *percent* (0-100), matching the units
+   * actually published by PPGSignalProcessor.calculatePerfusionIndex
+   * (which multiplies AC/DC by 100). Lima & Bakker 2005 puts healthy
+   * fingertip PI at 0.5-5 %; we accept down to 0.05 % so that weak-
+   * perfusion users (cold hands, dark skin) are not locked out.
+   */
+  MIN_PERFUSION: 0.05,
   /** Required upstream contact label. */
   REQUIRED_CONTACT: 'STABLE_CONTACT' as const,
 } as const;
