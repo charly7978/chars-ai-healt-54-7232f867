@@ -54,7 +54,7 @@ export class ArrhythmiaDetector {
   private rrBuffer: number[] = [];
   private readonly MAX_RR_BUFFER = 40; // ~30 seconds at 60 BPM
   private lastAnalysisTime = 0;
-  private readonly ANALYSIS_INTERVAL_MS = 5000; // Analyze every 5 seconds
+  private readonly ANALYSIS_INTERVAL_MS = 2000; // Analyze every 2 seconds (faster detection)
   
   private thresholds: ArrhythmiaThresholds;
   
@@ -76,7 +76,7 @@ export class ArrhythmiaDetector {
       prematureDeviationThreshold: rhythmConfig?.prematureThreshold ?? 0.25, // 25% deviation
       bradycardiaBPM: 50,   // Adult resting threshold
       tachycardiaBPM: 100,  // Adult resting threshold
-      minIntervalsForAnalysis: 8, // Need at least 8 intervals
+      minIntervalsForAnalysis: 5, // Need at least 5 intervals (faster detection)
     };
     
     console.log('[ArrhythmiaDetector] Initialized with registry thresholds:', this.thresholds);
@@ -158,7 +158,11 @@ export class ArrhythmiaDetector {
     const bpm = 60000 / metrics.meanRR;
     let result: ArrhythmiaEvidence;
     
+    // DEBUG: Log metrics for troubleshooting
+    console.log(`[ArrhythmiaDetector] BPM:${bpm.toFixed(1)} RMSSD:${rmssd.toFixed(1)} pNN50:${pnn50.toFixed(1)}% CV:${cv.toFixed(3)} IR:${irregularityScore.toFixed(3)} PREM:${prematureCount}`);
+    
     if (this.isAFibPattern(irregularityScore, rmssd, cv)) {
+      console.log('[ArrhythmiaDetector] AFIB DETECTED!');
       result = {
         detected: true,
         type: 'AFIB_SUSPICION',
@@ -210,6 +214,7 @@ export class ArrhythmiaDetector {
       };
     } else {
       result = this.createNoArrhythmiaEvidence(metrics, timestamp);
+      console.log('[ArrhythmiaDetector] No arrhythmia - SINUS rhythm');
     }
     
     // Log for forensic trace

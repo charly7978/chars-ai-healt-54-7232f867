@@ -118,10 +118,14 @@ export const useHeartBeatProcessorOptimized = () => {
     // Analyze arrhythmia if beat detected with valid RR interval
     if (arrhythmiaDetectorRef.current && result.isPeak && result.rrData?.intervals?.length > 0) {
       const lastRR = result.rrData.intervals[result.rrData.intervals.length - 1];
-      const evidence = arrhythmiaDetectorRef.current.processBeat(lastRR, currentTime);
-      if (evidence) {
-        setArrhythmiaEvidence(evidence);
-      }
+      const newEvidence = arrhythmiaDetectorRef.current.processBeat(lastRR, currentTime);
+      // CRITICAL: Update with new evidence OR refresh last evidence to ensure UI updates
+      setArrhythmiaEvidence(prev => {
+        if (newEvidence) return newEvidence; // New analysis result
+        // If no new analysis (throttled), keep previous but add stale flag
+        if (prev && currentTime - prev.timestamp < 10000) return prev; // Keep if < 10s old
+        return null; // Clear if too old
+      });
     }
 
     // Update state with hysteresis to prevent flickering
