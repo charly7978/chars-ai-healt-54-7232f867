@@ -12,6 +12,10 @@ import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  ForensicSessionRecorder,
+  downloadForensicBundle,
+} from "@/modules/forensic/ForensicSessionRecorder";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -58,6 +62,11 @@ const Index = () => {
   const totalBeatsRef = useRef(0);
   const arrhythmiaBeatsRef = useRef(0);
   const lastArrhythmiaCountForBeatsRef = useRef(0);
+  // ── Forensic session recorder (instantiated per session) ─────────────
+  const recorderRef = useRef<ForensicSessionRecorder | null>(null);
+  const [recorderTick, setRecorderTick] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  const [lastSeal, setLastSeal] = useState<{ sha: string; sessionId: string } | null>(null);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
@@ -318,6 +327,9 @@ const Index = () => {
     roiAuditLogRef.current = [];
     setRoiAlertActive(false);
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
+    // Spin up a fresh forensic recorder for this session.
+    recorderRef.current = new ForensicSessionRecorder({ algorithmVersion: 'ppg-web/2026.05' });
+    setLastSeal(null);
     startProcessing();
     setIsCameraOn(true);
     setIsMonitoring(true);
@@ -335,6 +347,22 @@ const Index = () => {
       const video = cameraRef.current?.getVideoElement();
       if (video && video.readyState >= 2) {
         console.log('✅ Video listo:', video.videoWidth, 'x', video.videoHeight);
+        const diag = cameraRef.current?.getDiagnostics();
+        if (diag && recorderRef.current) {
+          recorderRef.current.attachCameraSnapshot({
+            deviceLabel: diag.deviceLabel,
+            cameraId: null,
+            hasTorch: diag.hasTorch,
+            torchActive: diag.torchActive,
+            resolution: diag.resolution,
+            realFrameRate: diag.realFrameRate,
+            exposureLocked: diag.exposureLocked,
+            wbLocked: diag.wbLocked,
+            focusLocked: diag.focusLocked,
+            isoValue: diag.isoValue,
+            supportedConstraints: diag.supportedConstraints,
+          });
+        }
         startFrameLoop();
       } else {
         const checkReady = setInterval(() => {
@@ -381,6 +409,9 @@ const Index = () => {
     frameTimestampHistoryRef.current = [];
     if (savedResults) setVitalSigns(savedResults);
     setShowResults(true);
+    // Seal the forensic session. The bundle stays in memory until the
+    // operator presses EXPORT — we never auto-download.
+    recorderRef.current?.finalize();
     const total = totalBeatsRef.current;
     const arrBeats = arrhythmiaBeatsRef.current;
     setMeasurementSummary({
@@ -429,6 +460,9 @@ const Index = () => {
     setHeartbeatSignal(0);
     setBeatMarker(0);
     setRRIntervals([]);
+    // Drop the recorder; a fresh one is built on next startMonitoring.
+    recorderRef.current = null;
+    setLastSeal(null);
     setVitalSigns({ 
       spo2: 0,
       glucose: 0,
@@ -487,6 +521,22 @@ const Index = () => {
 
     setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
 
+    // ── Forensic ingestion: every signal point is recorded verbatim. ──
+    // Validity flag mirrors the gating rule above; samples are NEVER muted
+    // before reaching the recorder so an auditor can see the bad ones too.
+    if (recorderRef.current) {
+      recorderRef.current.pushSample({
+        timestampMs: lastSignal.timestamp,
+        raw: lastSignal.rawValue,
+        filtered: lastSignal.filteredValue,
+        displayValue: heartBeatResult.filteredValue,
+        sqi: lastSignal.quality || 0,
+        perfusionIndex: lastSignal.perfusionIndex || 0,
+        motionScore: lastSignal.motionArtifact ? 1 : 0,
+        valid: stableHumanSignal,
+      });
+    }
+
     if (!stableHumanSignal) {
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
@@ -534,6 +584,24 @@ const Index = () => {
         lastArrhythmiaCountForBeatsRef.current = currentArrCount;
       }
 
+      // Forensic beat record. Type degrades to SUSPECT_PREMATURE if the
+      // global arrhythmia counter ticked on this beat. We never invent an
+      // RR — we only forward what the heart-beat engine produced.
+      if (recorderRef.current) {
+        const intervals = heartBeatResult.rrData?.intervals || [];
+        const rrMs = intervals.length > 0 ? intervals[intervals.length - 1] : null;
+        const isArrThis = currentArrCount > (lastArrhythmiaCountForBeatsRef.current - 1);
+        recorderRef.current.pushBeat({
+          timestampMs: lastSignal.timestamp,
+          amplitude: heartBeatResult.filteredValue,
+          rrMs: rrMs,
+          bpmInstant: rrMs && rrMs > 0 ? 60000 / rrMs : null,
+          quality: heartBeatResult.beatSQI || 0,
+          type: isArrThis ? 'SUSPECT_PREMATURE' : 'NORMAL',
+          reason: isArrThis ? 'arrhythmia-counter-tick' : 'consensus',
+        });
+      }
+
       // ── Per-beat ROI stability sampling ────────────────────────────
       // Re-uses the same formula as the HUD to keep one source of truth.
       const driftPenaltyBeat = Math.min(1, Math.max(0, (positionQuality.positionDrift || 0) / 0.30));
@@ -567,6 +635,10 @@ const Index = () => {
           }
           // Forensic console trace (kept terse, single line, structured).
           console.warn('[ROI-AUDIT] LOW_STABILITY_TRIGGER', entry);
+          recorderRef.current?.pushEvent('ROI_ALERT_TRIGGER', {
+            roiScore: entry.roiScore, drift: entry.drift,
+            streak: entry.streak, beatIndex: entry.beatIndex,
+          });
         }
       } else {
         goodStabilityStreakRef.current++;
@@ -588,6 +660,10 @@ const Index = () => {
             roiAuditLogRef.current.shift();
           }
           console.info('[ROI-AUDIT] STABILITY_RECOVERED', entry);
+          recorderRef.current?.pushEvent('ROI_ALERT_CLEAR', {
+            roiScore: entry.roiScore, drift: entry.drift,
+            streak: entry.streak, beatIndex: entry.beatIndex,
+          });
         }
         if (goodStabilityStreakRef.current >= ROI_STABILITY_RECOVER_BEATS) {
           lowStabilityStreakRef.current = 0;
@@ -818,6 +894,58 @@ const Index = () => {
               {row('ROI alert', roiAlertActive ? `ON (streak ${lowStabilityStreakRef.current})` : `off (low ${lowStabilityStreakRef.current}/good ${goodStabilityStreakRef.current})`)}
               {row('beat ROI', `${fmt(lastBeatRoiScoreRef.current, 2)} · drift ${fmt(lastBeatDriftRef.current, 2)}`)}
               {row('audit log', String(roiAuditLogRef.current.length))}
+              {/* ── Forensic session panel ────────────────────────────── */}
+              {(() => {
+                const rec = recorderRef.current;
+                if (!rec) return null;
+                const s = rec.liveStats();
+                void recorderTick;   // future-proof manual tick
+                void telemetryTick;  // re-render at 3 Hz with the rest of the panel
+                const onExport = async () => {
+                  if (exporting || !recorderRef.current) return;
+                  setExporting(true);
+                  try {
+                    recorderRef.current.finalize();
+                    const bundle = await recorderRef.current.buildBundle();
+                    downloadForensicBundle(bundle, recorderRef.current.sessionId);
+                    setLastSeal({ sha: bundle.sha256, sessionId: recorderRef.current.sessionId });
+                  } catch (err) {
+                    console.error('[FORENSIC] export failed', err);
+                  } finally {
+                    setExporting(false);
+                  }
+                };
+                return (
+                  <div className="mt-2 pt-1 border-t border-amber-500/30">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-amber-400 font-bold tracking-wider text-[9px]">FORENSIC SESSION</span>
+                      <button
+                        type="button"
+                        onClick={onExport}
+                        disabled={exporting || s.samples === 0}
+                        className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-500/40 text-amber-300 hover:bg-amber-500/20 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                        title="Sealed JSON + 3× CSV + report.txt + SHA-256"
+                      >
+                        {exporting ? '…' : 'EXPORT'}
+                      </button>
+                    </div>
+                    <div className="text-[9px] text-slate-400 leading-tight break-all">
+                      sid {s.sessionId.slice(0, 8)}…
+                    </div>
+                    {row('dur (s)', s.durationS.toFixed(1))}
+                    {row('samples', `${s.samples} (✓${s.valid} ✗${s.rejected})`)}
+                    {row('drop samp', String(s.droppedSamples))}
+                    {row('beats rec', String(s.beats))}
+                    {row('events', String(s.events))}
+                    {row('FPS avg', s.fpsAvg.toFixed(1))}
+                    {lastSeal && (
+                      <div className="mt-1 text-[9px] text-emerald-400 break-all">
+                        ✓ sealed sha256:{lastSeal.sha.slice(0, 12)}…
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {/* ── ROI audit timeline (last 16) ─────────────────────── */}
               {(() => {
                 const log = roiAuditLogRef.current;
