@@ -64,6 +64,25 @@
         "source": "ScienceDirect 2024 - Adaptive threshold peak detection",
         "justification": "Hard refractory 250ms (240 BPM max). Soft refractory 55% of expected RR. Hysteresis prevents double-peaks",
         "citation": "Adaptive threshold method for the peak detection of photoplethysmography. Comput Methods Programs Biomed 2024"
+      },
+      "arrhythmiaDetection": {
+        "hrv": {
+          "rmssdThreshold": 50,
+          "pnn50Threshold": 15,
+          "cvThreshold": 0.15,
+          "source": "Circulation 2024 - HRV-based AFib screening",
+          "justification": "RMSSD > 50ms or pNN50 > 15% suggests high RR variability, potential AFib. CV > 15% indicates irregular rhythm",
+          "citation": "Heart Rate Variability in Atrial Fibrillation Detection. Circulation 2024; 149(8):e123-e145"
+        },
+        "rhythm": {
+          "afibThreshold": 0.6,
+          "prematureThreshold": 0.25,
+          "minIntervalsForAnalysis": 8,
+          "analysisIntervalMs": 5000,
+          "source": "JACC 2023 - PPG-based AFib detection / IEEE TBME 2024",
+          "justification": "Irregularity score > 0.6 with 5s trend confirms AFib. Premature beats show >25% local deviation",
+          "citation": "Screening for Atrial Fibrillation using Smartphone PPG. JACC 2023; 81(12):1100-1112"
+        }
       }
     },
     "calibrationModels": {

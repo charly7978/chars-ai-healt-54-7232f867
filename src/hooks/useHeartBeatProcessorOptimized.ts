@@ -15,14 +15,17 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartBeatProcessorOptimized } from '../modules/HeartBeatProcessorOptimized';
+import { ArrhythmiaDetector, type ArrhythmiaEvidence } from '../modules/arrhythmia/ArrhythmiaDetector';
 import type { ContactState } from '../types/signal';
 import type { HeartBeatResult } from '../types/beat';
 
 export const useHeartBeatProcessorOptimized = () => {
   const processorRef = useRef<HeartBeatProcessorOptimized | null>(null);
+  const arrhythmiaDetectorRef = useRef<ArrhythmiaDetector | null>(null);
   const [currentBPM, setCurrentBPM] = useState<number>(0);
   const [confidence, setConfidence] = useState<number>(0);
   const [signalQuality, setSignalQuality] = useState<number>(0);
+  const [arrhythmiaEvidence, setArrhythmiaEvidence] = useState<ArrhythmiaEvidence | null>(null);
   const [lastResult, setLastResult] = useState<HeartBeatResult | null>(null);
 
   const sessionIdRef = useRef<string>('');
@@ -39,9 +42,10 @@ export const useHeartBeatProcessorOptimized = () => {
     sessionIdRef.current = `hb_opt_${t}_${p}`;
     
     processorRef.current = new HeartBeatProcessorOptimized();
+    arrhythmiaDetectorRef.current = new ArrhythmiaDetector();
     processingStateRef.current = 'ACTIVE';
     
-    console.log('[useHeartBeatProcessorOptimized] Initialized with Kalman filtering and adaptive thresholds');
+    console.log('[useHeartBeatProcessorOptimized] Initialized with Kalman filtering, adaptive thresholds, and arrhythmia detection');
 
     return () => {
       if (processorRef.current) {
@@ -111,6 +115,15 @@ export const useHeartBeatProcessorOptimized = () => {
 
     setLastResult(result);
 
+    // Analyze arrhythmia if beat detected with valid RR interval
+    if (arrhythmiaDetectorRef.current && result.isPeak && result.rrData?.intervals?.length > 0) {
+      const lastRR = result.rrData.intervals[result.rrData.intervals.length - 1];
+      const evidence = arrhythmiaDetectorRef.current.processBeat(lastRR, currentTime);
+      if (evidence) {
+        setArrhythmiaEvidence(evidence);
+      }
+    }
+
     // Update state with hysteresis to prevent flickering
     const roundedSQI = Math.round(result.sqi);
     setSignalQuality(roundedSQI);
@@ -136,10 +149,12 @@ export const useHeartBeatProcessorOptimized = () => {
     processingStateRef.current = 'RESETTING';
 
     if (processorRef.current) processorRef.current.reset();
+    if (arrhythmiaDetectorRef.current) arrhythmiaDetectorRef.current.reset();
 
     setCurrentBPM(0);
     setConfidence(0);
     setSignalQuality(0);
+    setArrhythmiaEvidence(null);
     setLastResult(null);
     lastProcessTimeRef.current = 0;
     processedSignalsRef.current = 0;
@@ -148,10 +163,10 @@ export const useHeartBeatProcessorOptimized = () => {
     processingStateRef.current = 'ACTIVE';
   }, []);
 
-  const setArrhythmiaState = useCallback((_isArrhythmiaDetected: boolean) => {
-    // Placeholder for arrhythmia integration
-    // Optimized processor focuses on beat detection quality
-  }, []);
+  // Get current arrhythmia status for UI
+  const getArrhythmiaStatus = useCallback((): ArrhythmiaEvidence | null => {
+    return arrhythmiaEvidence;
+  }, [arrhythmiaEvidence]);
 
   // Export RR intervals for HRV analysis
   const getRRIntervals = useCallback((): number[] => {
@@ -162,16 +177,17 @@ export const useHeartBeatProcessorOptimized = () => {
     currentBPM,
     confidence,
     signalQuality,
+    arrhythmiaEvidence,
     processSignal,
     reset,
-    setArrhythmiaState,
+    getArrhythmiaStatus,
     getRRIntervals,
     debugInfo: {
       sessionId: sessionIdRef.current,
       processingState: processingStateRef.current,
       processedSignals: processedSignalsRef.current,
       processor: 'HeartBeatProcessorOptimized',
-      features: ['KalmanFilter', 'AdaptiveThreshold', 'Butterworth4thOrder', 'TemplateMatching'],
+      features: ['KalmanFilter', 'AdaptiveThreshold', 'Butterworth4thOrder', 'TemplateMatching', 'ArrhythmiaDetection'],
     },
   };
 };
