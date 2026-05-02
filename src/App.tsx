@@ -1,7 +1,26 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
-import Index from "./pages/Index";
-import NotFound from "./pages/NotFound";
+
+// Lazy load heavy components for code splitting
+const Index = lazy(() => import("./pages/Index"));
+const NotFound = lazy(() => import("./pages/NotFound"));
+
+// Loading fallback component
+const PageLoader = () => (
+  <div style={{
+    display: 'flex', flexDirection: 'column', alignItems: 'center',
+    justifyContent: 'center', height: '100vh', background: '#000', color: '#fff',
+    fontFamily: 'system-ui', gap: '16px'
+  }}>
+    <div style={{
+      width: '40px', height: '40px', border: '3px solid #333',
+      borderTop: '3px solid #10b981', borderRadius: '50%',
+      animation: 'spin 1s linear infinite'
+    }} />
+    <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+    <p style={{ fontSize: '14px', color: '#94a3b8' }}>Cargando...</p>
+  </div>
+);
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -49,10 +68,12 @@ const App = () => {
   return (
     <ErrorBoundary>
       <Router>
-        <Routes>
-          <Route path="/" element={<Index />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/" element={<Index />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
       </Router>
     </ErrorBoundary>
   );
