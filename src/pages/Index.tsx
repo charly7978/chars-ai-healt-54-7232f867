@@ -515,6 +515,22 @@ const Index = () => {
 
     setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
 
+    // ── Forensic ingestion: every signal point is recorded verbatim. ──
+    // Validity flag mirrors the gating rule above; samples are NEVER muted
+    // before reaching the recorder so an auditor can see the bad ones too.
+    if (recorderRef.current) {
+      recorderRef.current.pushSample({
+        timestampMs: lastSignal.timestamp,
+        raw: lastSignal.rawValue,
+        filtered: lastSignal.filteredValue,
+        displayValue: heartBeatResult.filteredValue,
+        sqi: lastSignal.quality || 0,
+        perfusionIndex: lastSignal.perfusionIndex || 0,
+        motionScore: lastSignal.motionArtifact ? 1 : 0,
+        valid: stableHumanSignal,
+      });
+    }
+
     if (!stableHumanSignal) {
       unstableFrameCounter.current++;
       if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
