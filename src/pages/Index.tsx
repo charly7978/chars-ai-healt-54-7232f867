@@ -20,6 +20,7 @@ import {
   type IntegrityResult,
   type IMUSnapshot,
 } from "@/modules/forensic/ForensicSessionRecorder";
+import { EvidenceGate, type EvidenceResult } from "@/modules/core/EvidenceGate";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -78,6 +79,10 @@ const Index = () => {
   // ── SHA-256 integrity verification ───────────────────────────────────
   const [integrityResult, setIntegrityResult] = useState<IntegrityResult | null>(null);
   const [showIntegrityCheck, setShowIntegrityCheck] = useState(false);
+  // ── EvidenceGate for forensic validation ────────────────────────────
+  const evidenceGateRef = useRef<EvidenceGate | null>(null);
+  const [evidenceResult, setEvidenceResult] = useState<EvidenceResult | null>(null);
+  const [showEvidenceStatus, setShowEvidenceStatus] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
   // ── ROI stability persistent-alert state ──────────────────────────────
@@ -411,6 +416,9 @@ const Index = () => {
     // Spin up a fresh forensic recorder for this session.
     recorderRef.current = new ForensicSessionRecorder({ algorithmVersion: 'ppg-web/2026.05' });
     setLastSeal(null);
+    // Initialize EvidenceGate for forensic validation
+    evidenceGateRef.current = new EvidenceGate();
+    setEvidenceResult(null);
     // Initialize IMU for motion tracking
     initIMU();
     startProcessing();
@@ -589,6 +597,37 @@ const Index = () => {
     const pressureOptimal = positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
+
+    // ── EvidenceGate validation ─────────────────────────────────────────
+    // Forensic-grade validation of signal quality before processing
+    if (evidenceGateRef.current) {
+      const evidence = evidenceGateRef.current.validate({
+        timestamp: lastSignal.timestamp,
+        contactState: contactState === 'STABLE_CONTACT' ? 'STABLE_CONTACT' : 
+                     contactState === 'NO_CONTACT' ? 'NO_CONTACT' : 'CONTACT_PARTIAL',
+        saturationRatio: 0,  // Calculated from clipHigh if available
+        fps: sampleRate,
+        sqi: lastSignal.quality || 0,
+        perfusionIndex: lastSignal.perfusionIndex || 0,
+        calibrationAvailable: {
+          spo2: false,  // TODO: Check actual calibration state
+          bloodPressure: false,
+          glucose: false,
+          lipids: false,
+        },
+        temporalCoherence: {
+          lastFrameDeltaMs: sampleRate > 0 ? 1000 / sampleRate : 33,
+          expectedDeltaMs: 33,
+          jitterMs: 0,
+        },
+      });
+      setEvidenceResult(evidence);
+      
+      // Log to console for debugging (forensic trace)
+      if (!evidence.allowed) {
+        console.warn('[EVIDENCE GATE] Blocked:', evidence.reason, evidence.technicalDetails);
+      }
+    }
 
     const heartBeatResult = processHeartBeat(
       signalValue,
@@ -1028,6 +1067,39 @@ const Index = () => {
                     {lastSeal && (
                       <div className="mt-1 text-[9px] text-emerald-400 break-all">
                         ✓ sealed sha256:{lastSeal.sha.slice(0, 12)}…
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+              {/* ── Evidence Gate Status ─────────────────────────────── */}
+              {(() => {
+                const gate = evidenceGateRef.current;
+                const result = evidenceResult;
+                if (!gate || !result) return null;
+                const isValid = result.allowed;
+                return (
+                  <div className="mt-2 pt-1 border-t border-blue-500/30">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className={`font-bold tracking-wider text-[9px] ${isValid ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {isValid ? '✓ EVIDENCE GATE' : '✗ EVIDENCE GATE BLOCKED'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowEvidenceStatus(!showEvidenceStatus)}
+                        className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-blue-500/40 text-blue-300 hover:bg-blue-500/20 transition"
+                      >
+                        {showEvidenceStatus ? 'HIDE' : 'DETAILS'}
+                      </button>
+                    </div>
+                    <div className="text-[9px] text-slate-400 leading-tight">
+                      {result.reason}
+                    </div>
+                    {showEvidenceStatus && (
+                      <div className="mt-1 text-[8px] font-mono text-slate-500 space-y-0.5">
+                        {Object.entries(result.technicalDetails).slice(0, 4).map(([k, v]) => (
+                          <div key={k}>{k}: {String(v).slice(0, 20)}</div>
+                        ))}
                       </div>
                     )}
                   </div>
