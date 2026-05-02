@@ -235,13 +235,20 @@ export class HeartBeatProcessorOptimized {
       this.perfusionIndex = upstreamContext.perfusionIndex ?? 0;
     }
     
-    // Store raw and filtered signal
+    // Store signal - ALREADY FILTERED by PPGSignalProcessor upstream
+    // CRITICAL: Do NOT apply additional filtering here
     this.signalBuf.push(filteredValue);
     this.timestampBuf.push(now);
     
-    // Apply optimized bandpass filter
-    const filtered = this.applyBandpassFilter(filteredValue);
-    this.filteredBuf.push(filtered);
+    // NORMALIZE signal for consistent peak detection thresholds
+    // CRITICAL: All downstream detection uses normalized signal
+    const { normalizedValue, normRange } = this.normalizeSignal(filteredValue);
+    this.filteredBuf.push(normalizedValue);
+    
+    // Signal quality check: if range too small, not a valid PPG signal
+    if (normRange < 0.15) {
+      return this.makeEmptyResult(0);
+    }
     
     // Compute derivatives for morphology analysis
     this.computeDerivatives();
@@ -390,9 +397,16 @@ export class HeartBeatProcessorOptimized {
     const targetPeakThreshold = p10 + range * this.config.adaptiveThresholdFactor;
     const targetValleyThreshold = p10 + range * this.config.hysteresisFactor;
     
-    // Smooth threshold transitions
-    this.peakThreshold = this.peakThreshold * 0.9 + targetPeakThreshold * 0.1;
-    this.valleyThreshold = this.valleyThreshold * 0.9 + targetValleyThreshold * 0.1;
+    // CRITICAL FIX: Initialize directly on first calculation, then smooth
+    // Starting from 0 would take too long to accumulate meaningful threshold
+    if (this.peakThreshold === 0) {
+      this.peakThreshold = targetPeakThreshold;
+      this.valleyThreshold = targetValleyThreshold;
+    } else {
+      // Smooth threshold transitions after initialization
+      this.peakThreshold = this.peakThreshold * 0.9 + targetPeakThreshold * 0.1;
+      this.valleyThreshold = this.valleyThreshold * 0.9 + targetValleyThreshold * 0.1;
+    }
   }
 
   /**
@@ -1130,6 +1144,36 @@ export class HeartBeatProcessorOptimized {
       
       this.lastBeepTime = now;
     } catch {}
+  }
+
+  /**
+   * Normalize signal to consistent range for peak detection
+   * CRITICAL: All detection thresholds assume normalized signal
+   * Output range: approximately -60 to +60 (centered at 0)
+   */
+  private normalizeSignal(value: number): { normalizedValue: number; normRange: number } {
+    const windowLen = this.consecutivePeaks < 4 ? 90 : 150;
+    const n = Math.min(windowLen, this.signalBuf.length);
+    if (n < 10) return { normalizedValue: 0, normRange: 0 };
+    
+    // Calculate percentiles for robust range estimation
+    const samples: number[] = [];
+    for (let i = 0; i < n; i++) {
+      samples.push(this.signalBuf.get(this.signalBuf.length - n + i));
+    }
+    samples.sort((a, b) => a - b);
+    
+    const p10 = samples[Math.floor(n * 0.1)];
+    const p90 = samples[Math.floor(n * 0.9)];
+    const range = p90 - p10;
+    
+    if (range < 0.01) return { normalizedValue: 0, normRange: 0 };
+    
+    // Normalize to centered range
+    const clipped = Math.min(p90, Math.max(p10, value));
+    const normalizedValue = ((clipped - p10) / range - 0.5) * 120;
+    
+    return { normalizedValue, normRange: range };
   }
 
   private vibrate(): void {
