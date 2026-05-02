@@ -327,6 +327,9 @@ const Index = () => {
     roiAuditLogRef.current = [];
     setRoiAlertActive(false);
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
+    // Spin up a fresh forensic recorder for this session.
+    recorderRef.current = new ForensicSessionRecorder({ algorithmVersion: 'ppg-web/2026.05' });
+    setLastSeal(null);
     startProcessing();
     setIsCameraOn(true);
     setIsMonitoring(true);
