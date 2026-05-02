@@ -12,6 +12,10 @@ import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { toast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  ForensicSessionRecorder,
+  downloadForensicBundle,
+} from "@/modules/forensic/ForensicSessionRecorder";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -58,6 +62,11 @@ const Index = () => {
   const totalBeatsRef = useRef(0);
   const arrhythmiaBeatsRef = useRef(0);
   const lastArrhythmiaCountForBeatsRef = useRef(0);
+  // ── Forensic session recorder (instantiated per session) ─────────────
+  const recorderRef = useRef<ForensicSessionRecorder | null>(null);
+  const [recorderTick, setRecorderTick] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  const [lastSeal, setLastSeal] = useState<{ sha: string; sessionId: string } | null>(null);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
