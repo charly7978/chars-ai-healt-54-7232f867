@@ -347,6 +347,22 @@ const Index = () => {
       const video = cameraRef.current?.getVideoElement();
       if (video && video.readyState >= 2) {
         console.log('✅ Video listo:', video.videoWidth, 'x', video.videoHeight);
+        const diag = cameraRef.current?.getDiagnostics();
+        if (diag && recorderRef.current) {
+          recorderRef.current.attachCameraSnapshot({
+            deviceLabel: diag.deviceLabel,
+            cameraId: null,
+            hasTorch: diag.hasTorch,
+            torchActive: diag.torchActive,
+            resolution: diag.resolution,
+            realFrameRate: diag.realFrameRate,
+            exposureLocked: diag.exposureLocked,
+            wbLocked: diag.wbLocked,
+            focusLocked: diag.focusLocked,
+            isoValue: diag.isoValue,
+            supportedConstraints: diag.supportedConstraints,
+          });
+        }
         startFrameLoop();
       } else {
         const checkReady = setInterval(() => {
