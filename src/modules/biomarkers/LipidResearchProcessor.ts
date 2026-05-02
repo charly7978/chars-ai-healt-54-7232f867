@@ -1,13 +1,18 @@
 /**
  * LIPID RESEARCH PROCESSOR
  * 
- * Research-grade estimation of total cholesterol and triglycerides
- * from PPG morphology features. Always marked RESEARCH_ONLY.
+ * ⚠️ RESEARCH-GRADE ONLY - NOT FOR CLINICAL DIAGNOSIS ⚠️
+ * 
+ * This module provides an OPTICAL PROXY estimation of lipids from PPG
+ * morphology features. It does NOT measure blood lipids directly.
+ * Always marked RESEARCH_ONLY.
  * 
  * References:
  * - Ferizoli et al. 2024: Area-related features as strongest correlators
  * - Arguello-Prada et al. 2025: Pulse width multi-level + AI
  * - PWV and SI correlate with atherosclerosis/dyslipidemia
+ * 
+ * ⚠️ ALWAYS returns researchMode: true and appropriate enabledState
  */
 
 export interface LipidResult {
@@ -77,26 +82,29 @@ export class LipidResearchProcessor {
     if (featureCount < 4) return withheld;
 
     // ── Cholesterol model ──
-    let chol = 150.0;
-    chol += (f.stiffnessIndex - 6) * 8.0;
-    chol += (f.augmentationIndex - 50) * 0.45;
-    if (f.areaRatio > 0) chol += (f.areaRatio - 1.5) * 12.0;
-    chol += (0.3 - f.dicroticDepth) * 25;
-    if (f.pwvProxy > 0) chol += (f.pwvProxy - 7) * 4.0;
-    if (f.pw50Ms > 0) chol += (300 - f.pw50Ms) * 0.08;
-    if (f.pw25Ms > 0 && f.pw75Ms > 0) chol += (0.5 - f.pw75Ms / f.pw25Ms) * 15;
-    chol += (input.hr - 72) * 0.3;
-    if (input.rrVar.sdnn > 0) chol += Math.max(0, (50 - input.rrVar.sdnn)) * 0.35;
+    // Population baseline: 150 mg/dL - statistical center, NOT clinical target
+    // Calculates deviation from population reference values
+    let chol = 150.0;  // Population statistical center - NOT a clinical default
+    chol += (f.stiffnessIndex - 6) * 8.0;        // Ref: stiffnessIndex = 6
+    chol += (f.augmentationIndex - 50) * 0.45; // Ref: augmentationIndex = 50
+    if (f.areaRatio > 0) chol += (f.areaRatio - 1.5) * 12.0;  // Ref: areaRatio = 1.5
+    chol += (0.3 - f.dicroticDepth) * 25;        // Ref: dicroticDepth = 0.3
+    if (f.pwvProxy > 0) chol += (f.pwvProxy - 7) * 4.0;       // Ref: pwvProxy = 7
+    if (f.pw50Ms > 0) chol += (300 - f.pw50Ms) * 0.08;        // Ref: pw50Ms = 300
+    if (f.pw25Ms > 0 && f.pw75Ms > 0) chol += (0.5 - f.pw75Ms / f.pw25Ms) * 15; // Ref: ratio = 0.5
+    chol += (input.hr - 72) * 0.3;               // Ref: HR = 72
+    if (input.rrVar.sdnn > 0) chol += Math.max(0, (50 - input.rrVar.sdnn)) * 0.35; // Ref: SDNN = 50
     chol += this.cholOffset;
 
     // ── Triglycerides model ──
-    let trig = 120.0;
-    if (f.pw50Ms > 0) trig += (f.pw50Ms - 300) * 0.15;
-    if (f.diastolicTimeMs > 0) trig += (f.diastolicTimeMs - 400) * 0.06;
-    if (input.piGreen > 0) trig += (2 - input.piGreen) * 8;
-    trig += (input.hr - 72) * 0.4;
-    trig += (f.stiffnessIndex - 6) * 3.5;
-    if (input.rrVar.sdnn > 0 && input.rrVar.sdnn < 40) trig += (40 - input.rrVar.sdnn) * 0.5;
+    // Population baseline: 120 mg/dL - statistical center, NOT clinical target
+    let trig = 120.0;  // Population statistical center - NOT a clinical default
+    if (f.pw50Ms > 0) trig += (f.pw50Ms - 300) * 0.15;         // Ref: pw50Ms = 300
+    if (f.diastolicTimeMs > 0) trig += (f.diastolicTimeMs - 400) * 0.06; // Ref: diastolicTime = 400ms
+    if (input.piGreen > 0) trig += (2 - input.piGreen) * 8;   // Ref: PI = 2.0
+    trig += (input.hr - 72) * 0.4;               // Ref: HR = 72
+    trig += (f.stiffnessIndex - 6) * 3.5;        // Ref: stiffnessIndex = 6
+    if (input.rrVar.sdnn > 0 && input.rrVar.sdnn < 40) trig += (40 - input.rrVar.sdnn) * 0.5; // Ref: SDNN = 40
     trig += this.trigOffset;
 
     // Reject impossible

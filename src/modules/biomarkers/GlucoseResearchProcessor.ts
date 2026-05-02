@@ -1,8 +1,10 @@
 /**
  * GLUCOSE RESEARCH PROCESSOR
  * 
- * Research-grade glucose estimation from PPG morphology features.
- * NOT a clinical measurement — marked as RESEARCH_ONLY unless calibrated.
+ * ⚠️ RESEARCH-GRADE ONLY - NOT FOR CLINICAL DIAGNOSIS ⚠️
+ * 
+ * This module provides an OPTICAL PROXY estimation of glucose from PPG
+ * morphology features. It does NOT measure blood glucose directly.
  * 
  * Pipeline:
  * 1. Extract beat-level features (from PPGFeatureExtractor)
@@ -20,6 +22,8 @@
  * Key insight: PPG morphology features (SUT, PW, AI, PI, HRV)
  * correlate with blood glucose through vascular compliance and
  * blood viscosity changes. The model uses weighted combination of features.
+ * 
+ * ⚠️ ALWAYS returns researchMode: true and appropriate enabledState
  */
 
 export interface GlucoseResult {
@@ -56,8 +60,11 @@ interface CalibrationPoint {
 }
 
 // Population baseline coefficients (from literature meta-analysis)
+// ⚠️ These are population statistical centers for DEVIATION calculation,
+// NOT "normal values" to use as results. The intercept represents a
+// population average, NOT a clinical target or default output.
 const POP_COEFF = {
-  intercept: 95.0,
+  intercept: 95.0,       // Population statistical center - NOT a clinical default
   sutMs: 0.12,           // viscosity proxy
   pw50Ms: 0.04,          // morphology
   augIndex: 0.10,        // vascular stiffness
@@ -70,6 +77,22 @@ const POP_COEFF = {
   piGreen: -3.0,         // perfusion
   rgACRatio: 6.0,        // optical absorption
   pw75_25Ratio: 12.0,    // waveform shape = viscosity
+};
+
+// Reference centers for deviation calculation (NOT clinical targets)
+const REFERENCE_CENTERS = {
+  sutMs: 140,
+  pw50Ms: 320,
+  augmentationIndex: 45,
+  stiffnessIndex: 5.5,
+  dicroticDepth: 0.25,
+  areaRatio: 1.4,
+  hr: 72,
+  sdnn: 45,
+  rmssd: 35,
+  piGreen: 1.5,
+  rgACRatio: 1.0,
+  pw75_25Ratio: 0.55,
 };
 
 export class GlucoseResearchProcessor {
@@ -137,20 +160,22 @@ export class GlucoseResearchProcessor {
     if (featureCount < 5) return withheld;
 
     // ── Population model ──
+    // Calculate deviation from population reference centers
+    // This is a RESEARCH estimation, NOT a clinical measurement
     let glucose = POP_COEFF.intercept;
-    if (f.sutMs > 0) glucose += (f.sutMs - 140) * POP_COEFF.sutMs;
-    if (f.pw50Ms > 0) glucose += (f.pw50Ms - 320) * POP_COEFF.pw50Ms;
-    glucose += (f.augmentationIndex - 45) * POP_COEFF.augIndex;
-    glucose += (f.stiffnessIndex - 5.5) * POP_COEFF.stiffness;
-    glucose += (f.dicroticDepth - 0.25) * POP_COEFF.dicroticDepth;
-    if (f.areaRatio > 0) glucose += (f.areaRatio - 1.4) * POP_COEFF.areaRatio;
-    glucose += (input.hr - 72) * POP_COEFF.hr;
-    if (input.rrVar.sdnn > 0) glucose += (input.rrVar.sdnn - 45) * POP_COEFF.sdnn;
-    if (input.rrVar.rmssd > 0) glucose += (input.rrVar.rmssd - 35) * POP_COEFF.rmssd;
-    if (input.piGreen > 0) glucose += (input.piGreen - 1.5) * POP_COEFF.piGreen;
-    if (input.rgACRatio > 0) glucose += (input.rgACRatio - 1.0) * POP_COEFF.rgACRatio;
+    if (f.sutMs > 0) glucose += (f.sutMs - REFERENCE_CENTERS.sutMs) * POP_COEFF.sutMs;
+    if (f.pw50Ms > 0) glucose += (f.pw50Ms - REFERENCE_CENTERS.pw50Ms) * POP_COEFF.pw50Ms;
+    glucose += (f.augmentationIndex - REFERENCE_CENTERS.augmentationIndex) * POP_COEFF.augIndex;
+    glucose += (f.stiffnessIndex - REFERENCE_CENTERS.stiffnessIndex) * POP_COEFF.stiffness;
+    glucose += (f.dicroticDepth - REFERENCE_CENTERS.dicroticDepth) * POP_COEFF.dicroticDepth;
+    if (f.areaRatio > 0) glucose += (f.areaRatio - REFERENCE_CENTERS.areaRatio) * POP_COEFF.areaRatio;
+    glucose += (input.hr - REFERENCE_CENTERS.hr) * POP_COEFF.hr;
+    if (input.rrVar.sdnn > 0) glucose += (input.rrVar.sdnn - REFERENCE_CENTERS.sdnn) * POP_COEFF.sdnn;
+    if (input.rrVar.rmssd > 0) glucose += (input.rrVar.rmssd - REFERENCE_CENTERS.rmssd) * POP_COEFF.rmssd;
+    if (input.piGreen > 0) glucose += (input.piGreen - REFERENCE_CENTERS.piGreen) * POP_COEFF.piGreen;
+    if (input.rgACRatio > 0) glucose += (input.rgACRatio - REFERENCE_CENTERS.rgACRatio) * POP_COEFF.rgACRatio;
     if (f.pw25Ms > 0 && f.pw75Ms > 0) {
-      glucose += (f.pw75Ms / f.pw25Ms - 0.55) * POP_COEFF.pw75_25Ratio;
+      glucose += (f.pw75Ms / f.pw25Ms - REFERENCE_CENTERS.pw75_25Ratio) * POP_COEFF.pw75_25Ratio;
     }
 
     // ── Subject adaptation ──
@@ -237,12 +262,12 @@ export class GlucoseResearchProcessor {
 
   private predictPopulation(f: FeatureVector): number {
     let g = POP_COEFF.intercept;
-    if (f.sutMs > 0) g += (f.sutMs - 140) * POP_COEFF.sutMs;
-    if (f.pw50Ms > 0) g += (f.pw50Ms - 320) * POP_COEFF.pw50Ms;
-    g += (f.augmentationIndex - 45) * POP_COEFF.augIndex;
-    g += (f.stiffnessIndex - 5.5) * POP_COEFF.stiffness;
-    g += (f.hr - 72) * POP_COEFF.hr;
-    if (f.sdnn > 0) g += (f.sdnn - 45) * POP_COEFF.sdnn;
+    if (f.sutMs > 0) g += (f.sutMs - REFERENCE_CENTERS.sutMs) * POP_COEFF.sutMs;
+    if (f.pw50Ms > 0) g += (f.pw50Ms - REFERENCE_CENTERS.pw50Ms) * POP_COEFF.pw50Ms;
+    g += (f.augmentationIndex - REFERENCE_CENTERS.augmentationIndex) * POP_COEFF.augIndex;
+    g += (f.stiffnessIndex - REFERENCE_CENTERS.stiffnessIndex) * POP_COEFF.stiffness;
+    g += (f.hr - REFERENCE_CENTERS.hr) * POP_COEFF.hr;
+    if (f.sdnn > 0) g += (f.sdnn - REFERENCE_CENTERS.sdnn) * POP_COEFF.sdnn;
     return g;
   }
 

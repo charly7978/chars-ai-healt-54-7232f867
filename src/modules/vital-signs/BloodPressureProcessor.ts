@@ -10,8 +10,16 @@ export interface BPEstimate {
   featureQuality: number;
 }
 
+// ⚠️ PPG-derived blood pressure estimation coefficients
+// These are population statistical model coefficients for estimating
+// BP from PPG morphology features. The intercepts represent population
+// statistical centers, NOT "normal values" to use as results.
+// 
+// This is an ESTIMATION from optical signal morphology, NOT a direct
+// blood pressure measurement. Results must be marked with appropriate
+// confidence levels and calibration state.
 const SBP_COEFF = {
-  intercept: 82.0,
+  intercept: 82.0,  // Population statistical center - NOT a clinical default
   bDivA: -16.0,
   dDivA: 10.5,
   invSUT: 2500.0,
@@ -25,7 +33,7 @@ const SBP_COEFF = {
 };
 
 const DBP_COEFF = {
-  intercept: 42.0,
+  intercept: 42.0,  // Population statistical center - NOT a clinical default
   PW50: 0.10,
   DT: 0.030,
   RMSSD: -0.07,

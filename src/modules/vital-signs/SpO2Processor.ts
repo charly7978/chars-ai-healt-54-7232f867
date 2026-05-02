@@ -48,11 +48,14 @@ export class SpO2Processor {
   private readonly BEAT_RATIO_BUF = 8;
 
   // Calibration
+  // ⚠️ Default coefficients from literature (van Gastel et al. 2016, Sensors 2023)
+  // Formula: SpO2 = A + B*R + C*R² where R is ratio-of-ratios (redAC/redDC)/(greenAC/greenDC)
+  // These are population-level defaults. Device-specific calibration provides better accuracy.
   private calibration: CalibrationProfile = {
-    A: 104.0,    // Default quadratic: SpO2 = 104 + 4.2R - 28.5R²
-    B: 4.2,
-    C: -28.5,
-    deviceId: 'default',
+    A: 104.0,    // Intercept from population studies - NOT a clinical default value
+    B: 4.2,      // Linear coefficient
+    C: -28.5,    // Quadratic coefficient
+    deviceId: 'default_uncalibrated',
     timestamp: 0,
   };
   private calibrationState: SpO2Result['calibrationState'] = 'UNCALIBRATED';
