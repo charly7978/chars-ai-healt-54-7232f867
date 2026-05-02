@@ -23,6 +23,8 @@ export interface ProcessedSignal {
   perfusionIndex?: number;
   rawRed?: number;
   rawGreen?: number;
+  /** Real measured frame-rate at the moment this sample was produced. */
+  sampleRate?: number;
   fingerPosition?: 'TIP' | 'FLAT' | 'UNKNOWN';  // TIP=punta, FLAT=acostado
   diagnostics?: {
     message: string;

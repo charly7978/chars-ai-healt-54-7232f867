@@ -301,6 +301,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       perfusionIndex,
       rawRed: roi.rawRed,
       rawGreen: roi.rawGreen,
+      sampleRate: this.estimatedSampleRate,
       fingerPosition: this.fingerPositionType,
       diagnostics: {
         message:
