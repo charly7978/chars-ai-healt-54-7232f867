@@ -15,6 +15,10 @@ import { supabase } from "@/integrations/supabase/client";
 import {
   ForensicSessionRecorder,
   downloadForensicBundle,
+  IMUManager,
+  verifyForensicIntegrity,
+  type IntegrityResult,
+  type IMUSnapshot,
 } from "@/modules/forensic/ForensicSessionRecorder";
 
 const NON_ALERT_RHYTHMS = new Set([
@@ -68,6 +72,12 @@ const Index = () => {
   const [exporting, setExporting] = useState(false);
   const [lastSeal, setLastSeal] = useState<{ sha: string; sessionId: string } | null>(null);
   const [showTelemetry, setShowTelemetry] = useState(false);
+  // ── IMU Manager for motion tracking ────────────────────────────────
+  const imuManagerRef = useRef<IMUManager | null>(null);
+  const [imuEnabled, setImuEnabled] = useState(false);
+  // ── SHA-256 integrity verification ───────────────────────────────────
+  const [integrityResult, setIntegrityResult] = useState<IntegrityResult | null>(null);
+  const [showIntegrityCheck, setShowIntegrityCheck] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
   // ── ROI stability persistent-alert state ──────────────────────────────
@@ -94,6 +104,7 @@ const Index = () => {
   }>>([]);
   const arrhythmiaDetectedRef = useRef(false);
   const lastArrhythmiaData = useRef<{ timestamp: number; rmssd: number; rrVariation: number; } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<CameraViewHandle>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -308,6 +319,76 @@ const Index = () => {
     }
   }, []);
 
+  // ── IMU Integration (declarado antes de startMonitoring para evitar dependencia circular) ───
+  const initIMU = useCallback(async () => {
+    if (imuManagerRef.current) return true;
+    
+    const imu = new IMUManager({
+      onMotionScore: (score, snapshot) => {
+        recorderRef.current?.pushIMU(snapshot);
+      },
+      onError: (err) => {
+        console.warn('IMU Error:', err.message);
+      }
+    });
+    
+    const started = await imu.start();
+    if (started) {
+      imuManagerRef.current = imu;
+      setImuEnabled(true);
+      console.log('📱 IMU iniciado - capturando acelerómetro/giroscopio');
+    }
+    return started;
+  }, []);
+
+  // ── SHA-256 Integrity Verification ──────────────────────────────────────
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const content = event.target?.result as string;
+      if (!content) return;
+      
+      setShowIntegrityCheck(true);
+      const result = await verifyForensicIntegrity(content);
+      setIntegrityResult(result);
+      
+      if (result.match) {
+        toast({ 
+          title: "✅ Integridad Verificada", 
+          description: `SHA-256 coincide. Sesión: ${result.sessionId?.slice(0, 8)}...`,
+        });
+      } else {
+        toast({ 
+          title: "⚠️ Fallo de Integridad", 
+          description: result.expectedSha256 === 'NOT_FOUND' 
+            ? "El archivo no contiene sello SHA-256"
+            : "El hash no coincide. El archivo puede estar corrupto.",
+          variant: "destructive"
+        });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }, []);
+
+  const handleExportForensic = useCallback(async () => {
+    if (!recorderRef.current) return;
+    setExporting(true);
+    try {
+      const bundle = await recorderRef.current.buildBundle();
+      setLastSeal({ sha: bundle.sha256, sessionId: recorderRef.current.sessionId });
+      downloadForensicBundle(bundle, recorderRef.current.sessionId);
+      toast({ title: "📦 Bundle Forense Exportado", description: `SHA-256: ${bundle.sha256.slice(0, 16)}...` });
+    } catch (err) {
+      toast({ title: "Error al exportar", description: String(err), variant: "destructive" });
+    } finally {
+      setExporting(false);
+    }
+  }, []);
+
   const startMonitoring = useCallback(() => {
     if (isMonitoring) return;
     console.log('🚀 Iniciando monitoreo...');
@@ -330,6 +411,8 @@ const Index = () => {
     // Spin up a fresh forensic recorder for this session.
     recorderRef.current = new ForensicSessionRecorder({ algorithmVersion: 'ppg-web/2026.05' });
     setLastSeal(null);
+    // Initialize IMU for motion tracking
+    initIMU();
     startProcessing();
     setIsCameraOn(true);
     setIsMonitoring(true);
@@ -338,7 +421,7 @@ const Index = () => {
     setIsCalibrating(true);
     startCalibration();
     setTimeout(() => setIsCalibrating(false), 3000);
-  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
+  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen, initIMU]);
 
   const handleStreamReady = useCallback((stream: MediaStream) => {
     console.log('📹 Stream recibido');
@@ -480,6 +563,10 @@ const Index = () => {
     lastArrhythmiaData.current = null;
     setCalibrationProgress(0);
     arrhythmiaDetectedRef.current = false;
+    // Stop IMU manager
+    imuManagerRef.current?.stop();
+    imuManagerRef.current = null;
+    setImuEnabled(false);
     console.log('✅ Reset completado');
   }, [cameraStream, stopFrameLoop, stopProcessing, fullResetVitalSigns, resetHeartBeat]);
 
@@ -1304,11 +1391,107 @@ const Index = () => {
                     >
                       {isAnalyzing ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando...</> : <><Brain className="w-4 h-4" /> Análisis AI de Salud</>}
                     </button>
+
+                    {/* Forensic Export & Integrity Verification */}
+                    <div className="mt-3 pt-3 border-t border-slate-700/50 space-y-2">
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleExportForensic}
+                          disabled={!recorderRef.current || exporting}
+                          className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-all disabled:opacity-50"
+                        >
+                          {exporting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
+                          {exporting ? 'Exportando...' : 'Exportar Forense'}
+                        </button>
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-all"
+                        >
+                          <Activity className="w-3 h-3" />
+                          Verificar SHA-256
+                        </button>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept=".json"
+                          onChange={handleFileSelect}
+                          className="hidden"
+                        />
+                      </div>
+                      {lastSeal && (
+                        <div className="text-[9px] font-mono text-slate-500 bg-slate-900/50 rounded px-2 py-1">
+                          <span className="text-emerald-500">●</span> Último sello: {lastSeal.sha.slice(0, 16)}...
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
             );
           })()}
+
+          {/* SHA-256 Integrity Verification Modal */}
+          {showIntegrityCheck && integrityResult && (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">
+              <div className="bg-slate-950 border border-slate-700/50 rounded-2xl max-w-md w-[92%] shadow-2xl overflow-hidden flex flex-col">
+                <div className={`px-4 py-3 border-b border-slate-800 flex items-center justify-between ${integrityResult.match ? 'bg-emerald-500/10' : 'bg-red-500/10'}`}>
+                  <div className="flex items-center gap-2">
+                    {integrityResult.match ? (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-5 h-5 text-red-400" />
+                    )}
+                    <h3 className="text-white text-sm font-bold">
+                      {integrityResult.match ? 'Integridad Verificada' : 'Fallo de Integridad'}
+                    </h3>
+                  </div>
+                  <button 
+                    onClick={() => setShowIntegrityCheck(false)} 
+                    className="p-1.5 rounded-full bg-slate-800 hover:bg-slate-700 transition-colors"
+                  >
+                    <X className="w-4 h-4 text-slate-400" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400 text-xs">Estado:</span>
+                      <span className={`text-xs font-bold ${integrityResult.match ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {integrityResult.match ? '✓ HASH COINCIDE' : '✗ HASH DIFERENTE'}
+                      </span>
+                    </div>
+                    {integrityResult.sessionId && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400 text-xs">Sesión ID:</span>
+                        <span className="text-slate-300 text-xs font-mono">{integrityResult.sessionId}</span>
+                      </div>
+                    )}
+                    <div className="space-y-1">
+                      <span className="text-slate-400 text-xs">Hash Esperado:</span>
+                      <div className="bg-slate-900 rounded px-2 py-1 font-mono text-[10px] text-slate-500 break-all">
+                        {integrityResult.expectedSha256}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <span className="text-slate-400 text-xs">Hash Calculado:</span>
+                      <div className={`bg-slate-900 rounded px-2 py-1 font-mono text-[10px] break-all ${integrityResult.match ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {integrityResult.computedSha256}
+                      </div>
+                    </div>
+                    <div className="flex justify-between items-center pt-1">
+                      <span className="text-slate-400 text-xs">Verificado:</span>
+                      <span className="text-slate-500 text-xs">{new Date(integrityResult.timestamp).toLocaleString()}</span>
+                    </div>
+                  </div>
+                  {!integrityResult.match && (
+                    <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-2 text-[10px] text-red-300">
+                      ⚠️ El archivo puede estar corrupto, modificado o no contener un sello SHA-256 válido.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {showAIAnalysis && (
             <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">

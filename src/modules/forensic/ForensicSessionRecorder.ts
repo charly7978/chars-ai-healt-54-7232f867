@@ -97,6 +97,17 @@ export interface BeatRecord {
   quality: number;
   type: BeatType;
   reason: string;
+  imuSnapshot?: IMUSnapshot;  // DeviceMotion en el momento del beat
+}
+
+/** IMU (Inertial Measurement Unit) snapshot for motion correlation */
+export interface IMUSnapshot {
+  timestampMs: number;
+  acceleration: { x: number; y: number; z: number } | null;
+  accelerationIncludingGravity: { x: number; y: number; z: number } | null;
+  rotationRate: { alpha: number; beta: number; gamma: number } | null;
+  motionScore: number;  // 0-1: magnitude of motion
+  orientation: { alpha: number; beta: number; gamma: number } | null;
 }
 
 export type SessionEventKind =
@@ -175,6 +186,7 @@ export interface RecorderConfig {
   frameRingCapacity?: number;    // default 60 fps × 120 s = 7200
   beatLimit?: number;            // hard cap on stored beats
   eventLimit?: number;
+  imuRingCapacity?: number;      // default 60 fps × 60 s = 3600
 }
 
 export interface SessionTickMetrics {
@@ -204,6 +216,10 @@ export class ForensicSessionRecorder {
   private events: SessionEvent[] = [];
   private states: { tMs: number; state: MeasurementState }[] = [];
 
+  // IMU ring buffer for motion tracking
+  private imuBuffer: RingBuffer<IMUSnapshot>;
+  private totalImuSamples = 0;
+
   // Counters that survive ring overwrite
   private totalSamples = 0;
   private validSamples = 0;
@@ -223,6 +239,7 @@ export class ForensicSessionRecorder {
       frameRingCapacity: 7200,
       beatLimit: 4000,        // ~33 min at 120bpm
       eventLimit: 2000,
+      imuRingCapacity: 3600,  // 60s at 60Hz
       ...cfg,
     };
     this.algorithmVersion = cfg.algorithmVersion;
@@ -231,6 +248,7 @@ export class ForensicSessionRecorder {
     this.startedAtIso = new Date().toISOString();
     this.samples = new RingBuffer<PpgSampleRecord>(this.cfg.sampleRingCapacity);
     this.frames = new RingBuffer<CameraFrameRecord>(this.cfg.frameRingCapacity);
+    this.imuBuffer = new RingBuffer<IMUSnapshot>(this.cfg.imuRingCapacity);
     this.device = ForensicSessionRecorder.captureDeviceFingerprint();
   }
 
@@ -251,8 +269,34 @@ export class ForensicSessionRecorder {
   }
 
   pushBeat(b: BeatRecord): void {
-    if (this.beats.length >= this.cfg.beatLimit) return;
+    if (this.beats.length >= (this.cfg.beatLimit ?? 4000)) return;
+    // Attach closest IMU snapshot if available
+    const imu = this.findClosestIMU(b.timestampMs);
+    if (imu) {
+      b.imuSnapshot = imu;
+    }
     this.beats.push(b);
+  }
+
+  pushIMU(imu: IMUSnapshot): void {
+    this.totalImuSamples++;
+    this.imuBuffer.push(imu);
+  }
+
+  private findClosestIMU(timestampMs: number): IMUSnapshot | undefined {
+    const arr = this.imuBuffer.toArray();
+    if (arr.length === 0) return undefined;
+    // Binary search for closest timestamp
+    let closest = arr[0];
+    let minDiff = Math.abs(arr[0].timestampMs - timestampMs);
+    for (let i = 1; i < arr.length; i++) {
+      const diff = Math.abs(arr[i].timestampMs - timestampMs);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = arr[i];
+      }
+    }
+    return closest;
   }
 
   pushEvent(kind: SessionEventKind, detail: SessionEvent['detail'] = {}): void {
@@ -448,11 +492,21 @@ function samplesToCsv(rows: PpgSampleRecord[]): string {
 }
 
 function beatsToCsv(rows: BeatRecord[]): string {
-  const head = 'timestampMs,amplitude,rrMs,bpmInstant,quality,type,reason';
-  const body = rows.map(r => [
-    r.timestampMs, r.amplitude, r.rrMs ?? '', r.bpmInstant ?? '',
-    r.quality, r.type, r.reason,
-  ].map(csvEscape).join(','));
+  const head = 'timestampMs,amplitude,rrMs,bpmInstant,quality,type,reason,imuMotionScore,imuAccelX,imuAccelY,imuAccelZ,imuRotAlpha,imuRotBeta,imuRotGamma';
+  const body = rows.map(r => {
+    const imu = r.imuSnapshot;
+    return [
+      r.timestampMs, r.amplitude, r.rrMs ?? '', r.bpmInstant ?? '',
+      r.quality, r.type, r.reason,
+      imu ? imu.motionScore.toFixed(3) : '',
+      imu?.acceleration?.x?.toFixed(3) ?? '',
+      imu?.acceleration?.y?.toFixed(3) ?? '',
+      imu?.acceleration?.z?.toFixed(3) ?? '',
+      imu?.rotationRate?.alpha?.toFixed(3) ?? '',
+      imu?.rotationRate?.beta?.toFixed(3) ?? '',
+      imu?.rotationRate?.gamma?.toFixed(3) ?? '',
+    ].map(csvEscape).join(',');
+  });
   return [head, ...body].join('\n');
 }
 
@@ -538,4 +592,232 @@ function triggerDownload(filename: string, data: string, mime: string): void {
     a.remove();
     URL.revokeObjectURL(url);
   }, 250);
+}
+
+/* ───────────────────────── Integrity Verification ─────────────────── */
+
+export interface IntegrityResult {
+  valid: boolean;
+  expectedSha256: string;
+  computedSha256: string;
+  match: boolean;
+  timestamp: string;
+  sessionId?: string;
+}
+
+/**
+ * Verify the SHA-256 integrity of a reimported forensic bundle.
+ * Re-calculates the hash from the canonical JSON and compares with the seal.
+ */
+export async function verifyForensicIntegrity(
+  bundleJson: string
+): Promise<IntegrityResult> {
+  const timestamp = new Date().toISOString();
+
+  try {
+    const wrapper = JSON.parse(bundleJson);
+
+    // Check if it's a sealed bundle or raw payload
+    const hasSeal = wrapper.sealed === true && wrapper.sha256 && wrapper.payload;
+    const expectedSha256 = hasSeal ? wrapper.sha256 : null;
+    const payload = hasSeal ? wrapper.payload : wrapper;
+
+    if (!expectedSha256) {
+      return {
+        valid: false,
+        expectedSha256: 'NOT_FOUND',
+        computedSha256: 'N/A',
+        match: false,
+        timestamp,
+        sessionId: payload?.sessionId,
+      };
+    }
+
+    // Re-canonicalize and hash the payload
+    const canonicalJson = canonicalStringify(payload);
+    const computedSha256 = await sha256Hex(canonicalJson);
+
+    const match = computedSha256 === expectedSha256;
+
+    return {
+      valid: match,
+      expectedSha256,
+      computedSha256,
+      match,
+      timestamp,
+      sessionId: payload?.sessionId,
+    };
+  } catch (err) {
+    return {
+      valid: false,
+      expectedSha256: 'PARSE_ERROR',
+      computedSha256: 'N/A',
+      match: false,
+      timestamp,
+    };
+  }
+}
+
+/* ───────────────────────── IMU Manager ────────────────────────────── */
+
+export interface IMUManagerConfig {
+  sampleRate?: number;     // Hz, default 60
+  onMotionScore?: (score: number, snapshot: IMUSnapshot) => void;
+  onError?: (error: Error) => void;
+}
+
+/**
+ * IMU Manager - Captures real DeviceMotion data for motion correlation.
+ * Synchronizes with PPG beats via timestampMs.
+ */
+export class IMUManager {
+  private config: Required<IMUManagerConfig>;
+  private running = false;
+  private lastOrientation: { alpha: number; beta: number; gamma: number } | null = null;
+  private motionHistory: Array<{ timestamp: number; magnitude: number }> = [];
+  private readonly HISTORY_SIZE = 10;
+
+  constructor(config: IMUManagerConfig = {}) {
+    this.config = {
+      sampleRate: 60,
+      onMotionScore: () => {},
+      onError: () => {},
+      ...config,
+    };
+  }
+
+  /**
+   * Start capturing DeviceMotion events.
+   * Returns a promise that resolves when permission is granted (iOS) or immediately (Android/Desktop).
+   */
+  async start(): Promise<boolean> {
+    if (this.running) return true;
+
+    try {
+      // iOS 13+ requires permission
+      if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
+        const permission = await (DeviceMotionEvent as any).requestPermission();
+        if (permission !== 'granted') {
+          this.config.onError(new Error(`DeviceMotion permission denied: ${permission}`));
+          return false;
+        }
+      }
+
+      window.addEventListener('devicemotion', this.handleMotion);
+      window.addEventListener('deviceorientation', this.handleOrientation);
+
+      this.running = true;
+      return true;
+    } catch (err) {
+      this.config.onError(err instanceof Error ? err : new Error(String(err)));
+      return false;
+    }
+  }
+
+  stop(): void {
+    if (!this.running) return;
+    window.removeEventListener('devicemotion', this.handleMotion);
+    window.removeEventListener('deviceorientation', this.handleOrientation);
+    this.running = false;
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  /**
+   * Get the current motion score (0-1) based on recent acceleration.
+   */
+  getCurrentMotionScore(): number {
+    if (this.motionHistory.length === 0) return 0;
+    const recent = this.motionHistory.slice(-5);
+    const avg = recent.reduce((sum, m) => sum + m.magnitude, 0) / recent.length;
+    return Math.min(1, avg / 5); // Normalize: 5 m/s² = score 1.0
+  }
+
+  private handleMotion = (event: DeviceMotionEvent): void => {
+    const timestampMs = performance.now();
+
+    // Calculate acceleration magnitude
+    let magnitude = 0;
+    if (event.acceleration) {
+      const { x, y, z } = event.acceleration;
+      if (x !== null && y !== null && z !== null) {
+        magnitude = Math.sqrt(x * x + y * y + z * z);
+      }
+    }
+
+    // Update history
+    this.motionHistory.push({ timestamp: timestampMs, magnitude });
+    if (this.motionHistory.length > this.HISTORY_SIZE) {
+      this.motionHistory.shift();
+    }
+
+    const motionScore = Math.min(1, magnitude / 5);
+
+    const snapshot: IMUSnapshot = {
+      timestampMs,
+      acceleration: event.acceleration
+        ? {
+            x: event.acceleration.x ?? 0,
+            y: event.acceleration.y ?? 0,
+            z: event.acceleration.z ?? 0,
+          }
+        : null,
+      accelerationIncludingGravity: event.accelerationIncludingGravity
+        ? {
+            x: event.accelerationIncludingGravity.x ?? 0,
+            y: event.accelerationIncludingGravity.y ?? 0,
+            z: event.accelerationIncludingGravity.z ?? 0,
+          }
+        : null,
+      rotationRate: event.rotationRate
+        ? {
+            alpha: event.rotationRate.alpha ?? 0,
+            beta: event.rotationRate.beta ?? 0,
+            gamma: event.rotationRate.gamma ?? 0,
+          }
+        : null,
+      motionScore,
+      orientation: this.lastOrientation,
+    };
+
+    this.config.onMotionScore(motionScore, snapshot);
+  };
+
+  private handleOrientation = (event: DeviceOrientationEvent): void => {
+    this.lastOrientation = {
+      alpha: event.alpha ?? 0,
+      beta: event.beta ?? 0,
+      gamma: event.gamma ?? 0,
+    };
+  };
+
+  /**
+   * Get an IMUSnapshot for a specific timestamp by interpolating nearest samples.
+   */
+  getSnapshotForTimestamp(timestampMs: number): IMUSnapshot | null {
+    // Find closest sample in history
+    let closest: { timestamp: number; magnitude: number } | null = null;
+    let minDiff = Infinity;
+
+    for (const sample of this.motionHistory) {
+      const diff = Math.abs(sample.timestamp - timestampMs);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = sample;
+      }
+    }
+
+    if (!closest || minDiff > 100) return null; // Too old
+
+    return {
+      timestampMs: closest.timestamp,
+      acceleration: null,
+      accelerationIncludingGravity: null,
+      rotationRate: null,
+      motionScore: Math.min(1, closest.magnitude / 5),
+      orientation: this.lastOrientation,
+    };
+  }
 }
