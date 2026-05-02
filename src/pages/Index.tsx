@@ -797,7 +797,7 @@ const Index = () => {
             </div>
           );
           return (
-            <div className="absolute top-12 left-2 right-2 z-30 max-w-[280px] bg-black/85 border border-emerald-500/30 rounded-md p-2 text-[10px] text-white font-mono pointer-events-none shadow-2xl">
+            <div className="absolute top-12 left-2 right-2 z-30 max-w-[280px] bg-black/85 border border-emerald-500/30 rounded-md p-2 text-[10px] text-white font-mono shadow-2xl">
               <div className="text-emerald-400 font-bold tracking-wider mb-1">PPG TELEMETRY · WORKER</div>
               {row('contact', String(dbg.contactState ?? '—'))}
               {row('exported', String(dbg.exportedState ?? '—'))}
@@ -818,6 +818,84 @@ const Index = () => {
               {row('ROI alert', roiAlertActive ? `ON (streak ${lowStabilityStreakRef.current})` : `off (low ${lowStabilityStreakRef.current}/good ${goodStabilityStreakRef.current})`)}
               {row('beat ROI', `${fmt(lastBeatRoiScoreRef.current, 2)} · drift ${fmt(lastBeatDriftRef.current, 2)}`)}
               {row('audit log', String(roiAuditLogRef.current.length))}
+              {/* ── ROI audit timeline (last 16) ─────────────────────── */}
+              {(() => {
+                const log = roiAuditLogRef.current;
+                const last = log.slice(-16);
+                const now = performance.now();
+                const current = log[log.length - 1];
+                const copyCurrent = async () => {
+                  if (!current) return;
+                  const payload = JSON.stringify({
+                    ...current,
+                    isoTime: new Date(Date.now() - (now - current.t)).toISOString(),
+                  }, null, 2);
+                  try {
+                    await navigator.clipboard.writeText(payload);
+                    console.log('[ROI-AUDIT] copied', payload);
+                  } catch (err) {
+                    console.warn('[ROI-AUDIT] clipboard failed', err);
+                  }
+                };
+                return (
+                  <div className="mt-1 pt-1 border-t border-emerald-500/20">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-emerald-400 font-bold tracking-wider text-[9px]">ROI AUDIT · LAST 16</span>
+                      <button
+                        type="button"
+                        onClick={copyCurrent}
+                        disabled={!current}
+                        className="px-1.5 py-0.5 rounded text-[9px] font-bold border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                        title="Copy current entry to clipboard"
+                      >
+                        COPY
+                      </button>
+                    </div>
+                    {last.length === 0 ? (
+                      <div className="text-slate-500 text-[9px] italic">no events yet</div>
+                    ) : (
+                      <>
+                        <div className="flex gap-[2px] h-5 items-stretch">
+                          {last.map((e, i) => {
+                            const color =
+                              e.kind === 'TRIGGER' ? 'bg-red-500'
+                              : e.kind === 'CLEAR' ? 'bg-emerald-500'
+                              : 'bg-slate-500';
+                            const ageS = Math.max(0, (now - e.t) / 1000);
+                            return (
+                              <div
+                                key={`${e.t}-${i}`}
+                                className={`flex-1 ${color} rounded-sm opacity-80 hover:opacity-100`}
+                                title={`${e.kind} · beat#${e.beatIndex} · score ${e.roiScore.toFixed(2)} · drift ${e.drift.toFixed(2)} · streak ${e.streak} · ${ageS.toFixed(1)}s ago`}
+                              />
+                            );
+                          })}
+                        </div>
+                        {current && (
+                          <div className="mt-1 text-[9px] leading-tight">
+                            <div className="flex justify-between gap-2">
+                              <span className={
+                                current.kind === 'TRIGGER' ? 'text-red-400 font-bold'
+                                : current.kind === 'CLEAR' ? 'text-emerald-400 font-bold'
+                                : 'text-slate-400 font-bold'
+                              }>
+                                ▸ {current.kind}
+                              </span>
+                              <span className="text-slate-400">
+                                beat#{current.beatIndex} · {((now - current.t) / 1000).toFixed(1)}s
+                              </span>
+                            </div>
+                            <div className="flex justify-between gap-2 text-slate-500">
+                              <span>score {current.roiScore.toFixed(2)} · drift {current.drift.toFixed(2)}</span>
+                              <span>streak {current.streak}</span>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
               {row('R AC/DC', `${fmt(rgb.redAC, 2)} / ${fmt(rgb.redDC, 1)}`)}
               {row('G AC/DC', `${fmt(rgb.greenAC, 2)} / ${fmt(rgb.greenDC, 1)}`)}
               {row('R/G', fmt(rgb.rgRatio, 3))}
