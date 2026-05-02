@@ -131,8 +131,11 @@ export const useHeartBeatProcessorOptimized = () => {
     const roundedSQI = Math.round(result.sqi);
     setSignalQuality(roundedSQI);
 
-    // BPM confidence threshold: require >0.15 confidence for display
-    if (result.bpm > 0 && result.bpmConfidence >= 0.15) {
+    // BPM confidence threshold: require >0.10 confidence for display
+    // (used to be 0.15 but with the new SSF-consensus pipeline we want
+    // to publish slightly earlier — the global SQI ribbon already shows
+    // when the value is provisional).
+    if (result.bpm > 0 && result.bpmConfidence >= 0.10) {
       // Apply hysteresis: don't update if small change
       const bpmDiff = Math.abs(result.bpm - currentBPM);
       if (bpmDiff > 1 || currentBPM === 0) {

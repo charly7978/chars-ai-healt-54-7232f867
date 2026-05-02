@@ -207,16 +207,19 @@ export class HeartBeatProcessorOptimized {
 
     this.updateAdaptiveThresholds();
 
-    // Two independent detectors
+    // Two independent detectors. The primary (adaptive double-threshold)
+    // is the ACCEPTANCE path; SSF runs in parallel as a *confidence
+    // booster* — it never blocks a beat that the primary accepted, it
+    // only raises detectorAgreement when both fire close together.
     const detection = this.detectBeatOptimized(now);
     const ssfFired   = this.detectSSFOnset(now);
-
-    // True consensus signal: did SSF fire within the last ~120ms?
     if (ssfFired) this.lastSSFOnsetTime = now;
-    const ssfRecent = this.lastSSFOnsetTime > 0 && (now - this.lastSSFOnsetTime) <= 130;
+    const ssfRecent = this.lastSSFOnsetTime > 0 && (now - this.lastSSFOnsetTime) <= 200;
     const detectorHits = (detection.detected ? 1 : 0) + (ssfFired ? 1 : 0);
+    // Default agreement when the primary alone fires is 0.85, NOT 0.55 —
+    // the primary detector is reliable on its own; SSF just confirms.
     const detectorAgreement = detection.detected
-      ? (ssfRecent ? 1.0 : 0.55)        // primary alone is plausible but weaker
+      ? (ssfRecent ? 1.0 : 0.85)
       : (ssfRecent ? 0.5 : 0);
 
     let isPeak = false;
@@ -367,13 +370,15 @@ export class HeartBeatProcessorOptimized {
     const n = this.ssfBuf.length;
     if (n < Math.max(8, Math.round(this.fs * 0.4))) return false;
 
-    // Adaptive threshold = 0.6 × P90 of the last 4 seconds of SSF.
+    // Adaptive threshold = 0.45 × P85 of the last 4 seconds of SSF.
+    // Originally 0.6 × P90 — too strict for typical phone-camera SNR;
+    // SSF almost never fired so the consensus signal was useless.
     const win = Math.min(n, Math.round(this.fs * 4));
     const samples: number[] = [];
     for (let i = 0; i < win; i++) samples.push(this.ssfBuf.get(n - win + i));
     samples.sort((a, b) => a - b);
-    const p90 = samples[Math.floor(win * 0.9)];
-    const thresh = p90 * 0.6;
+    const p85 = samples[Math.floor(win * 0.85)];
+    const thresh = p85 * 0.45;
     if (thresh <= 0) return false;
 
     const cur = this.ssfBuf.get(n - 1);
@@ -393,7 +398,9 @@ export class HeartBeatProcessorOptimized {
 
   /**
    * Adaptive double-threshold (primary detector). Window is a function
-   * of fs so it always covers ~4 seconds.
+   * of fs so it always covers ~4 seconds. During warmup (less than ~3s
+   * of buffer) we use a more permissive multiplier so the very first
+   * beats can clear the threshold and start the consecutivePeaks chain.
    */
   private updateAdaptiveThresholds(): void {
     const windowLen = Math.max(40, Math.min(BUFFER_CAPACITY, Math.round(this.fs * 4)));
@@ -404,18 +411,32 @@ export class HeartBeatProcessorOptimized {
     for (let i = 0; i < n; i++) recent[i] = this.filteredBuf.get(this.filteredBuf.length - n + i);
     recent.sort((a, b) => a - b);
     const p10 = recent[Math.floor(n * 0.1)];
+    const p50 = recent[Math.floor(n * 0.5)];
     const p90 = recent[Math.floor(n * 0.9)];
     const range = p90 - p10;
 
-    const targetPeak   = p10 + range * this.config.adaptiveThresholdFactor;
-    const targetValley = p10 + range * this.config.hysteresisFactor;
+    // Warmup: use lower factor so first beats are easier to acquire.
+    const warming = this.consecutivePeaks < 3;
+    const peakFactor = warming
+      ? Math.max(0.4, this.config.adaptiveThresholdFactor - 0.2)
+      : this.config.adaptiveThresholdFactor;
+    const valleyFactor = warming
+      ? Math.max(0.15, this.config.hysteresisFactor - 0.1)
+      : this.config.hysteresisFactor;
+
+    const targetPeak   = p10 + range * peakFactor;
+    const targetValley = p10 + range * valleyFactor;
 
     if (this.peakThreshold === 0) {
-      this.peakThreshold = targetPeak;
+      // Bias the first threshold toward the median so we don't sit
+      // permanently above the signal during the very first frames.
+      this.peakThreshold = Math.min(targetPeak, p50 + range * 0.05);
       this.valleyThreshold = targetValley;
     } else {
-      this.peakThreshold = this.peakThreshold * 0.9 + targetPeak * 0.1;
-      this.valleyThreshold = this.valleyThreshold * 0.9 + targetValley * 0.1;
+      // Faster adaptation while warming up, slower once we're stable.
+      const alpha = warming ? 0.25 : 0.1;
+      this.peakThreshold = this.peakThreshold * (1 - alpha) + targetPeak * alpha;
+      this.valleyThreshold = this.valleyThreshold * (1 - alpha) + targetValley * alpha;
     }
   }
 
@@ -536,15 +557,18 @@ export class HeartBeatProcessorOptimized {
    */
   private calculateMorphologyScore(c: BeatCandidate): number {
     const refRange = 120; // normalised dynamic range
-    const promFrac = c.prominence / refRange;     // typical 0.2..0.6
-    const upFrac   = c.upSlope    / refRange;     // typical 0.05..0.2 / sample
+    const promFrac = c.prominence / refRange;     // typical 0.15..0.5
+    const upFrac   = c.upSlope    / refRange;     // typical 0.03..0.15 / sample
     const dnFrac   = c.downSlope  / refRange;
 
     let score = 0;
-    score += Math.min(35, promFrac * 175);                              // 0.2 → 35
-    score += Math.min(20, Math.max(0, upFrac) * 200);                   // 0.1 → 20
-    score += (c.widthMs > 150 && c.widthMs < 500) ? 15 : 0;
-    score += Math.min(10, Math.max(0, dnFrac) * 200);                   // 0.05 → 10
+    // Generous prominence reward: a typical real PPG beat hits ~0.2 → 35
+    score += Math.min(35, promFrac * 175);
+    // Up-slope reward: 0.05 → 20 (was 0.1 → 20, far too strict)
+    score += Math.min(20, Math.max(0, upFrac) * 400);
+    score += (c.widthMs > 120 && c.widthMs < 550) ? 15 : 0;
+    // Down-slope: 0.025 → 10
+    score += Math.min(10, Math.max(0, dnFrac) * 400);
     score += c.zeroCrossingSupport ? 5 : 0;
     score += c.templateCorrelation > 0 ? Math.min(15, c.templateCorrelation * 15) : 0;
     return Math.min(100, score);
@@ -573,15 +597,17 @@ export class HeartBeatProcessorOptimized {
       }
     }
 
-    // Scale-aware morphology gate (signalRangeNormSpace is the raw
-    // signal range — but the candidate's prominence is in normalised
-    // space, range≈120 by design).
+    // Scale-aware morphology gate. Candidate prominence is in
+    // normalised space (range ≈ 120 by design) so the *fraction*
+    // matters, not the absolute amplitude. Thresholds are deliberately
+    // permissive here — the morphology/total-score gate below catches
+    // the truly bad ones.
     const promFrac = c.prominence / 120;
-    if (promFrac < 0.12) return { accepted: false, reason: 'low_prominence' };
-    if (c.widthMs < 100 || c.widthMs > 600) return { accepted: false, reason: 'abnormal_width' };
+    if (promFrac < 0.06) return { accepted: false, reason: 'low_prominence' };
+    if (c.widthMs < 80 || c.widthMs > 700) return { accepted: false, reason: 'abnormal_width' };
 
     const upFrac = c.upSlope / 120;
-    if (upFrac < 0.02) return { accepted: false, reason: 'no_rising_edge' };
+    if (upFrac < 0.008) return { accepted: false, reason: 'no_rising_edge' };
 
     if (this.lastPeakValue > 0) {
       const ampRatio = c.amplitude / this.lastPeakValue;
@@ -590,14 +616,8 @@ export class HeartBeatProcessorOptimized {
       }
     }
 
-    const minScore = this.consecutivePeaks < 3 ? 25 : 35;
+    const minScore = this.consecutivePeaks < 3 ? 18 : 25;
     if (c.totalScore < minScore) return { accepted: false, reason: 'low_total_score' };
-
-    // Consensus boost: when SSF disagrees AND morphology is borderline,
-    // reject — kills the vast majority of double peaks.
-    if (c.detectorAgreement < 0.6 && c.morphologyScore < 50) {
-      return { accepted: false, reason: 'no_detector_consensus' };
-    }
 
     return { accepted: true, reason: '' };
   }
