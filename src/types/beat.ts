@@ -54,10 +54,10 @@ export interface BPMHypothesis {
   fromMedianIBI: number;
   fromTrimmedIBI: number;
   fromAutocorrelation: number;
-  fromSpectral: number;
+  fromSpectral: 0; // REMOVED: Placeholder spectral analysis
   finalBpm: number;
   confidence: number;
-  dominantSource: 'peak' | 'spectral' | 'autocorr' | 'median';
+  dominantSource: 'peak' | 'autocorr' | 'median'; // REMOVED: 'spectral' was placeholder
 }
 
 export interface HeartBeatResult {

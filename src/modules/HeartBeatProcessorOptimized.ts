@@ -77,7 +77,6 @@ export class HeartBeatProcessorOptimized {
   // BPM estimation state
   private smoothBPM = 0;
   private kalmanState: KalmanState = { x: 0, p: 1 };
-  private spectralBPM = 0;
   private autocorrBPM = 0;
   private medianRRBPM = 0;
   private lastHypothesis: BPMHypothesis | null = null;
@@ -709,13 +708,9 @@ export class HeartBeatProcessorOptimized {
     const fromAutocorrelation = this.estimateAutocorrBPM();
     this.autocorrBPM = fromAutocorrelation;
     
-    // Method 5: Spectral (placeholder for FFT-based)
-    const fromSpectral = this.estimateSpectralBPM();
-    this.spectralBPM = fromSpectral;
-    
     // Determine dominant source based on signal quality
     let finalBpm: number;
-    let dominantSource: 'peak' | 'spectral' | 'autocorr' | 'median';
+    let dominantSource: 'peak' | 'autocorr' | 'median';
     let confidence: number;
     
     const hasEnoughPeaks = this.consecutivePeaks >= 3;
@@ -761,20 +756,11 @@ export class HeartBeatProcessorOptimized {
       fromMedianIBI,
       fromTrimmedIBI,
       fromAutocorrelation,
-      fromSpectral,
+      fromSpectral: 0, // REMOVED: Placeholder spectral analysis
       finalBpm,
       confidence,
       dominantSource,
     };
-  }
-
-  /**
-   * Estimate BPM from spectral analysis (simplified FFT)
-   */
-  private estimateSpectralBPM(): number {
-    // Placeholder - full implementation would use Goertzel or FFT
-    // For now, use autocorrelation as spectral proxy
-    return this.autocorrBPM;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1197,7 +1183,6 @@ export class HeartBeatProcessorOptimized {
     this.acceptedBeats = [];
     this.smoothBPM = 0;
     this.kalmanState = { x: 0, p: 1 };
-    this.spectralBPM = 0;
     this.autocorrBPM = 0;
     this.medianRRBPM = 0;
     this.lastPeakTime = 0;
