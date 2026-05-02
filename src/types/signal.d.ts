@@ -19,6 +19,7 @@ export interface ProcessedSignal {
   perfusionIndex?: number;
   rawRed?: number;
   rawGreen?: number;
+  fingerPosition?: 'TIP' | 'FLAT' | 'UNKNOWN';  // TIP=punta, FLAT=acostado
   diagnostics?: {
     message: string;
     hasPulsatility: boolean;

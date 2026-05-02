@@ -299,11 +299,12 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       perfusionIndex,
       rawRed: roi.rawRed,
       rawGreen: roi.rawGreen,
+      fingerPosition: roi.fingerPosition,
       diagnostics: {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
           `C:${(this.smoothedCoverage * 100).toFixed(0)} ${this.exportedContactState}` +
-          `${motionArtifact ? ' MOV' : ''}`,
+          `${motionArtifact ? ' MOV' : ''} ${roi.fingerPosition || '?' }`,
         hasPulsatility: this.exportedContactState === 'STABLE_CONTACT' && perfusionIndex >= 0.05,
         pulsatilityValue: this.exportedContactState === 'STABLE_CONTACT' ? perfusionIndex : 0,
       },

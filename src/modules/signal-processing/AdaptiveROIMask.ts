@@ -42,6 +42,8 @@ export interface ROIMaskResult {
   validPixelCount: number;
   totalPixelCount: number;
   tileScores: Float64Array;
+  // Finger position detection
+  fingerPosition: 'TIP' | 'FLAT' | 'UNKNOWN';
 }
 
 const GRID = 7; // 7x7 tile grid
@@ -69,8 +71,8 @@ export class AdaptiveROIMask {
     const w = imageData.width;
     const h = imageData.height;
 
-    // Central ROI: 80% of min dimension
-    const roiSize = Math.min(w, h) * 0.80;
+    // Central ROI: 88% of min dimension (larger to capture fingertip better)
+    const roiSize = Math.min(w, h) * 0.88;
     const sx = Math.floor((w - roiSize) / 2);
     const sy = Math.floor((h - roiSize) / 2);
     const ex = sx + Math.floor(roiSize);
@@ -286,6 +288,18 @@ export class AdaptiveROIMask {
     const tileScores = new Float64Array(TOTAL_TILES);
     for (let ti = 0; ti < TOTAL_TILES; ti++) tileScores[ti] = tileMetrics[ti].score;
 
+    // Detect finger position: TIP vs FLAT
+    // TIP: concentrated in center (centerCoverage > 0.6, coverageRatio < 0.4)
+    // FLAT: spread out (coverageRatio > 0.5)
+    let fingerPosition: 'TIP' | 'FLAT' | 'UNKNOWN' = 'UNKNOWN';
+    if (fingerTileCount > 0) {
+      if (centerCov > 0.6 && coverageRatio < 0.4) {
+        fingerPosition = 'TIP';  // Fingertip touching
+      } else if (coverageRatio > 0.5 || (centerCov < 0.4 && coverageRatio > 0.3)) {
+        fingerPosition = 'FLAT';  // Finger laying flat
+      }
+    }
+
     return {
       rawRed, rawGreen, rawBlue,
       coverageRatio,
@@ -299,6 +313,7 @@ export class AdaptiveROIMask {
       validPixelCount: totalValidPx,
       totalPixelCount: totalPixels,
       tileScores,
+      fingerPosition,
     };
   }
 

@@ -23,14 +23,15 @@ interface PPGSignalMeterProps {
   spo2?: number;
   rrIntervals?: number[];
   arrhythmiaEvidence?: ArrhythmiaEvidence | null;
+  fingerPosition?: 'TIP' | 'FLAT' | 'UNKNOWN';
 }
 
 const CONFIG = {
-  CANVAS_WIDTH: 1400,
-  CANVAS_HEIGHT: 2800,
+  CANVAS_WIDTH: 2400,
+  CANVAS_HEIGHT: 3800,
   WINDOW_MS: 2800,
-  TARGET_FPS: 30,
-  BUFFER_SIZE: 400,
+  TARGET_FPS: 60,
+  BUFFER_SIZE: 600,
   PLOT_AREA: {
     LEFT: 80,
     RIGHT: 80,
@@ -52,7 +53,7 @@ const CONFIG = {
     TEXT_PRIMARY: '#22c55e',
     TEXT_SECONDARY: '#94a3b8',
     TEXT_WARNING: '#f59e0b',
-    TEXT_DANGER: '#ef4444',
+    TEXT_DANGER: '#f13636',
     SCALE_TEXT: '#6b7280',
     SIGNAL_FILL_NORMAL: 'rgba(34, 197, 94, 0.08)',
     SIGNAL_FILL_ARR: 'rgba(239, 68, 68, 0.08)',
@@ -94,14 +95,15 @@ const PPGSignalMeter = ({
   bpm = 0,
   spo2 = 0,
   rrIntervals = [],
-  arrhythmiaEvidence
+  arrhythmiaEvidence,
+  fingerPosition
 }: PPGSignalMeterProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number | null>(null);
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, arrhythmiaEvidence });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, arrhythmiaEvidence, fingerPosition });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -113,7 +115,7 @@ const PPGSignalMeter = ({
   const hrvDisplayRef = useRef<{ sdnn: number; rmssd: number }>({ sdnn: 0, rmssd: 0 });
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, arrhythmiaEvidence };
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, arrhythmiaEvidence, fingerPosition };
     if (rrIntervals && rrIntervals.length >= 2) {
       const last = rrIntervals[rrIntervals.length - 1];
       ibiDisplayRef.current = Math.round(last);
@@ -124,7 +126,7 @@ const PPGSignalMeter = ({
       for (let i = 1; i < rrIntervals.length; i++) sumSqDiffs += (rrIntervals[i] - rrIntervals[i - 1]) ** 2;
       hrvDisplayRef.current.rmssd = Math.round(Math.sqrt(sumSqDiffs / (rrIntervals.length - 1)));
     }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, arrhythmiaEvidence]);
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, arrhythmiaEvidence, fingerPosition]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
