@@ -42,6 +42,28 @@
         "templateWindow": 25,
         "source": "buffer_sizing_analysis",
         "justification": "300 samples @ 30 FPS = 10 seconds of signal history"
+      },
+      "filters": {
+        "bandpass": {
+          "lowCutoffHz": 0.5,
+          "highCutoffHz": 8.0,
+          "order": 4,
+          "type": "butterworth",
+          "source": "MDPI Sensors 2024 - Butterworth Filtering optimization",
+          "justification": "0.5 Hz = 30 BPM min, 8 Hz = 480 BPM max (practical 220 BPM). 4th order for -24dB/octave roll-off",
+          "citation": "Butterworth Filtering at 500 Hz Optimizes PPG-Based Heart Rate Variability. MDPI Sensors 2024; 25(22):7091"
+        }
+      },
+      "beatDetection": {
+        "refractoryHardMs": 250,
+        "refractorySoftFactor": 0.55,
+        "adaptiveThresholdFactor": 0.6,
+        "hysteresisFactor": 0.3,
+        "minBPM": 30,
+        "maxBPM": 220,
+        "source": "ScienceDirect 2024 - Adaptive threshold peak detection",
+        "justification": "Hard refractory 250ms (240 BPM max). Soft refractory 55% of expected RR. Hysteresis prevents double-peaks",
+        "citation": "Adaptive threshold method for the peak detection of photoplethysmography. Comput Methods Programs Biomed 2024"
       }
     },
     "calibrationModels": {
