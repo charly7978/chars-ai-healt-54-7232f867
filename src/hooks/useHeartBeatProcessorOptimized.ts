@@ -73,6 +73,7 @@ export const useHeartBeatProcessorOptimized = () => {
       rawGreen?: number;
       rawBlue?: number;
       positionDrifting?: boolean;
+      sampleRate?: number;
     }
   ): HeartBeatResult => {
     if (!processorRef.current || processingStateRef.current !== 'ACTIVE') {
@@ -108,9 +109,7 @@ export const useHeartBeatProcessorOptimized = () => {
       contactState: upstreamContext?.contactState ?? contactState,
       motionArtifact: upstreamContext?.motionArtifact,
       perfusionIndex: upstreamContext?.perfusionIndex,
-      rawRed: upstreamContext?.rawRed,
-      rawGreen: upstreamContext?.rawGreen,
-      rawBlue: upstreamContext?.rawBlue,
+      sampleRate: upstreamContext?.sampleRate,
     });
 
     setLastResult(result);

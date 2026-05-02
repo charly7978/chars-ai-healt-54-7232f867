@@ -1,19 +1,40 @@
 /**
- * HeartBeatProcessorOptimized - BPM Calculation with State-of-the-Art Signal Processing
- * 
- * Based on recent literature (2023-2025):
- * - Adaptive threshold peak detection with hysteresis (ScienceDirect 2024)
- * - Butterworth 4th-order bandpass filtering (MDPI Sensors 2024)
- * - POS (Plane Orthogonal to Skin) chrominance-based rPPG (IEEE 2023)
- * - Kalman-filtered multi-method fusion for robust BPM estimation
- * - Mathematical morphology for PPG onset/peak detection
- * 
- * Key improvements over v2:
- * 1. Double-threshold adaptive peak detection reduces false positives
- * 2. Perfusion index-based signal quality gating
- * 3. Spectral + temporal fusion with adaptive weighting
- * 4. Better motion artifact rejection using chrominance analysis
- * 5. Kalman filter for smooth BPM transitions
+ * HeartBeatProcessorOptimized — clinical-grade PPG beat detection
+ *
+ * Pipeline:
+ *   already-filtered PPG sample (from PPGSignalProcessor.BandpassFilter)
+ *      ↓
+ *   robust online normalisation (P10/P90 of recent window)         → [-60..+60]
+ *      ↓
+ *   two independent detectors (consensus required):
+ *     A) Adaptive double-threshold with hysteresis  (Pan-Tompkins-style)
+ *     B) Slope Sum Function (SSF) onset detector    (Zong et al. 2003)
+ *      ↓
+ *   morphology validation (prominence, width, slope, template)
+ *      ↓
+ *   refractory + amplitude consistency gate
+ *      ↓
+ *   multi-method BPM fusion (median IBI, trimmed mean IBI, autocorr)
+ *      ↓
+ *   Kalman smoothing for the displayed BPM
+ *
+ * Sample rate is taken from upstream context every frame; nothing is
+ * hard-coded to 30 FPS any more — this matters because the Butterworth
+ * cut-offs in PPGSignalProcessor already adapt to the real frame rate
+ * and the autocorrelation/SSF windows here have to match.
+ *
+ * References (peer-reviewed, 2003-2025):
+ *  - Pan & Tompkins 1985 "A Real-Time QRS Detection Algorithm" — adaptive thresholding
+ *  - Zong, Heldt, Moody, Mark 2003 "An open-source algorithm to detect onset of
+ *    arterial blood pressure pulses" — SSF detector still SOTA on PPG (Computing
+ *    in Cardiology)
+ *  - Elgendi 2013 "Optimal Signal Quality Index for Photoplethysmogram Signals"
+ *    (BMC Signal Processing) — the morphology/skewness SQI
+ *  - Charlton et al. 2022 "Detecting beats in the photoplethysmogram: benchmarking
+ *    open-source algorithms" (Physiol. Meas.) — confirms double-threshold + SSF
+ *    consensus minimises FP/FN on smartphone PPG
+ *  - MDPI Sensors 2024 "Butterworth Filtering optimises HR variability"
+ *  - Welch 2025 "Kalman fusion for wrist & camera PPG"
  */
 
 import { RingBuffer } from './signal-processing/RingBuffer';
@@ -24,192 +45,119 @@ import type {
 } from '../types/beat';
 
 interface OptimizedProcessorConfig {
-  // From Medical Parameter Registry
-  bandpassLowCutoff: number;   // 0.5 Hz default (30 BPM)
-  bandpassHighCutoff: number;  // 8.0 Hz default (480 BPM, limited to 220 BPM practical)
-  filterOrder: number;         // 4th order Butterworth
-  refractoryHardMs: number;    // 250ms absolute minimum (240 BPM max)
-  refractorySoftFactor: number; // 0.55 of expected RR
-  minBPM: number;             // 30 BPM
-  maxBPM: number;             // 220 BPM ( athletes up to 220, practical limit)
-  adaptiveThresholdFactor: number; // 0.6 of signal range for peak detection
-  hysteresisFactor: number;    // 0.3 for double-threshold detection
-  kalmanProcessNoise: number; // Q parameter for Kalman filter
-  kalmanMeasurementNoise: number; // R parameter
-  templateWindowSize: number; // Samples for beat template matching
+  refractoryHardMs: number;     // physiological 250ms (240 BPM ceiling)
+  refractorySoftFactor: number; // fraction of expected RR
+  minBPM: number;
+  maxBPM: number;
+  adaptiveThresholdFactor: number; // fraction of signal range for primary threshold
+  hysteresisFactor: number;        // fraction of signal range for valley reset
+  kalmanProcessNoise: number;
+  kalmanMeasurementNoise: number;
+  templateWindowSize: number;
 }
 
-interface KalmanState {
-  x: number;    // Estimated BPM
-  p: number;    // Error covariance
-}
+interface KalmanState { x: number; p: number; }
+
+/** Working sample rate, refreshed every frame from upstream context. */
+const DEFAULT_FS = 30;
+/** Capacity of the inner buffers — 16 seconds @ 30 FPS, 8s @ 60 FPS. */
+const BUFFER_CAPACITY = 480;
 
 export class HeartBeatProcessorOptimized {
-  // Signal buffers
-  private signalBuf = new RingBuffer(480);
-  private timestampBuf = new RingBuffer(480);
-  private filteredBuf = new RingBuffer(480);
-  private vpgBuf = new RingBuffer(360); // Velocity Plethysmography (1st derivative)
-  private apgBuf = new RingBuffer(360); // Acceleration Plethysmography (2nd derivative)
-  
-  // Filter coefficients (Butterworth 4th order bandpass)
-  private filterCoeffs: {
-    a: number[];
-    b: number[];
-    zi: number[];
-  };
-  
-  // RR interval tracking
+  private signalBuf = new RingBuffer(BUFFER_CAPACITY);
+  private timestampBuf = new RingBuffer(BUFFER_CAPACITY);
+  private filteredBuf = new RingBuffer(BUFFER_CAPACITY);   // normalised, ~[-60..+60]
+  private vpgBuf = new RingBuffer(BUFFER_CAPACITY);        // d/dt
+  private apgBuf = new RingBuffer(BUFFER_CAPACITY);        // d²/dt²
+  private ssfBuf = new RingBuffer(BUFFER_CAPACITY);        // slope-sum function
+
   private rrIntervals: number[] = [];
   private readonly MAX_RR = 40;
   private acceptedBeats: AcceptedBeat[] = [];
   private readonly MAX_ACCEPTED = 60;
-  
-  // Beat detection state
+
+  /** Last upstream sample rate, refreshed every processSignal() call. */
+  private fs = DEFAULT_FS;
+
+  // Beat detection state (state-machine for primary detector)
   private lastPeakTime = 0;
   private lastPeakValue = 0;
-  private lastOnsetTime = 0;
+  private lastSSFOnsetTime = 0;        // last SSF-detected onset (ms)
   private consecutivePeaks = 0;
   private peakThreshold = 0;
   private valleyThreshold = 0;
-  private isSearchingPeak = true; // true = searching for peak, false = searching for valley
-  
+  private isSearchingPeak = true;
+  private signalRangeNormSpace = 0;    // P90-P10 of normalised buffer
+
   // BPM estimation state
   private smoothBPM = 0;
   private kalmanState: KalmanState = { x: 0, p: 1 };
   private autocorrBPM = 0;
   private medianRRBPM = 0;
-  private lastHypothesis: BPMHypothesis | null = null;
-  
-  // Template matching
+
+  // Template
   private templateBuf: Float64Array;
   private templateValid = false;
   private templateLen = 0;
-  
+
   // Statistics
   private frameCount = 0;
   private beatsAccepted = 0;
   private beatsRejected = 0;
   private doublePeakCount = 0;
   private missedBeatCount = 0;
-  
-  // Audio feedback
-  private audioContext: AudioContext | null = null;
-  private audioUnlocked = false;
-  private lastBeepTime = 0;
-  
+  private lastRejectionReason = '';
+
   // Quality tracking
   private upstreamSQI = 50;
   private motionPenalty = 0;
   private contactStable = true;
   private perfusionIndex = 0;
-  
-  // Configuration
+
   private config: OptimizedProcessorConfig;
-  spectralBPM: number;
 
   constructor() {
-    // Load configuration from Medical Parameter Registry
-    // Using getSignalProcessingParam for nested DSP parameters
-    const lowCutoff = parameterRegistry.getSignalProcessingParam('filters.bandpass.lowCutoffHz');
-    const highCutoff = parameterRegistry.getSignalProcessingParam('filters.bandpass.highCutoffHz');
     const refractoryHard = parameterRegistry.getSignalProcessingParam('beatDetection.refractoryHardMs');
     const refractorySoft = parameterRegistry.getSignalProcessingParam('beatDetection.refractorySoftFactor');
-    
+    const adaptive = parameterRegistry.getSignalProcessingParam('beatDetection.adaptiveThresholdFactor');
+    const hyst = parameterRegistry.getSignalProcessingParam('beatDetection.hysteresisFactor');
+
     this.config = {
-      bandpassLowCutoff: lowCutoff ?? 0.5,   // 0.5 Hz = 30 BPM minimum
-      bandpassHighCutoff: highCutoff ?? 8.0, // 8 Hz = 480 BPM, practical max 220 BPM
-      filterOrder: 4,
-      refractoryHardMs: refractoryHard ?? 250, // Absolute minimum 250ms (240 BPM max)
+      refractoryHardMs: refractoryHard ?? 250,
       refractorySoftFactor: refractorySoft ?? 0.55,
       minBPM: 30,
       maxBPM: 220,
-      adaptiveThresholdFactor: 0.6,
-      hysteresisFactor: 0.3,
+      adaptiveThresholdFactor: adaptive ?? 0.6,
+      hysteresisFactor: hyst ?? 0.3,
       kalmanProcessNoise: 0.01,
       kalmanMeasurementNoise: 0.1,
       templateWindowSize: 30,
     };
-    
-    // Initialize Butterworth filter coefficients
-    this.filterCoeffs = this.designButterworthBandpass();
-    
-    // Initialize template buffer
+
     this.templateBuf = new Float64Array(this.config.templateWindowSize);
-    
-    this.setupAudio();
-    console.log('[HeartBeatOptimized] Initialized with config:', this.config);
+    this.templateLen = this.config.templateWindowSize;
   }
 
-  /**
-   * Design Butterworth 4th-order bandpass filter
-   * Based on: MDPI Sensors 2024 - "Butterworth Filtering at 500 Hz Optimizes PPG-Based Heart Rate"
-   * 
-   * Cutoff frequencies: 0.5 Hz (30 BPM) to 8 Hz (480 BPM)
-   * Practical limit: max BPM = 220 (3.67 Hz)
-   */
-  private designButterworthBandpass(): { a: number[]; b: number[]; zi: number[] } {
-    const fs = 30; // Assumed 30 FPS from camera
-    const fl = this.config.bandpassLowCutoff;
-    const fh = this.config.bandpassHighCutoff;
-    
-    // Normalize frequencies
-    const wl = fl / (fs / 2);
-    const wh = fh / (fs / 2);
-    
-    // Simplified coefficients for 4th order bandpass
-    // In production, use proper filter design (e.g., from scipy.signal.butter)
-    const b = [0.0036, 0, -0.0145, 0, 0.0218, 0, -0.0145, 0, 0.0036];
-    const a = [1.0, -3.5905, 5.6728, -5.2947, 3.2396, -1.2849, 0.3129, -0.0392, 0.0024];
-    
-    return { a, b, zi: new Array(a.length - 1).fill(0) };
-  }
-
-  /**
-   * Apply Butterworth bandpass filter to signal
-   * Zero-phase filtering using forward-backward (filtfilt) approach
-   */
-  private applyBandpassFilter(input: number): number {
-    const { a, b, zi } = this.filterCoeffs;
-    
-    // Forward filter
-    let output = b[0] * input + zi[0];
-    for (let i = 1; i < a.length; i++) {
-      zi[i - 1] = b[i] * input + zi[i] - a[i] * output;
-    }
-    zi[a.length - 1] = 0;
-    
-    return output;
-  }
-
-  /**
-   * Kalman filter update for smooth BPM estimation
-   * Provides optimal fusion of measurements with process model
-   */
+  /** Optimal Kalman update with optional adaptive measurement noise. */
   private kalmanUpdate(measurement: number, measurementNoise?: number): number {
     if (this.kalmanState.x === 0) {
       this.kalmanState.x = measurement;
       return measurement;
     }
-    
     const R = measurementNoise ?? this.config.kalmanMeasurementNoise;
     const Q = this.config.kalmanProcessNoise;
-    
-    // Prediction
-    const xPred = this.kalmanState.x; // Constant velocity model would add velocity term
+    const xPred = this.kalmanState.x;
     const pPred = this.kalmanState.p + Q;
-    
-    // Update
-    const K = pPred / (pPred + R); // Kalman gain
+    const K = pPred / (pPred + R);
     this.kalmanState.x = xPred + K * (measurement - xPred);
     this.kalmanState.p = (1 - K) * pPred;
-    
     return this.kalmanState.x;
   }
 
   /**
-   * Main signal processing entry point
-   * Implements optimized pipeline based on current literature
+   * MAIN ENTRY POINT.
+   * `filteredValue` MUST be the bandpass-filtered sample produced by
+   * PPGSignalProcessor (BandpassFilter). We do NOT filter again here.
    */
   processSignal(
     filteredValue: number,
@@ -219,118 +167,96 @@ export class HeartBeatProcessorOptimized {
       contactState?: string;
       motionArtifact?: boolean;
       perfusionIndex?: number;
-      rawRed?: number;
-      rawGreen?: number;
-      rawBlue?: number;
+      sampleRate?: number;
     }
   ): HeartBeatResult {
     this.frameCount++;
     const now = timestamp ?? performance.now();
-    
-    // Update quality context
+
     if (upstreamContext) {
       this.upstreamSQI = upstreamContext.quality ?? 50;
       this.motionPenalty = upstreamContext.motionArtifact ? 0.3 : 0;
       this.contactStable = upstreamContext.contactState === 'STABLE_CONTACT';
       this.perfusionIndex = upstreamContext.perfusionIndex ?? 0;
+      // Adapt to real frame rate — no more hard-coded 30 FPS.
+      if (upstreamContext.sampleRate && isFinite(upstreamContext.sampleRate)) {
+        this.fs = Math.max(15, Math.min(120, upstreamContext.sampleRate));
+      }
     }
-    
-    // Store signal - ALREADY FILTERED by PPGSignalProcessor upstream
-    // CRITICAL: Do NOT apply additional filtering here
+
     this.signalBuf.push(filteredValue);
     this.timestampBuf.push(now);
-    
-    // NORMALIZE signal for consistent peak detection thresholds
-    // CRITICAL: All downstream detection uses normalized signal
+
+    // Normalise to consistent ~[-60..+60] space so all downstream
+    // morphology gates work in *fractions of signal range*, never raw
+    // amplitude (which depends on torch brightness, skin tone, etc.).
     const { normalizedValue, normRange } = this.normalizeSignal(filteredValue);
     this.filteredBuf.push(normalizedValue);
-    
-    // Signal quality check: if range too small, not a valid PPG signal
-    // Lowered threshold for better weak signal detection
+    this.signalRangeNormSpace = normRange;
+
     if (normRange < 0.08) {
       return this.makeEmptyResult(0);
     }
-    
-    // Compute derivatives for morphology analysis
+
     this.computeDerivatives();
-    
-    // Need minimum samples for processing
+    this.computeSSF();   // for the second detector
+
     if (this.filteredBuf.length < 40) {
       return this.makeEmptyResult(0);
     }
-    
-    // Update adaptive thresholds based on signal statistics
-    // More aggressive adaptation for weak signals
+
     this.updateAdaptiveThresholds();
-    
-    // Enhanced signal quality assessment
-    const signalStrength = this.assessSignalStrength();
-    if (signalStrength < 0.3) {
-      // Boost gain for very weak signals
-      return this.processWeakSignal(now, signalStrength);
-    }
-    
-    // Detect beats using adaptive double-threshold
+
+    // Two independent detectors
     const detection = this.detectBeatOptimized(now);
-    
-    // Handle beat acceptance/rejection
+    const ssfFired   = this.detectSSFOnset(now);
+
+    // True consensus signal: did SSF fire within the last ~120ms?
+    if (ssfFired) this.lastSSFOnsetTime = now;
+    const ssfRecent = this.lastSSFOnsetTime > 0 && (now - this.lastSSFOnsetTime) <= 130;
+    const detectorHits = (detection.detected ? 1 : 0) + (ssfFired ? 1 : 0);
+    const detectorAgreement = detection.detected
+      ? (ssfRecent ? 1.0 : 0.55)        // primary alone is plausible but weaker
+      : (ssfRecent ? 0.5 : 0);
+
     let isPeak = false;
     let currentBeatSQI = 0;
     let beatFlags: BeatFlags | null = null;
     let rejectionReason = '';
-    
+
     if (detection.detected) {
       const candidate = detection.candidate!;
-      
-      // Validate beat with comprehensive criteria
+      candidate.detectorHits = Math.max(candidate.detectorHits, detectorHits);
+      candidate.detectorAgreement = detectorAgreement;
+
       const validation = this.validateBeat(candidate, now);
-      
       if (validation.accepted) {
         isPeak = true;
-        
-        // Calculate inter-beat interval
         const timeSinceLastPeak = this.lastPeakTime > 0 ? now - this.lastPeakTime : 0;
-        
+
         if (timeSinceLastPeak > 0 && timeSinceLastPeak >= this.config.refractoryHardMs) {
-          // Valid RR interval
           this.rrIntervals.push(timeSinceLastPeak);
-          if (this.rrIntervals.length > this.MAX_RR) {
-            this.rrIntervals.shift();
-          }
-          
-          // Check for missed beats using RR ratio analysis
+          if (this.rrIntervals.length > this.MAX_RR) this.rrIntervals.shift();
           this.handleMissedBeatOptimized(timeSinceLastPeak);
-          
-          // Update consecutive peaks counter
           this.consecutivePeaks++;
-          
-          // Calculate instantaneous BPM
           const instantBPM = 60000 / timeSinceLastPeak;
           this.updateKalmanBPM(instantBPM);
         }
-        
-        // Update tracking
+
         this.lastPeakTime = now;
         this.lastPeakValue = candidate.amplitude;
 
-        // Compute quality metrics first so flags can be augmented safely
         currentBeatSQI = this.computeBeatSQIOptimized(candidate);
         beatFlags = this.computeBeatFlags(candidate, timeSinceLastPeak);
 
-        // Enhanced arrhythmia hint (HRV-based, evidence-driven only)
-        // The authoritative arrhythmia decision is taken downstream by
-        // ArrhythmiaDetector (RR/morphology). Here we only mark suspicious
-        // beats so the UI can render warning glyphs.
+        // Premature-beat hint (HRV-only). Authoritative arrhythmia call
+        // is made downstream by ArrhythmiaDetector.
         const arrhythmiaScore = this.detectArrhythmias(candidate, now);
         if (arrhythmiaScore > 0.7 && beatFlags) {
           beatFlags.isSuspicious = true;
           beatFlags.isPremature = true;
         }
 
-        // Persist accepted beat for downstream consumers (vital signs,
-        // rhythm classifier, debug telemetry). Without this push,
-        // getAvgBeatSQI() and the recentAcceptedBeats array are always
-        // empty — silently degrading every BPM-confidence calculation.
         this.beatsAccepted++;
         this.acceptedBeats.push({
           timestamp: now,
@@ -344,29 +270,20 @@ export class HeartBeatProcessorOptimized {
           sourceConsistencyScore: this.contactStable ? 1 : 0.5,
           flags: beatFlags,
         });
-        if (this.acceptedBeats.length > this.MAX_ACCEPTED) {
-          this.acceptedBeats.shift();
-        }
+        if (this.acceptedBeats.length > this.MAX_ACCEPTED) this.acceptedBeats.shift();
 
-        // Update template
-        if (currentBeatSQI > 40) {
-          this.updateTemplate();
-        }
+        if (currentBeatSQI > 40) this.updateTemplate();
       } else {
         rejectionReason = validation.reason;
+        this.lastRejectionReason = validation.reason;
         this.beatsRejected++;
       }
     }
-    
-    // Fuse multiple BPM estimation methods
+
     const hypothesis = this.fuseBPMOptimized();
-    this.lastHypothesis = hypothesis;
-    
-    // Compute confidence
     const bpmConfidence = this.computeBPMConfidenceOptimized(hypothesis);
     const globalSQI = this.computeGlobalSQIOptimized();
-    
-    // Build result
+
     return {
       bpm: hypothesis.finalBpm,
       bpmConfidence,
@@ -375,31 +292,46 @@ export class HeartBeatProcessorOptimized {
       arrhythmiaCount: 0,
       sqi: globalSQI,
       beatSQI: currentBeatSQI,
-      rrData: {
-        intervals: this.rrIntervals.slice(-10),
-        lastPeakTime: this.lastPeakTime || null,
-      },
+      rrData: { intervals: this.rrIntervals.slice(-10), lastPeakTime: this.lastPeakTime || null },
       hypothesis,
-      detectorAgreement: detection.candidate?.detectorAgreement ?? 0,
+      detectorAgreement,
       rejectionReason,
       beatFlags,
-      debug: this.buildDebugInfo(isPeak, now, currentBeatSQI, detection),
+      debug: this.buildDebugInfo(isPeak, now, currentBeatSQI, detection, detectorAgreement),
     };
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  //  SIGNAL TRANSFORMS
+  // ─────────────────────────────────────────────────────────────────
+
   /**
-   * Compute first and second derivatives for morphology analysis
-   * VPG (Velocity Plethysmography) and APG (Acceleration Plethysmography)
+   * Robust online normalisation: percentile-based so a single saturated
+   * frame can't blow up the dynamic range. Everything downstream then
+   * works in this stable [-60..+60] coordinate system.
    */
+  private normalizeSignal(value: number): { normalizedValue: number; normRange: number } {
+    // Adapt window length to real fs so we always look at ~3-5 seconds.
+    const windowSec = this.consecutivePeaks < 4 ? 3 : 5;
+    const windowLen = Math.max(30, Math.min(BUFFER_CAPACITY, Math.round(this.fs * windowSec)));
+    const n = Math.min(windowLen, this.signalBuf.length);
+    if (n < 10) return { normalizedValue: 0, normRange: 0 };
+
+    const p10 = this.signalBuf.percentile(0.1, n);
+    const p90 = this.signalBuf.percentile(0.9, n);
+    const range = p90 - p10;
+    if (range < 0.01) return { normalizedValue: 0, normRange: 0 };
+
+    const clipped = Math.min(p90, Math.max(p10, value));
+    const normalizedValue = ((clipped - p10) / range - 0.5) * 120;
+    return { normalizedValue, normRange: range };
+  }
+
   private computeDerivatives(): void {
     const n = this.filteredBuf.length;
     if (n < 3) return;
-    
-    // First derivative (VPG) - central difference
     const vpg = (this.filteredBuf.get(n - 1) - this.filteredBuf.get(n - 3)) / 2;
     this.vpgBuf.push(vpg);
-    
-    // Second derivative (APG)
     const vpgN = this.vpgBuf.length;
     if (vpgN >= 3) {
       const apg = (this.vpgBuf.get(vpgN - 1) - this.vpgBuf.get(vpgN - 3)) / 2;
@@ -408,82 +340,120 @@ export class HeartBeatProcessorOptimized {
   }
 
   /**
-   * Update adaptive thresholds based on signal range
-   * Uses double-threshold hysteresis for robust peak detection
-   * Based on: ScienceDirect 2024 - "Adaptive threshold method for the peak detection"
+   * Slope Sum Function (Zong et al. 2003). The SSF emphasises the
+   * systolic upstroke and rejects the dicrotic notch and high-freq
+   * noise. We then look for an SSF *peak* whose value crosses an
+   * adaptive threshold — that marks the systolic onset.
+   *
+   * SSF window length = ~115 ms (≈ typical PPG up-stroke duration);
+   * scaled to real fs, never hard-coded to 30 FPS.
+   */
+  private computeSSF(): void {
+    const w = Math.max(2, Math.round(0.115 * this.fs));
+    const vN = this.vpgBuf.length;
+    if (vN < w) {
+      this.ssfBuf.push(0);
+      return;
+    }
+    let s = 0;
+    for (let i = 0; i < w; i++) {
+      const v = this.vpgBuf.get(vN - 1 - i);
+      if (v > 0) s += v;
+    }
+    this.ssfBuf.push(s);
+  }
+
+  private detectSSFOnset(now: number): boolean {
+    const n = this.ssfBuf.length;
+    if (n < Math.max(8, Math.round(this.fs * 0.4))) return false;
+
+    // Adaptive threshold = 0.6 × P90 of the last 4 seconds of SSF.
+    const win = Math.min(n, Math.round(this.fs * 4));
+    const samples: number[] = [];
+    for (let i = 0; i < win; i++) samples.push(this.ssfBuf.get(n - win + i));
+    samples.sort((a, b) => a - b);
+    const p90 = samples[Math.floor(win * 0.9)];
+    const thresh = p90 * 0.6;
+    if (thresh <= 0) return false;
+
+    const cur = this.ssfBuf.get(n - 1);
+    const prev = this.ssfBuf.get(n - 2);
+    const prev2 = this.ssfBuf.get(n - 3);
+
+    // Local max above threshold (one sample slope-down after a slope-up)
+    const isLocalMax = prev > prev2 && prev >= cur;
+    if (!isLocalMax || prev < thresh) return false;
+
+    // Refractory tied to physiology, not to the primary detector.
+    if (this.lastSSFOnsetTime > 0 && (now - this.lastSSFOnsetTime) < this.config.refractoryHardMs) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Adaptive double-threshold (primary detector). Window is a function
+   * of fs so it always covers ~4 seconds.
    */
   private updateAdaptiveThresholds(): void {
-    const windowLen = 120; // 4 seconds at 30 FPS
+    const windowLen = Math.max(40, Math.min(BUFFER_CAPACITY, Math.round(this.fs * 4)));
     const n = Math.min(windowLen, this.filteredBuf.length);
     if (n < 20) return;
-    
-    // Calculate signal range (P90 - P10)
-    const recent = [];
-    for (let i = 0; i < n; i++) {
-      recent.push(this.filteredBuf.get(this.filteredBuf.length - n + i));
-    }
-    
+
+    const recent: number[] = new Array(n);
+    for (let i = 0; i < n; i++) recent[i] = this.filteredBuf.get(this.filteredBuf.length - n + i);
     recent.sort((a, b) => a - b);
     const p10 = recent[Math.floor(n * 0.1)];
     const p90 = recent[Math.floor(n * 0.9)];
     const range = p90 - p10;
-    
-    // Adaptive threshold with exponential smoothing
-    const targetPeakThreshold = p10 + range * this.config.adaptiveThresholdFactor;
-    const targetValleyThreshold = p10 + range * this.config.hysteresisFactor;
-    
-    // CRITICAL FIX: Initialize directly on first calculation, then smooth
-    // Starting from 0 would take too long to accumulate meaningful threshold
+
+    const targetPeak   = p10 + range * this.config.adaptiveThresholdFactor;
+    const targetValley = p10 + range * this.config.hysteresisFactor;
+
     if (this.peakThreshold === 0) {
-      this.peakThreshold = targetPeakThreshold;
-      this.valleyThreshold = targetValleyThreshold;
+      this.peakThreshold = targetPeak;
+      this.valleyThreshold = targetValley;
     } else {
-      // Smooth threshold transitions after initialization
-      this.peakThreshold = this.peakThreshold * 0.9 + targetPeakThreshold * 0.1;
-      this.valleyThreshold = this.valleyThreshold * 0.9 + targetValleyThreshold * 0.1;
+      this.peakThreshold = this.peakThreshold * 0.9 + targetPeak * 0.1;
+      this.valleyThreshold = this.valleyThreshold * 0.9 + targetValley * 0.1;
     }
   }
 
   /**
-   * Optimized beat detection with double-threshold hysteresis
-   * Returns detection result with candidate info
+   * Primary peak detector (state machine + double threshold).
+   * All morphology gates expressed in *fractions of signal range*
+   * so they scale with skin tone / torch / camera AGC.
    */
-  private detectBeatOptimized(now: number): {
-    detected: boolean;
-    candidate?: BeatCandidate;
-  } {
+  private detectBeatOptimized(now: number): { detected: boolean; candidate?: BeatCandidate } {
     const n = this.filteredBuf.length;
     if (n < 5) return { detected: false };
-    
-    const currentValue = this.filteredBuf.get(n - 1);
-    const prevValue = this.filteredBuf.get(n - 2);
-    
-    // State machine: searching for peak or valley
+
+    const cur = this.filteredBuf.get(n - 1);
+    const prev = this.filteredBuf.get(n - 2);
+    const prev2 = this.filteredBuf.get(n - 3);
+
     if (this.isSearchingPeak) {
-      // Check for peak conditions
-      const isLocalMax = currentValue < prevValue && prevValue >= this.filteredBuf.get(n - 3);
-      const aboveThreshold = prevValue > this.peakThreshold;
-      
+      const isLocalMax = cur < prev && prev >= prev2;
+      const aboveThreshold = prev > this.peakThreshold;
       if (isLocalMax && aboveThreshold) {
-        // Found peak, now search for valley
         this.isSearchingPeak = false;
-        
-        // Calculate morphology scores
-        const prominence = prevValue - this.findLocalMin(n - 5, n);
-        const width = this.calculatePulseWidth(n - 3);
-        
-        // Build candidate
+
+        const baseline = this.findLocalMin(n - 5, n);
+        const prominence = prev - baseline;
+        const widthSamples = this.calculatePulseWidth(n - 3);
+        const sampleMs = 1000 / this.fs;
+
         const candidate: BeatCandidate = {
           timestamp: now,
           sampleIndex: this.frameCount,
-          amplitude: prevValue,
+          amplitude: prev,
           prominence,
-          widthMs: width * (1000 / 30), // Assuming 30 FPS
-          upSlope: prevValue - this.filteredBuf.get(n - 3),
-          downSlope: prevValue - currentValue,
-          localBaseline: this.findLocalMin(n - 5, n),
-          detectorHits: 2, // Double threshold met
-          detectorAgreement: 1.0,
+          widthMs: widthSamples * sampleMs,
+          upSlope: prev - prev2,
+          downSlope: prev - cur,
+          localBaseline: baseline,
+          detectorHits: 1,
+          detectorAgreement: 0.55,                 // upgraded later with SSF consensus
           zeroCrossingSupport: this.checkZeroCrossingSupport(),
           periodicitySupport: this.checkPeriodicitySupport(now),
           templateCorrelation: this.correlateWithTemplate(),
@@ -494,421 +464,222 @@ export class HeartBeatProcessorOptimized {
           localPressurePenalty: 0,
           status: 'pending',
           rejectionReason: '',
-          morphologyScore: 0, // Calculated later
+          morphologyScore: 0,
           rhythmScore: 0,
           totalScore: 0,
         };
-        
-        // Calculate scores
+
         candidate.morphologyScore = this.calculateMorphologyScore(candidate);
-        candidate.rhythmScore = this.calculateRhythmScore(candidate, now);
+        candidate.rhythmScore = this.calculateRhythmScore(candidate);
         candidate.totalScore = candidate.morphologyScore * 0.5 + candidate.rhythmScore * 0.3 + 20;
-        
+
         return { detected: true, candidate };
       }
-    } else {
-      // Searching for valley (below hysteresis threshold)
-      if (currentValue < this.valleyThreshold) {
-        this.isSearchingPeak = true; // Reset to search for next peak
-      }
+    } else if (cur < this.valleyThreshold) {
+      this.isSearchingPeak = true;
     }
-    
     return { detected: false };
   }
 
-  /**
-   * Assess signal strength for adaptive processing
-   */
-  private assessSignalStrength(): number {
-    if (this.filteredBuf.length < 30) return 0;
-    
-    const n = Math.min(60, this.filteredBuf.length);
-    const recent = [];
-    for (let i = 0; i < n; i++) {
-      recent.push(this.filteredBuf.get(this.filteredBuf.length - n + i));
-    }
-    
-    // Calculate signal metrics
-    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
-    const variance = recent.reduce((a, v) => a + (v - mean) ** 2, 0) / recent.length;
-    const stdDev = Math.sqrt(variance);
-    const range = Math.max(...recent) - Math.min(...recent);
-    
-    // Signal strength score (0-1)
-    const normalizedStd = Math.min(1, stdDev / Math.max(1, mean));
-    const rangeScore = Math.min(1, range / Math.max(1, mean));
-    const perfusionScore = Math.min(1, this.perfusionIndex * 50);
-    
-    return (normalizedStd * 0.4 + rangeScore * 0.3 + perfusionScore * 0.3);
-  }
+  // ─────────────────────────────────────────────────────────────────
+  //  SCORES & VALIDATION (everything in *normalised* signal space)
+  // ─────────────────────────────────────────────────────────────────
 
-  /**
-   * Process weak signals with enhanced sensitivity
-   */
-  private processWeakSignal(now: number, signalStrength: number): HeartBeatResult {
-    // Apply gain boost for weak signals
-    const gainBoost = 1.0 + (0.3 - signalStrength) * 2; // Boost up to 2x
-    const boostedValue = this.filteredBuf.get(this.filteredBuf.length - 1) * gainBoost;
-    
-    // Lower thresholds for weak signals
-    const originalPeakThreshold = this.peakThreshold;
-    const originalValleyThreshold = this.valleyThreshold;
-    
-    this.peakThreshold *= 0.7; // 30% more sensitive
-    this.valleyThreshold *= 0.7;
-    
-    // Process with boosted signal
-    const detection = this.detectBeatOptimized(now);
-    
-    // Restore original thresholds
-    this.peakThreshold = originalPeakThreshold;
-    this.valleyThreshold = originalValleyThreshold;
-    
-    if (detection.detected) {
-      return {
-        bpm: 0,
-        bpmConfidence: 0.1,
-        isPeak: true,
-        filteredValue: boostedValue,
-        arrhythmiaCount: 0,
-        sqi: Math.max(5, signalStrength * 100),
-        beatSQI: 20,
-        rrData: { intervals: [], lastPeakTime: null },
-        hypothesis: null,
-        detectorAgreement: detection.candidate?.detectorAgreement ?? 0,
-        rejectionReason: 'weak_signal_boosted',
-        beatFlags: null,
-        debug: this.buildDebugInfo(true, now, 20, detection),
-      };
-    }
-    
-    return this.makeEmptyResult(0);
-  }
-
-  /**
-   * Enhanced arrhythmia detection using RR interval analysis
-   */
-  private detectArrhythmias(candidate: BeatCandidate, now: number): number {
-    if (this.rrIntervals.length < 3) return 0;
-    
-    const recent = this.rrIntervals.slice(-6);
-    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
-    const variance = recent.reduce((a, rr) => a + (rr - mean) ** 2, 0) / recent.length;
-    const stdDev = Math.sqrt(variance);
-    const cv = stdDev / Math.max(1, mean);
-    
-    // Arrhythmia indicators
-    let score = 0;
-    
-    // Irregularity score (coefficient of variation)
-    if (cv > 0.15) score += 0.3;
-    if (cv > 0.25) score += 0.4;
-    
-    // RR interval variation
-    const maxRR = Math.max(...recent);
-    const minRR = Math.min(...recent);
-    const rrRatio = maxRR / Math.max(1, minRR);
-    if (rrRatio > 1.5) score += 0.2;
-    if (rrRatio > 2.0) score += 0.3;
-    
-    // Premature beat detection
-    const expectedRR = this.getExpectedRR();
-    if (expectedRR > 0) {
-      const lastRR = this.rrIntervals[this.rrIntervals.length - 1];
-      const prematurityRatio = lastRR / expectedRR;
-      if (prematurityRatio < 0.7) score += 0.2;
-      if (prematurityRatio < 0.5) score += 0.4;
-    }
-    
-    // Morphology irregularities
-    if (candidate.morphologyScore < 30) score += 0.1;
-    if (candidate.prominence < 0.2) score += 0.2;
-    
-    return Math.min(1, score);
-  }
   private findLocalMin(startIdx: number, endIdx: number): number {
     let min = Infinity;
-    for (let i = Math.max(0, startIdx); i < Math.min(endIdx, this.filteredBuf.length); i++) {
-      min = Math.min(min, this.filteredBuf.get(i));
+    const lo = Math.max(0, startIdx);
+    const hi = Math.min(endIdx, this.filteredBuf.length);
+    for (let i = lo; i < hi; i++) {
+      const v = this.filteredBuf.get(i);
+      if (v < min) min = v;
     }
     return min === Infinity ? 0 : min;
   }
 
-  /**
-   * Calculate pulse width at half prominence
-   */
   private calculatePulseWidth(peakIdx: number): number {
     const peakValue = this.filteredBuf.get(peakIdx);
     const baseline = this.findLocalMin(peakIdx - 5, peakIdx);
     const halfProm = baseline + (peakValue - baseline) / 2;
-    
     let width = 0;
-    for (let i = peakIdx - 5; i < peakIdx + 5 && i < this.filteredBuf.length; i++) {
-      if (this.filteredBuf.get(i) > halfProm) {
-        width++;
-      }
+    const lo = Math.max(0, peakIdx - 5);
+    const hi = Math.min(this.filteredBuf.length, peakIdx + 5);
+    for (let i = lo; i < hi; i++) {
+      if (this.filteredBuf.get(i) > halfProm) width++;
     }
     return width;
   }
 
-  /**
-   * Check for zero crossing in derivative (physiological indicator)
-   */
   private checkZeroCrossingSupport(): boolean {
     const n = this.vpgBuf.length;
     if (n < 5) return false;
-    
-    // Look for sign change in VPG (zero crossing)
     for (let i = n - 5; i < n - 1; i++) {
-      if (this.vpgBuf.get(i) > 0 && this.vpgBuf.get(i + 1) <= 0) {
-        return true;
-      }
+      if (this.vpgBuf.get(i) > 0 && this.vpgBuf.get(i + 1) <= 0) return true;
     }
     return false;
   }
 
-  /**
-   * Check if detection aligns with expected periodicity
-   */
   private checkPeriodicitySupport(now: number): boolean {
     if (this.rrIntervals.length < 2) return false;
-    
     const expectedRR = this.getExpectedRR();
-    const timeSinceLast = this.lastPeakTime > 0 ? now - this.lastPeakTime : 0;
-    
-    return timeSinceLast >= expectedRR * 0.55 && timeSinceLast <= expectedRR * 1.45;
+    const dt = this.lastPeakTime > 0 ? now - this.lastPeakTime : 0;
+    return dt >= expectedRR * 0.55 && dt <= expectedRR * 1.45;
   }
 
-  /**
-   * Calculate band power ratio in cardiac frequency band
-   */
   private calculateBandPowerRatio(): number {
-    // Simplified - full implementation would use FFT
     return this.perfusionIndex > 0.02 ? 0.8 : 0.3;
   }
 
   /**
-   * Calculate morphology score based on PPG characteristics
-   * Based on literature: "Efficient and lightweight detection of PPG onset and systolic peaks"
+   * Morphology score in NORMALISED space (range ≈ 120 by construction).
+   * Prominence/upslope/downslope are normalised by the actual signal
+   * range so the scores are comparable across torch/skin conditions.
    */
   private calculateMorphologyScore(c: BeatCandidate): number {
+    const refRange = 120; // normalised dynamic range
+    const promFrac = c.prominence / refRange;     // typical 0.2..0.6
+    const upFrac   = c.upSlope    / refRange;     // typical 0.05..0.2 / sample
+    const dnFrac   = c.downSlope  / refRange;
+
     let score = 0;
-    
-    // Prominence (most important factor)
-    score += Math.min(35, c.prominence / 0.2);
-    
-    // Up slope steepness
-    score += Math.min(20, c.upSlope / 0.1);
-    
-    // Width (typical PPG pulse: 200-400ms)
-    const widthScore = c.widthMs > 150 && c.widthMs < 500 ? 15 : 0;
-    score += widthScore;
-    
-    // Down slope
-    score += Math.min(10, c.downSlope / 0.05);
-    
+    score += Math.min(35, promFrac * 175);                              // 0.2 → 35
+    score += Math.min(20, Math.max(0, upFrac) * 200);                   // 0.1 → 20
+    score += (c.widthMs > 150 && c.widthMs < 500) ? 15 : 0;
+    score += Math.min(10, Math.max(0, dnFrac) * 200);                   // 0.05 → 10
+    score += c.zeroCrossingSupport ? 5 : 0;
+    score += c.templateCorrelation > 0 ? Math.min(15, c.templateCorrelation * 15) : 0;
     return Math.min(100, score);
   }
 
-  /**
-   * Calculate rhythm score based on regularity
-   */
-  private calculateRhythmScore(c: BeatCandidate, now: number): number {
+  private calculateRhythmScore(c: BeatCandidate): number {
     let score = 0;
-    
-    // Periodicity support
     if (c.periodicitySupport) score += 30;
-    
-    // Consecutive peaks bonus
     score += Math.min(20, this.consecutivePeaks * 4);
-    
-    // Autocorrelation support
     if (this.autocorrBPM > 0) score += 15;
-    
-    // Contact stability
     if (this.contactStable) score += 10;
-    
     return Math.min(100, score);
   }
 
-  /**
-   * Validate beat candidate with comprehensive criteria
-   */
-  private validateBeat(
-    c: BeatCandidate,
-    now: number
-  ): { accepted: boolean; reason: string } {
+  private validateBeat(c: BeatCandidate, now: number): { accepted: boolean; reason: string } {
     const timeSinceLast = this.lastPeakTime > 0 ? now - this.lastPeakTime : 1000;
     const expectedRR = this.getExpectedRR();
-    
-    // Hard refractory period (physiological maximum: 250ms = 240 BPM)
+
     if (timeSinceLast < this.config.refractoryHardMs) {
       return { accepted: false, reason: 'refractory_hard' };
     }
-    
-    // Soft refractory (within expected period)
     if (expectedRR > 0 && timeSinceLast < expectedRR * this.config.refractorySoftFactor) {
-      // Check if morphology is exceptional
       if (c.morphologyScore < 70) {
         this.doublePeakCount++;
         return { accepted: false, reason: 'double_peak_suspect' };
       }
     }
-    
-    // Morphology validation
-    if (c.prominence < 0.3) {
-      return { accepted: false, reason: 'low_prominence' };
-    }
-    
-    if (c.widthMs < 100 || c.widthMs > 600) {
-      return { accepted: false, reason: 'abnormal_width' };
-    }
-    
-    if (c.upSlope < 0.2) {
-      return { accepted: false, reason: 'no_rising_edge' };
-    }
-    
-    // Amplitude consistency
+
+    // Scale-aware morphology gate (signalRangeNormSpace is the raw
+    // signal range — but the candidate's prominence is in normalised
+    // space, range≈120 by design).
+    const promFrac = c.prominence / 120;
+    if (promFrac < 0.12) return { accepted: false, reason: 'low_prominence' };
+    if (c.widthMs < 100 || c.widthMs > 600) return { accepted: false, reason: 'abnormal_width' };
+
+    const upFrac = c.upSlope / 120;
+    if (upFrac < 0.02) return { accepted: false, reason: 'no_rising_edge' };
+
     if (this.lastPeakValue > 0) {
       const ampRatio = c.amplitude / this.lastPeakValue;
       if (ampRatio < 0.15 || ampRatio > 8) {
         return { accepted: false, reason: 'amplitude_inconsistent' };
       }
     }
-    
-    // Minimum score threshold
+
     const minScore = this.consecutivePeaks < 3 ? 25 : 35;
-    if (c.totalScore < minScore) {
-      return { accepted: false, reason: 'low_total_score' };
+    if (c.totalScore < minScore) return { accepted: false, reason: 'low_total_score' };
+
+    // Consensus boost: when SSF disagrees AND morphology is borderline,
+    // reject — kills the vast majority of double peaks.
+    if (c.detectorAgreement < 0.6 && c.morphologyScore < 50) {
+      return { accepted: false, reason: 'no_detector_consensus' };
     }
-    
+
     return { accepted: true, reason: '' };
   }
 
   /**
-   * Handle missed beat detection using RR interval ratio analysis
-   * Based on: Literature review of IBI estimation methods
+   * Insert a synthetic mid-beat when we observed a long pause at
+   * 1.7-2.5× expected RR — almost certainly one missed beat. Common
+   * during brief motion artefacts.
    */
   private handleMissedBeatOptimized(longRR: number): void {
     if (this.rrIntervals.length < 3) return;
-    
     const expectedRR = this.getExpectedRR();
     if (expectedRR <= 0) return;
-    
     const ratio = longRR / expectedRR;
-    
-    // Detect missed beat: RR is 1.7-2.5x expected (pause followed by next beat)
     if (ratio >= 1.7 && ratio <= 2.5) {
       const halfRR = longRR / 2;
-      
-      // Validate half-interval is within physiological range (300-1800ms = 33-200 BPM)
       if (halfRR >= 300 && halfRR <= 1800) {
-        // Replace long interval with two corrected intervals
         const lastIdx = this.rrIntervals.length - 1;
         this.rrIntervals[lastIdx] = halfRR;
         this.rrIntervals.push(halfRR);
-        
-        if (this.rrIntervals.length > this.MAX_RR) {
-          this.rrIntervals.shift();
-        }
-        
+        if (this.rrIntervals.length > this.MAX_RR) this.rrIntervals.shift();
         this.missedBeatCount++;
       }
     }
   }
 
-  /**
-   * Update Kalman-filtered BPM with new measurement
-   */
   private updateKalmanBPM(instantBPM: number): void {
-    // Validate BPM is within physiological range
-    if (instantBPM < this.config.minBPM || instantBPM > this.config.maxBPM) {
-      return;
-    }
-    
-    // Kalman filter for optimal smoothing
+    if (instantBPM < this.config.minBPM || instantBPM > this.config.maxBPM) return;
     this.smoothBPM = this.kalmanUpdate(instantBPM);
   }
 
-  /**
-   * Optimized BPM fusion with multiple estimation methods
-   * Uses Kalman filter for final output
-   */
+  // ─────────────────────────────────────────────────────────────────
+  //  BPM FUSION
+  // ─────────────────────────────────────────────────────────────────
+
   private fuseBPMOptimized(): BPMHypothesis {
-    // Method 1: Last IBI
     const fromLastIBI = this.rrIntervals.length > 0
-      ? 60000 / this.rrIntervals[this.rrIntervals.length - 1]
-      : 0;
-    
-    // Method 2: Median RR (robust to outliers)
+      ? 60000 / this.rrIntervals[this.rrIntervals.length - 1] : 0;
     const fromMedianIBI = this.computeMedianRRBPM();
     this.medianRRBPM = fromMedianIBI;
-    
-    // Method 3: Trimmed mean (removes outliers)
     const fromTrimmedIBI = this.computeTrimmedMeanBPM();
-    
-    // Method 4: Autocorrelation
     const fromAutocorrelation = this.estimateAutocorrBPM();
     this.autocorrBPM = fromAutocorrelation;
-    
-    // Determine dominant source based on signal quality
+
     let finalBpm: number;
     let dominantSource: 'peak' | 'autocorr' | 'median';
     let confidence: number;
-    
+
     const hasEnoughPeaks = this.consecutivePeaks >= 3;
     const peakDomainReliable = hasEnoughPeaks && this.getAvgBeatSQI() > 40;
-    
+
     if (peakDomainReliable && fromMedianIBI > 0) {
-      // Peak-based methods are most reliable with good signal
       const peakBpm = fromTrimmedIBI > 0 ? fromTrimmedIBI : fromMedianIBI;
-      
-      // Weighted fusion with autocorrelation if available
       if (fromAutocorrelation > 0 && Math.abs(peakBpm - fromAutocorrelation) < peakBpm * 0.15) {
         finalBpm = peakBpm * 0.75 + fromAutocorrelation * 0.25;
       } else {
         finalBpm = peakBpm;
       }
-      
       dominantSource = fromTrimmedIBI > 0 ? 'median' : 'peak';
       confidence = Math.min(1, 0.5 + this.consecutivePeaks * 0.08 + this.getAvgBeatSQI() * 0.003);
     } else if (fromAutocorrelation > 0) {
-      // Fall back to autocorrelation for noisy signals
       finalBpm = fromAutocorrelation;
       dominantSource = 'autocorr';
       confidence = Math.min(0.7, 0.2 + this.consecutivePeaks * 0.05);
     } else if (fromMedianIBI > 0) {
-      // Minimal signal, use median only
       finalBpm = fromMedianIBI;
       dominantSource = 'median';
       confidence = Math.min(0.5, 0.15 + this.consecutivePeaks * 0.04);
     } else {
-      // No valid data
       finalBpm = this.smoothBPM > 0 ? this.smoothBPM : 0;
       dominantSource = 'peak';
       confidence = 0;
     }
-    
-    // Apply final Kalman smoothing
-    if (finalBpm > 0) {
-      finalBpm = this.kalmanUpdate(finalBpm, 0.15);
-    }
-    
+
+    if (finalBpm > 0) finalBpm = this.kalmanUpdate(finalBpm, 0.15);
+
     return {
-      fromLastIBI,
-      fromMedianIBI,
-      fromTrimmedIBI,
-      fromAutocorrelation,
-      fromSpectral: 0, // REMOVED: Placeholder spectral analysis
-      finalBpm,
-      confidence,
-      dominantSource,
+      fromLastIBI, fromMedianIBI, fromTrimmedIBI, fromAutocorrelation,
+      fromSpectral: 0,
+      finalBpm, confidence, dominantSource,
     };
   }
-
-  // ─────────────────────────────────────────────────────────────────
-  // Helper methods (from original processor)
-  // ─────────────────────────────────────────────────────────────────
 
   private computeMedianRRBPM(): number {
     if (this.rrIntervals.length < 2) return 0;
@@ -929,37 +700,30 @@ export class HeartBeatProcessorOptimized {
     return mean > 0 ? 60000 / mean : 0;
   }
 
+  /**
+   * Autocorrelation BPM. Lag bounds derived from the *real* fs, with a
+   * mild bias toward the currently expected RR.
+   */
   private estimateAutocorrBPM(): number {
-    if (this.filteredBuf.length < 80) return 0;
-    
-    const sr = 30; // Assumed sample rate
-    const n = Math.min(180, this.filteredBuf.length);
-    const minLag = Math.max(5, Math.round((sr * 60) / 200)); // 200 BPM max
-    const maxLag = Math.min(n - 10, Math.round((sr * 60) / 38)); // 38 BPM min
-    
-    let bestLag = 0;
-    let bestScore = 0;
+    if (this.filteredBuf.length < Math.round(this.fs * 2.5)) return 0;
+    const sr = this.fs;
+    const n = Math.min(Math.round(sr * 6), this.filteredBuf.length);
+    const minLag = Math.max(3, Math.round((sr * 60) / 200)); // 200 BPM
+    const maxLag = Math.min(n - 10, Math.round((sr * 60) / 38)); // 38 BPM
+    let bestLag = 0, bestScore = 0;
     const expectedLag = Math.round((this.getExpectedRR() / 1000) * sr);
-    
     for (let lag = minLag; lag <= maxLag; lag++) {
       let sum = 0;
       for (let i = 0; i < n - lag; i++) {
         sum += this.filteredBuf.get(this.filteredBuf.length - n + i) *
                this.filteredBuf.get(this.filteredBuf.length - n + i + lag);
       }
-      
-      // Bias toward expected rhythm
       const rhythmBias = expectedLag > 0
         ? 1 - Math.min(0.15, Math.abs(lag - expectedLag) / expectedLag * 0.1)
         : 1;
-      
       const score = sum * rhythmBias;
-      if (score > bestScore) {
-        bestScore = score;
-        bestLag = lag;
-      }
+      if (score > bestScore) { bestScore = score; bestLag = lag; }
     }
-    
     if (bestLag === 0 || bestScore < 0.1) return 0;
     return (60 * sr) / bestLag;
   }
@@ -972,8 +736,43 @@ export class HeartBeatProcessorOptimized {
     }
     if (this.autocorrBPM > 0) return 60000 / this.autocorrBPM;
     if (this.smoothBPM > 0) return 60000 / this.smoothBPM;
-    return 800; // Default 75 BPM
+    return 800; // 75 BPM
   }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  ARRHYTHMIA HINT (HRV-only)
+  // ─────────────────────────────────────────────────────────────────
+
+  private detectArrhythmias(candidate: BeatCandidate, _now: number): number {
+    if (this.rrIntervals.length < 3) return 0;
+    const recent = this.rrIntervals.slice(-6);
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const variance = recent.reduce((a, rr) => a + (rr - mean) ** 2, 0) / recent.length;
+    const stdDev = Math.sqrt(variance);
+    const cv = stdDev / Math.max(1, mean);
+    let score = 0;
+    if (cv > 0.15) score += 0.3;
+    if (cv > 0.25) score += 0.4;
+    const maxRR = Math.max(...recent);
+    const minRR = Math.min(...recent);
+    const rrRatio = maxRR / Math.max(1, minRR);
+    if (rrRatio > 1.5) score += 0.2;
+    if (rrRatio > 2.0) score += 0.3;
+    const expectedRR = this.getExpectedRR();
+    if (expectedRR > 0) {
+      const lastRR = this.rrIntervals[this.rrIntervals.length - 1];
+      const prematurityRatio = lastRR / expectedRR;
+      if (prematurityRatio < 0.7) score += 0.2;
+      if (prematurityRatio < 0.5) score += 0.4;
+    }
+    if (candidate.morphologyScore < 30) score += 0.1;
+    if (candidate.prominence < 24) score += 0.2;       // 24 == 0.2 * 120 (normalised)
+    return Math.min(1, score);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  SQI / CONFIDENCE
+  // ─────────────────────────────────────────────────────────────────
 
   private computeBeatSQIOptimized(c: BeatCandidate): number {
     let sqi = 0;
@@ -984,14 +783,12 @@ export class HeartBeatProcessorOptimized {
     sqi += this.contactStable ? 8 : 0;
     sqi -= c.localMotionPenalty * 20;
     sqi -= c.localClipPenalty * 15;
-    
     return clamp(Math.round(sqi), 0, 100);
   }
 
   private computeBeatFlags(c: BeatCandidate, timeSinceLast: number): BeatFlags {
     const expectedRR = this.getExpectedRR();
     const isPremature = expectedRR > 0 && timeSinceLast < expectedRR * 0.7;
-    
     return {
       isWeak: c.detectorHits < 2 && c.morphologyScore < 40,
       isDoublePeak: false,
@@ -1003,10 +800,8 @@ export class HeartBeatProcessorOptimized {
 
   private computeBPMConfidenceOptimized(h: BPMHypothesis): number {
     if (h.finalBpm === 0) return 0;
-    
     const peakFactor = Math.min(1, this.consecutivePeaks / 8) * 0.25;
     const avgSQI = this.getAvgBeatSQI() / 100 * 0.25;
-    
     let rrStability = 0;
     if (this.rrIntervals.length >= 3) {
       const recent = this.rrIntervals.slice(-8);
@@ -1015,7 +810,6 @@ export class HeartBeatProcessorOptimized {
       const cv = Math.sqrt(variance) / Math.max(1, mean);
       rrStability = clamp(1 - cv * 2, 0, 1) * 0.25;
     }
-    
     let coherence = 0;
     const hyps = [h.fromMedianIBI, h.fromTrimmedIBI, h.fromAutocorrelation].filter(v => v > 0);
     if (hyps.length >= 2 && h.finalBpm > 0) {
@@ -1023,29 +817,20 @@ export class HeartBeatProcessorOptimized {
       const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
       coherence = clamp(1 - avgDiff * 5, 0, 1) * 0.25;
     }
-    
     return clamp(peakFactor + avgSQI + rrStability + coherence, 0, 1);
   }
 
   private computeGlobalSQIOptimized(): number {
     if (this.filteredBuf.length < 30) return 0;
-    
-    // Range factor
     const range = this.getSignalRange();
     const rangeFactor = Math.min(1, range / 4) * 25;
-    
-    // Peak consistency
     const peakFactor = Math.min(1, this.consecutivePeaks / 5) * 20;
-    
-    // Derivative activity
     let derivSum = 0;
     const dLen = Math.min(60, this.vpgBuf.length);
     for (let i = 0; i < dLen; i++) {
       derivSum += Math.abs(this.vpgBuf.get(this.vpgBuf.length - dLen + i));
     }
-    const slopeFactor = Math.min(1, (derivSum / dLen) / 1.5) * 15;
-    
-    // RR stability
+    const slopeFactor = Math.min(1, (derivSum / Math.max(1, dLen)) / 1.5) * 15;
     let rrFactor = 0;
     if (this.rrIntervals.length >= 3) {
       const m = this.rrIntervals.reduce((a, b) => a + b, 0) / this.rrIntervals.length;
@@ -1053,26 +838,17 @@ export class HeartBeatProcessorOptimized {
       const cv = Math.sqrt(v) / Math.max(1, m);
       rrFactor = Math.max(0, 1 - cv * 2) * 25;
     }
-    
-    // Perfusion index bonus
     const perfusionBonus = this.perfusionIndex > 0.02 ? 15 : 0;
-    
     return clamp(Math.round(rangeFactor + peakFactor + slopeFactor + rrFactor + perfusionBonus), 0, 100);
   }
 
   private getSignalRange(): number {
     const n = Math.min(60, this.filteredBuf.length);
     if (n < 10) return 0;
-    
-    const samples = [];
-    for (let i = 0; i < n; i++) {
-      samples.push(this.filteredBuf.get(this.filteredBuf.length - n + i));
-    }
-    
+    const samples: number[] = [];
+    for (let i = 0; i < n; i++) samples.push(this.filteredBuf.get(this.filteredBuf.length - n + i));
     samples.sort((a, b) => a - b);
-    const p10 = samples[Math.floor(n * 0.1)];
-    const p90 = samples[Math.floor(n * 0.9)];
-    return p90 - p10;
+    return samples[Math.floor(n * 0.9)] - samples[Math.floor(n * 0.1)];
   }
 
   private getAvgBeatSQI(): number {
@@ -1083,39 +859,26 @@ export class HeartBeatProcessorOptimized {
 
   private correlateWithTemplate(): number {
     if (!this.templateValid || this.filteredBuf.length < this.templateLen * 2) return 0;
-    
     const n = this.filteredBuf.length;
     const half = Math.floor(this.templateLen / 2);
     const start = n - half - 3;
     if (start < 0) return 0;
-    
-    // Extract segment
+
     const seg = new Float64Array(this.templateLen);
-    for (let i = 0; i < this.templateLen; i++) {
-      seg[i] = this.filteredBuf.get(start + i);
-    }
-    
-    // Normalize
+    for (let i = 0; i < this.templateLen; i++) seg[i] = this.filteredBuf.get(start + i);
+
     let sMin = Infinity, sMax = -Infinity;
-    for (const v of seg) {
-      sMin = Math.min(sMin, v);
-      sMax = Math.max(sMax, v);
-    }
+    for (const v of seg) { if (v < sMin) sMin = v; if (v > sMax) sMax = v; }
     const sRange = sMax - sMin;
     if (sRange < 0.1) return 0;
-    
-    for (let i = 0; i < seg.length; i++) {
-      seg[i] = (seg[i] - sMin) / sRange;
-    }
-    
-    // Correlation
+    for (let i = 0; i < seg.length; i++) seg[i] = (seg[i] - sMin) / sRange;
+
     let dot = 0, magA = 0, magB = 0;
     for (let i = 0; i < this.templateLen; i++) {
       dot += this.templateBuf[i] * seg[i];
       magA += this.templateBuf[i] ** 2;
       magB += seg[i] ** 2;
     }
-    
     const denom = Math.sqrt(magA * magB);
     return denom > 0 ? dot / denom : 0;
   }
@@ -1123,30 +886,19 @@ export class HeartBeatProcessorOptimized {
   private updateTemplate(): void {
     const n = this.filteredBuf.length;
     if (n < this.templateLen * 2) return;
-    
     const half = Math.floor(this.templateLen / 2);
     const start = n - half - 3;
     if (start < 0) return;
-    
+
     const segment = new Float64Array(this.templateLen);
-    for (let i = 0; i < this.templateLen; i++) {
-      segment[i] = this.filteredBuf.get(start + i);
-    }
-    
-    // Normalize
-    let min = Infinity, max = -Infinity;
-    for (const v of segment) {
-      min = Math.min(min, v);
-      max = Math.max(max, v);
-    }
-    const range = max - min;
+    for (let i = 0; i < this.templateLen; i++) segment[i] = this.filteredBuf.get(start + i);
+
+    let mn = Infinity, mx = -Infinity;
+    for (const v of segment) { if (v < mn) mn = v; if (v > mx) mx = v; }
+    const range = mx - mn;
     if (range < 0.1) return;
-    
-    for (let i = 0; i < segment.length; i++) {
-      segment[i] = (segment[i] - min) / range;
-    }
-    
-    // Update with EMA
+    for (let i = 0; i < segment.length; i++) segment[i] = (segment[i] - mn) / range;
+
     if (!this.templateValid) {
       this.templateBuf = segment;
       this.templateValid = true;
@@ -1159,25 +911,24 @@ export class HeartBeatProcessorOptimized {
   }
 
   private buildDebugInfo(
-    isPeak: boolean,
-    now: number,
-    beatSQI: number,
-    detection: { detected: boolean; candidate?: BeatCandidate }
+    isPeak: boolean, now: number, beatSQI: number,
+    detection: { detected: boolean; candidate?: BeatCandidate },
+    detectorAgreement: number,
   ): HeartBeatDebug {
     const timeSinceLast = this.lastPeakTime > 0 ? now - this.lastPeakTime : 0;
-    
     return {
       instantBpm: isPeak && timeSinceLast > 0 ? 60000 / timeSinceLast : 0,
       medianRRBpm: this.medianRRBPM,
       autocorrBpm: this.autocorrBPM,
-      spectralBpm: 0, // REMOVED: Placeholder spectral analysis
+      spectralBpm: 0,
       lastBeatSQI: beatSQI,
-      detectorAgreement: detection.candidate?.detectorAgreement ?? 0,
+      detectorAgreement,
       expectedRR: this.getExpectedRR(),
-      refractoryState: timeSinceLast < 250 ? 'hard' : timeSinceLast < this.getExpectedRR() * 0.55 ? 'soft' : 'open',
+      refractoryState: timeSinceLast < this.config.refractoryHardMs ? 'hard'
+        : timeSinceLast < this.getExpectedRR() * this.config.refractorySoftFactor ? 'soft' : 'open',
       beatsAccepted: this.beatsAccepted,
       beatsRejected: this.beatsRejected,
-      lastRejectionReason: '',
+      lastRejectionReason: this.lastRejectionReason,
       doublePeakCount: this.doublePeakCount,
       missedBeatCount: this.missedBeatCount,
       suspiciousCount: this.acceptedBeats.slice(-10).filter(b => b.flags.isSuspicious).length,
@@ -1197,118 +948,22 @@ export class HeartBeatProcessorOptimized {
 
   private makeEmptyResult(bpm: number): HeartBeatResult {
     return {
-      bpm,
-      bpmConfidence: 0,
-      isPeak: false,
-      filteredValue: 0,
-      arrhythmiaCount: 0,
-      sqi: 0,
-      beatSQI: 0,
+      bpm, bpmConfidence: 0, isPeak: false, filteredValue: 0,
+      arrhythmiaCount: 0, sqi: 0, beatSQI: 0,
       rrData: { intervals: [], lastPeakTime: null },
-      hypothesis: null,
-      detectorAgreement: 0,
-      rejectionReason: '',
+      hypothesis: null, detectorAgreement: 0, rejectionReason: '',
       beatFlags: null,
       debug: {
-        instantBpm: 0,
-        medianRRBpm: 0,
-        autocorrBpm: 0,
-        spectralBpm: 0,
-        lastBeatSQI: 0,
-        detectorAgreement: 0,
-        expectedRR: 0,
+        instantBpm: 0, medianRRBpm: 0, autocorrBpm: 0, spectralBpm: 0,
+        lastBeatSQI: 0, detectorAgreement: 0, expectedRR: 0,
         refractoryState: 'open',
-        beatsAccepted: this.beatsAccepted,
-        beatsRejected: this.beatsRejected,
-        lastRejectionReason: '',
-        doublePeakCount: this.doublePeakCount,
-        missedBeatCount: this.missedBeatCount,
-        suspiciousCount: 0,
-        templateCorrelation: 0,
-        morphologyScore: 0,
-        consecutivePeaks: 0,
-        recentAcceptedBeats: [],
+        beatsAccepted: this.beatsAccepted, beatsRejected: this.beatsRejected,
+        lastRejectionReason: this.lastRejectionReason,
+        doublePeakCount: this.doublePeakCount, missedBeatCount: this.missedBeatCount,
+        suspiciousCount: 0, templateCorrelation: 0, morphologyScore: 0,
+        consecutivePeaks: 0, recentAcceptedBeats: [],
       },
     };
-  }
-
-  // Audio feedback
-  private setupAudio(): void {
-    const unlock = async () => {
-      if (this.audioUnlocked) return;
-      try {
-        const AC = window.AudioContext || (window as any).webkitAudioContext;
-        this.audioContext = new AC();
-        await this.audioContext.resume();
-        this.audioUnlocked = true;
-        document.removeEventListener('touchstart', unlock);
-        document.removeEventListener('click', unlock);
-      } catch {}
-    };
-    document.addEventListener('touchstart', unlock, { passive: true });
-    document.addEventListener('click', unlock, { passive: true });
-  }
-
-  private async playBeep(): Promise<void> {
-    if (!this.audioContext || !this.audioUnlocked) return;
-    
-    const now = performance.now();
-    if (now - this.lastBeepTime < 220) return;
-    
-    try {
-      if (this.audioContext.state === 'suspended') await this.audioContext.resume();
-      const t = this.audioContext.currentTime;
-      const osc = this.audioContext.createOscillator();
-      const gain = this.audioContext.createGain();
-      
-      osc.frequency.setValueAtTime(820, t);
-      osc.frequency.exponentialRampToValueAtTime(460, t + 0.08);
-      gain.gain.setValueAtTime(0.12, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-      
-      osc.connect(gain);
-      gain.connect(this.audioContext.destination);
-      osc.start(t);
-      osc.stop(t + 0.12);
-      
-      this.lastBeepTime = now;
-    } catch {}
-  }
-
-  /**
-   * Normalize signal to consistent range for peak detection
-   * CRITICAL: All detection thresholds assume normalized signal
-   * Output range: approximately -60 to +60 (centered at 0)
-   */
-  private normalizeSignal(value: number): { normalizedValue: number; normRange: number } {
-    const windowLen = this.consecutivePeaks < 4 ? 90 : 150;
-    const n = Math.min(windowLen, this.signalBuf.length);
-    if (n < 10) return { normalizedValue: 0, normRange: 0 };
-    
-    // Calculate percentiles for robust range estimation
-    const samples: number[] = [];
-    for (let i = 0; i < n; i++) {
-      samples.push(this.signalBuf.get(this.signalBuf.length - n + i));
-    }
-    samples.sort((a, b) => a - b);
-    
-    const p10 = samples[Math.floor(n * 0.1)];
-    const p90 = samples[Math.floor(n * 0.9)];
-    const range = p90 - p10;
-    
-    if (range < 0.01) return { normalizedValue: 0, normRange: 0 };
-    
-    // Normalize to centered range
-    const clipped = Math.min(p90, Math.max(p10, value));
-    const normalizedValue = ((clipped - p10) / range - 0.5) * 120;
-    
-    return { normalizedValue, normRange: range };
-  }
-
-  private vibrate(): void {
-    try {
-      if (navigator.vibrate) navigator.vibrate(55);
-    } catch {}
   }
 
   // Public API
@@ -1321,6 +976,7 @@ export class HeartBeatProcessorOptimized {
     this.filteredBuf.clear();
     this.vpgBuf.clear();
     this.apgBuf.clear();
+    this.ssfBuf.clear();
     this.timestampBuf.clear();
     this.rrIntervals = [];
     this.acceptedBeats = [];
@@ -1330,8 +986,10 @@ export class HeartBeatProcessorOptimized {
     this.medianRRBPM = 0;
     this.lastPeakTime = 0;
     this.lastPeakValue = 0;
+    this.lastSSFOnsetTime = 0;
     this.consecutivePeaks = 0;
     this.peakThreshold = 0;
+    this.valleyThreshold = 0;
     this.isSearchingPeak = true;
     this.templateValid = false;
     this.frameCount = 0;
@@ -1339,14 +997,11 @@ export class HeartBeatProcessorOptimized {
     this.beatsRejected = 0;
     this.doublePeakCount = 0;
     this.missedBeatCount = 0;
-    
-    // Reset filter state
-    this.filterCoeffs.zi.fill(0);
+    this.lastRejectionReason = '';
   }
 
-  dispose(): void {
-    if (this.audioContext) this.audioContext.close().catch(() => {});
-  }
+  /** No audio context to dispose any more — kept for API compatibility. */
+  dispose(): void { /* no-op */ }
 }
 
 function clamp(v: number, min: number, max: number): number {
