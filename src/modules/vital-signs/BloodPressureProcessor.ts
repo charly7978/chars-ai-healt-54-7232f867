@@ -1,4 +1,5 @@
 import { PPGFeatureExtractor, CycleFeatures } from './PPGFeatureExtractor';
+import { getCalibrationModel, getPhysiologicalLimit } from '@/config/medical-parameter-registry/loader';
 
 export interface BPEstimate {
   systolic: number;
@@ -8,53 +9,34 @@ export interface BPEstimate {
   confidence: 'HIGH' | 'MEDIUM' | 'LOW' | 'INSUFFICIENT';
   cyclesUsed: number;
   featureQuality: number;
+  calibrationState: 'UNCALIBRATED' | 'DEVICE_CALIBRATED' | 'CUFF_CALIBRATED';
+  outputLabel: string;
 }
 
-// ⚠️ PPG-derived blood pressure estimation coefficients
-// These are population statistical model coefficients for estimating
-// BP from PPG morphology features. The intercepts represent population
-// statistical centers, NOT "normal values" to use as results.
-// 
-// This is an ESTIMATION from optical signal morphology, NOT a direct
-// blood pressure measurement. Results must be marked with appropriate
-// confidence levels and calibration state.
-const SBP_COEFF = {
-  intercept: 82.0,  // Population statistical center - NOT a clinical default
-  bDivA: -16.0,
-  dDivA: 10.5,
-  invSUT: 2500.0,
-  SI: 7.5,
-  AIx: 0.30,
-  HR: 0.25,
-  areaRatio: 5.0,
-  AGI: 4.8,
-  dicroticDepth: -8.0,
-  pw75_pw25: 6.0,
-};
-
-const DBP_COEFF = {
-  intercept: 42.0,  // Population statistical center - NOT a clinical default
-  PW50: 0.10,
-  DT: 0.030,
-  RMSSD: -0.07,
-  dicroticDepth: -10.0,
-  areaRatio: 3.8,
-  SI: 2.8,
-  HR: 0.12,
-  pw50_sut_ratio: 2.5,
-};
-
+/**
+ * Blood Pressure Processor - Forensic-grade PPG estimation
+ * 
+ * ALL coefficients loaded from Medical Parameter Registry.
+ * This is an ESTIMATION from optical signal morphology, NOT direct measurement.
+ */
 export class BloodPressureProcessor {
+  private config = getCalibrationModel('bloodPressure');
+  private limits = getPhysiologicalLimit('rrInterval');  // For HR calculation
+  
   private readonly MIN_CYCLES = 1;
   private readonly MAX_CYCLES = 15;
+  private readonly EMA_ALPHA = 0.22;
+  
   private lastSBP = 0;
   private lastDBP = 0;
-  private readonly EMA_ALPHA = 0.22;
+  private calibrationState: BPEstimate['calibrationState'] = 'UNCALIBRATED';
 
   estimate(signalBuffer: number[], rrIntervals: number[], sampleRate: number = 30): BPEstimate {
     const insufficient: BPEstimate = {
       systolic: 0, diastolic: 0, map: 0, pulsePressure: 0,
-      confidence: 'INSUFFICIENT', cyclesUsed: 0, featureQuality: 0
+      confidence: 'INSUFFICIENT', cyclesUsed: 0, featureQuality: 0,
+      calibrationState: this.calibrationState,
+      outputLabel: this.config.outputLabel
     };
 
     if (signalBuffer.length < 30 || rrIntervals.length < 2) return insufficient;
@@ -97,6 +79,18 @@ export class BloodPressureProcessor {
     const featureQuality = this.assessFeatureQuality(mf, useCycles.length);
     const confidence = this.assessConfidence(featureQuality, useCycles.length);
 
+    // Validate against physiological limits from registry
+    const sbpLimits = this.config.limits || { systolicMin: 85, systolicMax: 180 };
+    if (!isFinite(sbp) || sbp < sbpLimits.systolicMin || sbp > sbpLimits.systolicMax ||
+        !isFinite(dbp) || dbp < 50 || dbp > 110) {
+      return {
+        systolic: 0, diastolic: 0, map: 0, pulsePressure: 0,
+        confidence: 'INSUFFICIENT', cyclesUsed: useCycles.length, featureQuality,
+        calibrationState: this.calibrationState,
+        outputLabel: this.config.outputLabel
+      };
+    }
+
     return {
       systolic: sbp,
       diastolic: dbp,
@@ -104,12 +98,15 @@ export class BloodPressureProcessor {
       pulsePressure: sbp - dbp,
       confidence,
       cyclesUsed: useCycles.length,
-      featureQuality
+      featureQuality,
+      calibrationState: this.calibrationState,
+      outputLabel: this.config.outputLabel
     };
   }
 
   private estimateSBP(f: MedianFeatures, hr: number): number {
-    const c = SBP_COEFF;
+    // Use coefficients from Medical Parameter Registry
+    const c = this.config.systolicCoefficients;
     let sbp = c.intercept;
     sbp += c.bDivA * f.bDivA;
     sbp += c.dDivA * f.dDivA;
@@ -125,7 +122,8 @@ export class BloodPressureProcessor {
   }
 
   private estimateDBP(f: MedianFeatures, hr: number, rmssd: number): number {
-    const c = DBP_COEFF;
+    // Use coefficients from Medical Parameter Registry
+    const c = this.config.diastolicCoefficients;
     let dbp = c.intercept;
     dbp += c.PW50 * f.pw50Ms;
     dbp += c.DT * f.diastolicTimeMs;

@@ -5,15 +5,15 @@
  * 
  * This module provides an OPTICAL PROXY estimation of lipids from PPG
  * morphology features. It does NOT measure blood lipids directly.
- * Always marked RESEARCH_ONLY.
  * 
- * References:
+ * ALL parameters loaded from Medical Parameter Registry.
+ * 
+ * References (see defaults.json for citations):
  * - Ferizoli et al. 2024: Area-related features as strongest correlators
  * - Arguello-Prada et al. 2025: Pulse width multi-level + AI
- * - PWV and SI correlate with atherosclerosis/dyslipidemia
- * 
- * ⚠️ ALWAYS returns researchMode: true and appropriate enabledState
  */
+
+import { getCalibrationModel, getQualityThreshold } from '@/config/medical-parameter-registry/loader';
 
 export interface LipidResult {
   totalCholesterol: number;
@@ -39,6 +39,10 @@ interface CycleInput {
 }
 
 export class LipidResearchProcessor {
+  // Configuration from Medical Parameter Registry
+  private config = getCalibrationModel('lipids');
+  private qualityConfig = getQualityThreshold('signalQualityIndex');
+
   private cholHistory: number[] = [];
   private trigHistory: number[] = [];
   private readonly HISTORY_SIZE = 15;
@@ -82,29 +86,31 @@ export class LipidResearchProcessor {
     if (featureCount < 4) return withheld;
 
     // ── Cholesterol model ──
-    // Population baseline: 150 mg/dL - statistical center, NOT clinical target
-    // Calculates deviation from population reference values
-    let chol = 150.0;  // Population statistical center - NOT a clinical default
-    chol += (f.stiffnessIndex - 6) * 8.0;        // Ref: stiffnessIndex = 6
-    chol += (f.augmentationIndex - 50) * 0.45; // Ref: augmentationIndex = 50
-    if (f.areaRatio > 0) chol += (f.areaRatio - 1.5) * 12.0;  // Ref: areaRatio = 1.5
-    chol += (0.3 - f.dicroticDepth) * 25;        // Ref: dicroticDepth = 0.3
-    if (f.pwvProxy > 0) chol += (f.pwvProxy - 7) * 4.0;       // Ref: pwvProxy = 7
-    if (f.pw50Ms > 0) chol += (300 - f.pw50Ms) * 0.08;        // Ref: pw50Ms = 300
-    if (f.pw25Ms > 0 && f.pw75Ms > 0) chol += (0.5 - f.pw75Ms / f.pw25Ms) * 15; // Ref: ratio = 0.5
-    chol += (input.hr - 72) * 0.3;               // Ref: HR = 72
-    if (input.rrVar.sdnn > 0) chol += Math.max(0, (50 - input.rrVar.sdnn)) * 0.35; // Ref: SDNN = 50
+    // Use coefficients from Medical Parameter Registry
+    const cholCoeff = this.config.cholesterolCoefficients!;
+    const ref = this.config.referenceCenters!;
+    let chol = cholCoeff.intercept;
+    chol += (f.stiffnessIndex - ref.stiffnessIndex) * cholCoeff.stiffnessIndex;
+    chol += (f.augmentationIndex - ref.augmentationIndex) * cholCoeff.augmentationIndex;
+    if (f.areaRatio > 0) chol += (f.areaRatio - ref.areaRatio) * cholCoeff.areaRatio;
+    chol += (ref.dicroticDepth - f.dicroticDepth) * cholCoeff.dicroticDepth;
+    if (f.pwvProxy > 0) chol += (f.pwvProxy - ref.pwvProxy) * cholCoeff.pwvProxy;
+    if (f.pw50Ms > 0) chol += (ref.pw50Ms - f.pw50Ms) * cholCoeff.pw50Ms;
+    if (f.pw25Ms > 0 && f.pw75Ms > 0) chol += (ref.pw75_25 - f.pw75Ms / f.pw25Ms) * cholCoeff.pw75_25;
+    chol += (input.hr - ref.hr) * cholCoeff.hr;
+    if (input.rrVar.sdnn > 0) chol += Math.max(0, (ref.sdnn - input.rrVar.sdnn)) * cholCoeff.sdnn;
     chol += this.cholOffset;
 
     // ── Triglycerides model ──
-    // Population baseline: 120 mg/dL - statistical center, NOT clinical target
-    let trig = 120.0;  // Population statistical center - NOT a clinical default
-    if (f.pw50Ms > 0) trig += (f.pw50Ms - 300) * 0.15;         // Ref: pw50Ms = 300
-    if (f.diastolicTimeMs > 0) trig += (f.diastolicTimeMs - 400) * 0.06; // Ref: diastolicTime = 400ms
-    if (input.piGreen > 0) trig += (2 - input.piGreen) * 8;   // Ref: PI = 2.0
-    trig += (input.hr - 72) * 0.4;               // Ref: HR = 72
-    trig += (f.stiffnessIndex - 6) * 3.5;        // Ref: stiffnessIndex = 6
-    if (input.rrVar.sdnn > 0 && input.rrVar.sdnn < 40) trig += (40 - input.rrVar.sdnn) * 0.5; // Ref: SDNN = 40
+    // Use coefficients from Medical Parameter Registry
+    const trigCoeff = this.config.triglyceridesCoefficients!;
+    let trig = trigCoeff.intercept;
+    if (f.pw50Ms > 0) trig += (f.pw50Ms - ref.pw50Ms) * trigCoeff.pw50Ms;
+    if (f.diastolicTimeMs > 0) trig += (f.diastolicTimeMs - ref.diastolicTimeMs) * trigCoeff.diastolicTimeMs;
+    if (input.piGreen > 0) trig += (ref.piGreen - input.piGreen) * trigCoeff.piGreen;
+    trig += (input.hr - ref.hr) * trigCoeff.hr;
+    trig += (f.stiffnessIndex - ref.stiffnessIndex) * trigCoeff.stiffnessIndex;
+    if (input.rrVar.sdnn > 0 && input.rrVar.sdnn < ref.sdnn) trig += (ref.sdnn - input.rrVar.sdnn) * trigCoeff.sdnn;
     trig += this.trigOffset;
 
     // Reject impossible

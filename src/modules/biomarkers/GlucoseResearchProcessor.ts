@@ -6,25 +6,14 @@
  * This module provides an OPTICAL PROXY estimation of glucose from PPG
  * morphology features. It does NOT measure blood glucose directly.
  * 
- * Pipeline:
- * 1. Extract beat-level features (from PPGFeatureExtractor)
- * 2. Compute feature vector (13 features based on literature)
- * 3. Apply population baseline model (linear regression)
- * 4. Apply subject-specific calibration if available
- * 5. Confidence + trend analysis
+ * ALL parameters loaded from Medical Parameter Registry.
  * 
- * References:
+ * References (see defaults.json for citations):
  * - Nature Sci Reports 2024: PPG + DNN → RMSE 19.7 mg/dL
- * - Islam et al. 2021 (IEEE): PLS/SVR from PPG morphology
- * - Satter et al. 2024: AC/DC ratio, PI, AI for glucose
  * - Avram et al. 2020 (Nature Medicine): Digital biomarker from PPG
- * 
- * Key insight: PPG morphology features (SUT, PW, AI, PI, HRV)
- * correlate with blood glucose through vascular compliance and
- * blood viscosity changes. The model uses weighted combination of features.
- * 
- * ⚠️ ALWAYS returns researchMode: true and appropriate enabledState
  */
+
+import { getCalibrationModel, getPhysiologicalLimit, getQualityThreshold } from '@/config/medical-parameter-registry/loader';
 
 export interface GlucoseResult {
   value: number;           // mg/dL, 0 = unavailable
@@ -59,43 +48,13 @@ interface CalibrationPoint {
   features: FeatureVector;
 }
 
-// Population baseline coefficients (from literature meta-analysis)
-// ⚠️ These are population statistical centers for DEVIATION calculation,
-// NOT "normal values" to use as results. The intercept represents a
-// population average, NOT a clinical target or default output.
-const POP_COEFF = {
-  intercept: 95.0,       // Population statistical center - NOT a clinical default
-  sutMs: 0.12,           // viscosity proxy
-  pw50Ms: 0.04,          // morphology
-  augIndex: 0.10,        // vascular stiffness
-  stiffness: 1.8,        // arterial rigidity
-  dicroticDepth: -10.0,  // peripheral resistance
-  areaRatio: 4.0,        // vascular compliance
-  hr: 0.22,              // metabolic demand
-  sdnn: -0.25,           // autonomic dysfunction
-  rmssd: -0.15,          // parasympathetic tone
-  piGreen: -3.0,         // perfusion
-  rgACRatio: 6.0,        // optical absorption
-  pw75_25Ratio: 12.0,    // waveform shape = viscosity
-};
-
-// Reference centers for deviation calculation (NOT clinical targets)
-const REFERENCE_CENTERS = {
-  sutMs: 140,
-  pw50Ms: 320,
-  augmentationIndex: 45,
-  stiffnessIndex: 5.5,
-  dicroticDepth: 0.25,
-  areaRatio: 1.4,
-  hr: 72,
-  sdnn: 45,
-  rmssd: 35,
-  piGreen: 1.5,
-  rgACRatio: 1.0,
-  pw75_25Ratio: 0.55,
-};
-
 export class GlucoseResearchProcessor {
+  // Configuration from Medical Parameter Registry
+  private config = getCalibrationModel('glucose');
+  private qualityConfig = getQualityThreshold('signalQualityIndex');
+  private perfusionConfig = getQualityThreshold('perfusionIndex');
+  private limits = getPhysiologicalLimit('bpm');
+
   private history: number[] = [];
   private readonly HISTORY_SIZE = 20;
   private calibrations: CalibrationPoint[] = [];
@@ -162,20 +121,23 @@ export class GlucoseResearchProcessor {
     // ── Population model ──
     // Calculate deviation from population reference centers
     // This is a RESEARCH estimation, NOT a clinical measurement
-    let glucose = POP_COEFF.intercept;
-    if (f.sutMs > 0) glucose += (f.sutMs - REFERENCE_CENTERS.sutMs) * POP_COEFF.sutMs;
-    if (f.pw50Ms > 0) glucose += (f.pw50Ms - REFERENCE_CENTERS.pw50Ms) * POP_COEFF.pw50Ms;
-    glucose += (f.augmentationIndex - REFERENCE_CENTERS.augmentationIndex) * POP_COEFF.augIndex;
-    glucose += (f.stiffnessIndex - REFERENCE_CENTERS.stiffnessIndex) * POP_COEFF.stiffness;
-    glucose += (f.dicroticDepth - REFERENCE_CENTERS.dicroticDepth) * POP_COEFF.dicroticDepth;
-    if (f.areaRatio > 0) glucose += (f.areaRatio - REFERENCE_CENTERS.areaRatio) * POP_COEFF.areaRatio;
-    glucose += (input.hr - REFERENCE_CENTERS.hr) * POP_COEFF.hr;
-    if (input.rrVar.sdnn > 0) glucose += (input.rrVar.sdnn - REFERENCE_CENTERS.sdnn) * POP_COEFF.sdnn;
-    if (input.rrVar.rmssd > 0) glucose += (input.rrVar.rmssd - REFERENCE_CENTERS.rmssd) * POP_COEFF.rmssd;
-    if (input.piGreen > 0) glucose += (input.piGreen - REFERENCE_CENTERS.piGreen) * POP_COEFF.piGreen;
-    if (input.rgACRatio > 0) glucose += (input.rgACRatio - REFERENCE_CENTERS.rgACRatio) * POP_COEFF.rgACRatio;
+    // Use coefficients from Medical Parameter Registry
+    const coeff = this.config.coefficients;
+    const ref = this.config.referenceCenters!;
+    let glucose = coeff.intercept;
+    if (f.sutMs > 0) glucose += (f.sutMs - ref.sutMs) * coeff.sutMs;
+    if (f.pw50Ms > 0) glucose += (f.pw50Ms - ref.pw50Ms) * coeff.pw50Ms;
+    glucose += (f.augmentationIndex - ref.augmentationIndex) * coeff.augIndex;
+    glucose += (f.stiffnessIndex - ref.stiffnessIndex) * coeff.stiffness;
+    glucose += (f.dicroticDepth - ref.dicroticDepth) * coeff.dicroticDepth;
+    if (f.areaRatio > 0) glucose += (f.areaRatio - ref.areaRatio) * coeff.areaRatio;
+    glucose += (input.hr - ref.hr) * coeff.hr;
+    if (input.rrVar.sdnn > 0) glucose += (input.rrVar.sdnn - ref.sdnn) * coeff.sdnn;
+    if (input.rrVar.rmssd > 0) glucose += (input.rrVar.rmssd - ref.rmssd) * coeff.rmssd;
+    if (input.piGreen > 0) glucose += (input.piGreen - ref.piGreen) * coeff.piGreen;
+    if (input.rgACRatio > 0) glucose += (input.rgACRatio - ref.rgACRatio) * coeff.rgACRatio;
     if (f.pw25Ms > 0 && f.pw75Ms > 0) {
-      glucose += (f.pw75Ms / f.pw25Ms - REFERENCE_CENTERS.pw75_25Ratio) * POP_COEFF.pw75_25Ratio;
+      glucose += (f.pw75Ms / f.pw25Ms - ref.pw75_25Ratio) * coeff.pw75_25Ratio;
     }
 
     // ── Subject adaptation ──
@@ -261,13 +223,16 @@ export class GlucoseResearchProcessor {
   }
 
   private predictPopulation(f: FeatureVector): number {
-    let g = POP_COEFF.intercept;
-    if (f.sutMs > 0) g += (f.sutMs - REFERENCE_CENTERS.sutMs) * POP_COEFF.sutMs;
-    if (f.pw50Ms > 0) g += (f.pw50Ms - REFERENCE_CENTERS.pw50Ms) * POP_COEFF.pw50Ms;
-    g += (f.augmentationIndex - REFERENCE_CENTERS.augmentationIndex) * POP_COEFF.augIndex;
-    g += (f.stiffnessIndex - REFERENCE_CENTERS.stiffnessIndex) * POP_COEFF.stiffness;
-    g += (f.hr - REFERENCE_CENTERS.hr) * POP_COEFF.hr;
-    if (f.sdnn > 0) g += (f.sdnn - REFERENCE_CENTERS.sdnn) * POP_COEFF.sdnn;
+    // Use coefficients from Medical Parameter Registry
+    const coeff = this.config.coefficients;
+    const ref = this.config.referenceCenters!;
+    let g = coeff.intercept;
+    if (f.sutMs > 0) g += (f.sutMs - ref.sutMs) * coeff.sutMs;
+    if (f.pw50Ms > 0) g += (f.pw50Ms - ref.pw50Ms) * coeff.pw50Ms;
+    g += (f.augmentationIndex - ref.augmentationIndex) * coeff.augIndex;
+    g += (f.stiffnessIndex - ref.stiffnessIndex) * coeff.stiffness;
+    g += (f.hr - ref.hr) * coeff.hr;
+    if (f.sdnn > 0) g += (f.sdnn - ref.sdnn) * coeff.sdnn;
     return g;
   }
 

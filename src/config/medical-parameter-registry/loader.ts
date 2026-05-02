@@ -13,6 +13,10 @@ import defaultParams from './defaults.json';
 export interface CalibrationModel {
   modelType: 'population' | 'device_specific' | 'subject_calibrated' | 'research_only';
   coefficients: Record<string, number>;
+  systolicCoefficients?: Record<string, number>;  // For BP model
+  diastolicCoefficients?: Record<string, number>; // For BP model
+  cholesterolCoefficients?: Record<string, number>; // For lipids model
+  triglyceridesCoefficients?: Record<string, number>; // For lipids model
   referenceCenters?: Record<string, number>;
   validationStatus: 'validated' | 'pending_validation' | 'research_only' | 'deprecated';
   source: string;
