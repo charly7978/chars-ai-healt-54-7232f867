@@ -629,6 +629,10 @@ const Index = () => {
           }
           // Forensic console trace (kept terse, single line, structured).
           console.warn('[ROI-AUDIT] LOW_STABILITY_TRIGGER', entry);
+          recorderRef.current?.pushEvent('ROI_ALERT_TRIGGER', {
+            roiScore: entry.roiScore, drift: entry.drift,
+            streak: entry.streak, beatIndex: entry.beatIndex,
+          });
         }
       } else {
         goodStabilityStreakRef.current++;
@@ -650,6 +654,10 @@ const Index = () => {
             roiAuditLogRef.current.shift();
           }
           console.info('[ROI-AUDIT] STABILITY_RECOVERED', entry);
+          recorderRef.current?.pushEvent('ROI_ALERT_CLEAR', {
+            roiScore: entry.roiScore, drift: entry.drift,
+            streak: entry.streak, beatIndex: entry.beatIndex,
+          });
         }
         if (goodStabilityStreakRef.current >= ROI_STABILITY_RECOVER_BEATS) {
           lowStabilityStreakRef.current = 0;
