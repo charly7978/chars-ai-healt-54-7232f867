@@ -106,6 +106,7 @@ export class HeartBeatProcessorOptimized {
   
   // Configuration
   private config: OptimizedProcessorConfig;
+  spectralBPM: number;
 
   constructor() {
     // Load configuration from Medical Parameter Registry
@@ -1027,7 +1028,7 @@ export class HeartBeatProcessorOptimized {
       instantBpm: isPeak && timeSinceLast > 0 ? 60000 / timeSinceLast : 0,
       medianRRBpm: this.medianRRBPM,
       autocorrBpm: this.autocorrBPM,
-      spectralBpm: this.spectralBPM,
+      spectralBpm: 0, // REMOVED: Placeholder spectral analysis
       lastBeatSQI: beatSQI,
       detectorAgreement: detection.candidate?.detectorAgreement ?? 0,
       expectedRR: this.getExpectedRR(),
