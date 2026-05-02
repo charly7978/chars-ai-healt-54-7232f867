@@ -168,6 +168,11 @@ export const useHeartBeatProcessorOptimized = () => {
     return arrhythmiaEvidence;
   }, [arrhythmiaEvidence]);
 
+  // Legacy compatibility - arrhythmia detection is now automatic
+  const setArrhythmiaState = useCallback((_isDetected: boolean) => {
+    // No-op: detection is automatic via ArrhythmiaDetector
+  }, []);
+
   // Export RR intervals for HRV analysis
   const getRRIntervals = useCallback((): number[] => {
     return processorRef.current?.getRRIntervals() ?? [];
@@ -180,6 +185,7 @@ export const useHeartBeatProcessorOptimized = () => {
     arrhythmiaEvidence,
     processSignal,
     reset,
+    setArrhythmiaState,
     getArrhythmiaStatus,
     getRRIntervals,
     debugInfo: {

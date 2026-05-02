@@ -174,6 +174,7 @@ const Index = () => {
     processSignal: processHeartBeat, 
     setArrhythmiaState,
     reset: resetHeartBeat,
+    arrhythmiaEvidence,
   } = useHeartBeatProcessorOptimized();
   
   const { 
@@ -1319,6 +1320,7 @@ const Index = () => {
               isMonitoring={isMonitoring}
               arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
               rawArrhythmiaData={lastArrhythmiaData.current}
+              arrhythmiaEvidence={arrhythmiaEvidence}
               preserveResults={showResults}
               diagnosticMessage={lastSignal?.diagnostics?.message}
               isPeak={beatMarker === 1}
