@@ -1321,6 +1321,7 @@ const Index = () => {
               arrhythmiaStatus={vitalSigns.arrhythmiaStatus}
               rawArrhythmiaData={lastArrhythmiaData.current}
               arrhythmiaEvidence={arrhythmiaEvidence}
+              fingerPosition={lastSignal?.fingerPosition}
               preserveResults={showResults}
               diagnosticMessage={lastSignal?.diagnostics?.message}
               isPeak={beatMarker === 1}

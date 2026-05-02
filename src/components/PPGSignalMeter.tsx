@@ -30,7 +30,7 @@ const CONFIG = {
   CANVAS_WIDTH: 2400,
   CANVAS_HEIGHT: 3800,
   WINDOW_MS: 2800,
-  TARGET_FPS: 60,
+  TARGET_FPS: 30,
   BUFFER_SIZE: 600,
   PLOT_AREA: {
     LEFT: 80,
@@ -411,6 +411,52 @@ const PPGSignalMeter = ({
     }
   }, []);
 
+  const drawFingerPositionGuide = useCallback((ctx: CanvasRenderingContext2D) => {
+    const { CANVAS_WIDTH: W, CANVAS_HEIGHT: H, COLORS } = CONFIG;
+    const { fingerPosition } = propsRef.current;
+    
+    if (!fingerPosition || fingerPosition === 'UNKNOWN') return;
+    
+    const guideY = H - 180;
+    const guideX = W / 2;
+    const guideW = 300;
+    const guideH = 60;
+    
+    // Background panel
+    ctx.fillStyle = 'rgba(20, 20, 30, 0.9)';
+    ctx.fillRect(guideX - guideW/2, guideY, guideW, guideH);
+    ctx.strokeStyle = COLORS.TEXT_PRIMARY;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(guideX - guideW/2, guideY, guideW, guideH);
+    
+    // Title
+    ctx.font = 'bold 12px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'center';
+    ctx.fillText('POSICIÓN DEL DEDO', guideX, guideY + 20);
+    
+    // Position indicator
+    ctx.font = '11px "SF Mono", Consolas, monospace';
+    let positionText = '';
+    let positionColor = COLORS.TEXT_SECONDARY;
+    
+    if (fingerPosition === 'TIP') {
+      positionText = '✓ PUNTA DEL DEDO';
+      positionColor = COLORS.TEXT_PRIMARY;
+    } else if (fingerPosition === 'FLAT') {
+      positionText = '✓ DEDO ACOSTADO';
+      positionColor = COLORS.TEXT_WARNING;
+    }
+    
+    ctx.fillStyle = positionColor;
+    ctx.fillText(positionText, guideX, guideY + 40);
+    
+    // Instructions
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText(fingerPosition === 'TIP' ? 'Óptimo para medición' : 'Mejor con punta del dedo', guideX, guideY + 52);
+  }, []);
+
   useEffect(() => {
     if (isRunningRef.current) return;
     isRunningRef.current = true;
@@ -446,6 +492,7 @@ const PPGSignalMeter = ({
       drawAmplitudeScale(ctx);
       drawTimeScale(ctx);
       drawVitalInfo(ctx, now);
+      drawFingerPositionGuide(ctx);
       
       if (preserve && !detected) {
         animationRef.current = requestAnimationFrame(render);
@@ -764,7 +811,7 @@ const PPGSignalMeter = ({
       isRunningRef.current = false;
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [drawGrid, drawAmplitudeScale, drawTimeScale, drawVitalInfo, getPlotArea]);
+  }, [drawGrid, drawAmplitudeScale, drawTimeScale, drawVitalInfo, drawFingerPositionGuide, getPlotArea]);
 
   const handleReset = useCallback(() => {
     dataBufferRef.current?.clear();
