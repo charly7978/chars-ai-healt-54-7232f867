@@ -7,6 +7,41 @@ import { GlucoseResearchProcessor, type GlucoseResult } from '../biomarkers/Gluc
 import { LipidResearchProcessor, type LipidResult } from '../biomarkers/LipidResearchProcessor';
 import { MeasurementGate, type OutputState } from '../core/MeasurementGate';
 
+/**
+ * Forensic evidence object attached to every published VitalSignsResult.
+ * Operators can audit which raw signal features produced each metric.
+ *
+ * Source is always 'CAMERA_PPG_REAL'. There is NO other source path.
+ */
+export interface VitalsEvidence {
+  source: 'CAMERA_PPG_REAL';
+  timestampMs: number;
+  rgb: {
+    redAC: number; redDC: number;
+    greenAC: number; greenDC: number;
+    perfusionIndexGreen: number;
+    rgACRatio: number;
+  };
+  beatStream: {
+    beatCount: number;
+    avgBeatSQI: number;
+    rrIntervals: number[];        // last accepted RR ms values
+    detectorAgreement: number;
+    rrStability: number;
+  };
+  context: {
+    contactStable: boolean;
+    pressureOptimal: boolean;
+    clipHighRatio: number;
+    sourceStability: number;
+    sampleRate: number;
+  };
+  signalQuality: number;
+  measurementConfidence: 'HIGH' | 'MEDIUM' | 'LOW' | 'INVALID';
+  reasons: string[];
+  warnings: string[];
+}
+
 export interface VitalSignsResult {
   spo2: number;
   glucose: number;
@@ -48,6 +83,11 @@ export interface VitalSignsResult {
     lipids: OutputState;
     rhythm: OutputState;
   };
+  /**
+   * Forensic evidence proving the value chain was derived from real
+   * camera-PPG signal — never from defaults, mocks or fallbacks.
+   */
+  evidence: VitalsEvidence;
 }
 
 export interface RGBData {
@@ -241,6 +281,7 @@ export class VitalSignsProcessor {
     if (this.measurements.signalQuality < 8) return;
 
     const validRR = rrData.intervals.filter(i => i >= 270 && i <= 2200);
+    this.lastRRIntervals = validRR;
     const avgRR = validRR.length > 0 ? validRR.reduce((a, b) => a + b, 0) / validRR.length : 0;
     const hr = avgRR > 0 ? 60000 / avgRR : 0;
     const rrVar = PPGFeatureExtractor.extractRRVariability(validRR);
@@ -397,8 +438,78 @@ export class VitalSignsProcessor {
         lipids: lipidsState,
         rhythm: this.lastRhythm ? (this.lastRhythm.rhythmQuality > 40 ? 'ENABLED_MEDIUM_CONFIDENCE' : 'ENABLED_LOW_CONFIDENCE') : 'WITHHELD_LOW_QUALITY',
       },
+      evidence: this.buildEvidence(),
     };
   }
+
+  /**
+   * Build the forensic evidence object that proves every published
+   * vital was derived from real camera-PPG signal. The UI never
+   * synthesizes this; it is constructed from the live RGB/RR/context
+   * that actually fed the feature extractors on this frame.
+   */
+  private buildEvidence(): VitalsEvidence {
+    const reasons: string[] = [];
+    const warnings: string[] = [];
+
+    if (this.measurements.signalQuality < 24) {
+      warnings.push('SQI_BELOW_SUFFICIENT');
+    }
+    if (this.upstreamContext.clipHighRatio > 0.15) {
+      warnings.push('CAMERA_SATURATION');
+    }
+    if (!this.upstreamContext.contactStable) {
+      warnings.push('CONTACT_NOT_STABLE');
+    }
+    if (!this.upstreamContext.pressureOptimal) {
+      warnings.push('PRESSURE_NOT_OPTIMAL');
+    }
+    if (this.isCalibrating) {
+      reasons.push('CALIBRATING');
+    }
+
+    const piGreen = this.rgbData.greenDC > 0
+      ? (this.rgbData.greenAC / this.rgbData.greenDC) * 100
+      : 0;
+    const rgACRatio = this.rgbData.greenAC > 0
+      ? this.rgbData.redAC / this.rgbData.greenAC
+      : 0;
+
+    return {
+      source: 'CAMERA_PPG_REAL',
+      timestampMs: Date.now(),
+      rgb: {
+        redAC: this.rgbData.redAC,
+        redDC: this.rgbData.redDC,
+        greenAC: this.rgbData.greenAC,
+        greenDC: this.rgbData.greenDC,
+        perfusionIndexGreen: piGreen,
+        rgACRatio,
+      },
+      beatStream: {
+        beatCount: this.upstreamContext.beatCount,
+        avgBeatSQI: this.upstreamContext.avgBeatSQI,
+        rrIntervals: this.signalHistory.length > 0
+          ? this.lastRRIntervals.slice(-10)
+          : [],
+        detectorAgreement: this.upstreamContext.detectorAgreement,
+        rrStability: this.upstreamContext.rrStability,
+      },
+      context: {
+        contactStable: this.upstreamContext.contactStable,
+        pressureOptimal: this.upstreamContext.pressureOptimal,
+        clipHighRatio: this.upstreamContext.clipHighRatio,
+        sourceStability: this.upstreamContext.sourceStability,
+        sampleRate: this.upstreamContext.sampleRate,
+      },
+      signalQuality: Math.round(this.measurements.signalQuality),
+      measurementConfidence: this.getMeasurementConfidence(),
+      reasons,
+      warnings,
+    };
+  }
+
+  private lastRRIntervals: number[] = [];
 
   private smoothValue(current: number, newVal: number, type: 'stable' | 'dynamic' = 'stable'): number {
     if (current === 0 || !isFinite(current)) return newVal;

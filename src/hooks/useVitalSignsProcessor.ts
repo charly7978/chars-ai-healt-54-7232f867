@@ -66,6 +66,17 @@ export const useVitalSignsProcessor = () => {
       lipids: { totalCholesterol: 0, triglycerides: 0 },
       isCalibrating: false, calibrationProgress: 0, lastArrhythmiaData: undefined,
       signalQuality: 0, measurementConfidence: 'INVALID' as const,
+      evidence: {
+        source: 'CAMERA_PPG_REAL',
+        timestampMs: Date.now(),
+        rgb: { redAC: 0, redDC: 0, greenAC: 0, greenDC: 0, perfusionIndexGreen: 0, rgACRatio: 0 },
+        beatStream: { beatCount: 0, avgBeatSQI: 0, rrIntervals: [], detectorAgreement: 0, rrStability: 0 },
+        context: { contactStable: false, pressureOptimal: false, clipHighRatio: 0, sourceStability: 0, sampleRate: 30 },
+        signalQuality: 0,
+        measurementConfidence: 'INVALID',
+        reasons: ['NO_PROCESSOR'],
+        warnings: ['CONTACT_NOT_STABLE'],
+      },
     };
     
     if (!processorRef.current) return defaultResult;

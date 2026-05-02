@@ -1,4 +1,8 @@
-import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
+// NOTE: The legacy HeartBeatProcessor module was removed. The optimized
+// implementation lives at modules/HeartBeatProcessorOptimized.ts and is
+// instantiated through useHeartBeatProcessorOptimized. We deliberately
+// avoid exposing it on `window` because doing so encouraged duplicate
+// instances bypassing the React lifecycle.
 
 export type ContactState = 'NO_CONTACT' | 'UNSTABLE_CONTACT' | 'STABLE_CONTACT';
 
@@ -42,8 +46,4 @@ export interface SignalProcessor {
   onError?: (error: ProcessingError) => void;
 }
 
-declare global {
-  interface Window {
-    heartBeatProcessor: HeartBeatProcessor;
-  }
-}
+// (window.heartBeatProcessor removed — see comment above.)

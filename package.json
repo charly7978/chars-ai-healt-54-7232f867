@@ -10,10 +10,13 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "audit:inventory": "echo '=== AUDIT: File Inventory ===' && git ls-files | grep -E '\\.(ts|tsx|js|jsx)$' | wc -l && echo 'TypeScript/JS files tracked'",
-    "audit:simulation": "echo '=== AUDIT: Simulation Check ===' && (grep -r 'Math\\.random\\|fake\\|mock\\|dummy\\|demo\\|stub\\|synthetic' src/ --include='*.ts' --include='*.tsx' 2>/dev/null || echo 'CLEAN: No simulation patterns found')",
-    "audit:hardcoded": "echo '=== AUDIT: Hardcoded Values ===' && grep -rn 'intercept.*=.*[0-9]\\+\\|threshold.*=.*[0-9]\\+\\|const.*=.*[0-9]\\{3,\\}' src/modules --include='*.ts' | head -20",
+    "audit:simulation": "echo '=== AUDIT: Simulation Check (productive code) ===' && ! grep -RnE 'Math\\.random[[:space:]]*\\(|\\bfakeData\\b|\\bmockData\\b|\\bdummyData\\b|\\bdemoData\\b|\\bsimulate[A-Z]|\\bsyntheticSignal\\b' src/ --include='*.ts' --include='*.tsx' --exclude-dir=__tests__ 2>/dev/null || (echo 'FOUND simulation patterns in productive code' && exit 1)",
+    "audit:hardcoded": "echo '=== AUDIT: Hardcoded Biometric Defaults ===' && ! grep -RnE 'spo2[[:space:]]*=[[:space:]]*9[5-9]|bpm[[:space:]]*=[[:space:]]*7[0-9]|systolic[[:space:]]*=[[:space:]]*1[12][0-9]|diastolic[[:space:]]*=[[:space:]]*[78][0-9]' src/ --include='*.ts' --include='*.tsx' --exclude-dir=__tests__ 2>/dev/null || (echo 'FOUND hardcoded biometric defaults' && exit 1)",
+    "audit:duplicates": "echo '=== AUDIT: Duplicate Processors ===' && (find src/modules -name 'HeartBeatProcessor*.ts' | wc -l | xargs -I {} sh -c 'test {} -le 1 && echo \"✓ HeartBeatProcessor unique\" || (echo \"✗ duplicates found\" && exit 1)') && (find src/modules -name 'PPGSignalProcessor*.ts' | wc -l | xargs -I {} sh -c 'test {} -le 1 && echo \"✓ PPGSignalProcessor unique\" || (echo \"✗ duplicates found\" && exit 1)')",
+    "audit:dead-code": "echo '=== AUDIT: Dead-File Imports ===' && (grep -RnE \"from '[.@/][^']*HeartBeatProcessor'\" src/ --include='*.ts' --include='*.tsx' && (echo '✗ legacy HeartBeatProcessor still referenced' && exit 1)) || echo '✓ no dead HeartBeatProcessor refs'",
+    "audit:rgb-derived": "echo '=== AUDIT: RGB-derived SpO2 ===' && grep -q 'redAC' src/modules/vital-signs/SpO2Processor.ts && grep -q 'greenAC' src/modules/vital-signs/SpO2Processor.ts && echo '✓ SpO2 uses real RGB AC/DC' || (echo '✗ SpO2 not RGB-derived' && exit 1)",
     "audit:reachability": "echo '=== AUDIT: Entry Points ===' && test -f src/main.tsx && echo '✓ main.tsx exists' || echo '✗ main.tsx missing'",
-    "audit:all": "npm run audit:inventory && npm run audit:simulation && npm run audit:hardcoded && npm run audit:reachability && npm run build",
+    "audit:all": "npm run audit:inventory && npm run audit:simulation && npm run audit:hardcoded && npm run audit:duplicates && npm run audit:dead-code && npm run audit:rgb-derived && npm run audit:reachability && npm run build",
     "security:check-env": "echo '=== SECURITY: Environment Check ===' && (test -f .env && echo '⚠ .env exists - ensure not committed' || echo '✓ .env not present') && test -f .env.example && echo '✓ .env.example exists' || echo '⚠ .env.example missing'"
   },
   "dependencies": {

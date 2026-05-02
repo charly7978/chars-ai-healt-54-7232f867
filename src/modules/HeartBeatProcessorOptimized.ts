@@ -312,18 +312,42 @@ export class HeartBeatProcessorOptimized {
         // Update tracking
         this.lastPeakTime = now;
         this.lastPeakValue = candidate.amplitude;
-        
-        // Enhanced arrhythmia detection
+
+        // Compute quality metrics first so flags can be augmented safely
+        currentBeatSQI = this.computeBeatSQIOptimized(candidate);
+        beatFlags = this.computeBeatFlags(candidate, timeSinceLastPeak);
+
+        // Enhanced arrhythmia hint (HRV-based, evidence-driven only)
+        // The authoritative arrhythmia decision is taken downstream by
+        // ArrhythmiaDetector (RR/morphology). Here we only mark suspicious
+        // beats so the UI can render warning glyphs.
         const arrhythmiaScore = this.detectArrhythmias(candidate, now);
-        if (arrhythmiaScore > 0.7) {
+        if (arrhythmiaScore > 0.7 && beatFlags) {
           beatFlags.isSuspicious = true;
           beatFlags.isPremature = true;
         }
-        
-        // Compute quality metrics
-        currentBeatSQI = this.computeBeatSQIOptimized(candidate);
-        beatFlags = this.computeBeatFlags(candidate, timeSinceLastPeak);
-        
+
+        // Persist accepted beat for downstream consumers (vital signs,
+        // rhythm classifier, debug telemetry). Without this push,
+        // getAvgBeatSQI() and the recentAcceptedBeats array are always
+        // empty — silently degrading every BPM-confidence calculation.
+        this.beatsAccepted++;
+        this.acceptedBeats.push({
+          timestamp: now,
+          ibiMs: timeSinceLastPeak,
+          instantBpm: timeSinceLastPeak > 0 ? 60000 / timeSinceLastPeak : 0,
+          beatSQI: currentBeatSQI,
+          morphologyScore: candidate.morphologyScore,
+          rhythmScore: candidate.rhythmScore,
+          detectorAgreementScore: candidate.detectorAgreement,
+          templateScore: candidate.templateCorrelation,
+          sourceConsistencyScore: this.contactStable ? 1 : 0.5,
+          flags: beatFlags,
+        });
+        if (this.acceptedBeats.length > this.MAX_ACCEPTED) {
+          this.acceptedBeats.shift();
+        }
+
         // Update template
         if (currentBeatSQI > 40) {
           this.updateTemplate();

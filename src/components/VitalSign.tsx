@@ -39,25 +39,29 @@ const VitalSign = ({
     if (typeof value === 'string') {
       switch(label) {
         case 'PRESIÓN ARTERIAL': {
+          // Forensic-grade: never publish a clinical label (Hipertensión,
+          // Hipotensión, …) on top of an uncalibrated population estimate.
+          // The number is derived from PPG features, but the population
+          // model is NOT a clinically validated cuff measurement.
+          if (!confidenceLevel || confidenceLevel === 'INSUFFICIENT' || confidenceLevel === 'LOW') {
+            return '';
+          }
           const pressureParts = value.split('/');
           if (pressureParts.length === 2) {
             const systolic = parseInt(pressureParts[0], 10);
             const diastolic = parseInt(pressureParts[1], 10);
             if (!isNaN(systolic) && !isNaN(diastolic)) {
-              if (systolic >= 140 || diastolic >= 90) return 'Hipertensión';
-              if (systolic < 90 || diastolic < 60) return 'Hipotensión';
+              if (systolic >= 140 || diastolic >= 90) return 'Hipertensión (est.)';
+              if (systolic < 90 || diastolic < 60) return 'Hipotensión (est.)';
             }
           }
           return '';
         }
-        case 'COLESTEROL/TRIGL.': {
-          const lipidParts = value.split('/');
-          if (lipidParts.length === 2) {
-            const cholesterol = parseInt(lipidParts[0], 10);
-            const triglycerides = parseInt(lipidParts[1], 10);
-            if (!isNaN(cholesterol) && cholesterol > 200) return 'Hipercolesterolemia';
-            if (!isNaN(triglycerides) && triglycerides > 150) return 'Hipertrigliceridemia';
-          }
+        case 'COLESTEROL/TRIGL.':
+        case 'COLEST./TRIGL. (EST.)': {
+          // Lipid model is research-grade only — never publish a clinical
+          // condition string here. The numeric estimate carries its own
+          // RESEARCH_ONLY badge upstream.
           return '';
         }
         case 'ARRITMIAS': {

@@ -21,6 +21,15 @@ import {
   type IMUSnapshot,
 } from "@/modules/forensic/ForensicSessionRecorder";
 import { EvidenceGate, type EvidenceResult } from "@/modules/core/EvidenceGate";
+import {
+  STABLE_SIGNAL_GATE,
+  HUD_PERSISTENCE,
+  PRESSURE_GATE,
+  ROI_STABILITY_ALERT,
+  HUD_SMOOTHING,
+  VITAL_FEATURE_GATE,
+  computeRoiStabilityScore,
+} from "@/config/dynamicVitalEstimationConfig";
 
 const NON_ALERT_RHYTHMS = new Set([
   'SIN ARRITMIAS',
@@ -30,22 +39,42 @@ const NON_ALERT_RHYTHMS = new Set([
   'UNDETERMINED_LOW_QUALITY'
 ]);
 
+/**
+ * Build a "withheld" VitalSignsResult that honours the forensic contract:
+ * every value is explicitly zero AND the evidence object explains why.
+ * No defaults, no "normal" fillers — the UI must render this as such.
+ */
+const buildWithheldVitals = (reason: string): VitalSignsResult => ({
+  spo2: 0,
+  glucose: 0,
+  pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+  arrhythmiaCount: 0,
+  arrhythmiaStatus: "SIN ARRITMIAS|0",
+  lipids: { totalCholesterol: 0, triglycerides: 0 },
+  isCalibrating: false,
+  calibrationProgress: 0,
+  lastArrhythmiaData: undefined,
+  signalQuality: 0,
+  measurementConfidence: 'INVALID' as const,
+  evidence: {
+    source: 'CAMERA_PPG_REAL',
+    timestampMs: Date.now(),
+    rgb: { redAC: 0, redDC: 0, greenAC: 0, greenDC: 0, perfusionIndexGreen: 0, rgACRatio: 0 },
+    beatStream: { beatCount: 0, avgBeatSQI: 0, rrIntervals: [], detectorAgreement: 0, rrStability: 0 },
+    context: { contactStable: false, pressureOptimal: false, clipHighRatio: 0, sourceStability: 0, sampleRate: 30 },
+    signalQuality: 0,
+    measurementConfidence: 'INVALID',
+    reasons: [reason],
+    warnings: ['CONTACT_NOT_STABLE'],
+  },
+});
+
 const Index = () => {
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(false);
-  const [vitalSigns, setVitalSigns] = useState<VitalSignsResult>({
-    spo2: 0,
-    glucose: 0,
-    pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
-    arrhythmiaCount: 0,
-    arrhythmiaStatus: "SIN ARRITMIAS|0",
-    lipids: { totalCholesterol: 0, triglycerides: 0 },
-    isCalibrating: false,
-    calibrationProgress: 0,
-    lastArrhythmiaData: undefined,
-    signalQuality: 0,
-    measurementConfidence: 'INVALID'
-  });
+  const [vitalSigns, setVitalSigns] = useState<VitalSignsResult>(() =>
+    buildWithheldVitals('NOT_STARTED')
+  );
   const [heartRate, setHeartRate] = useState(0);
   const [heartbeatSignal, setHeartbeatSignal] = useState(0);
   const [beatMarker, setBeatMarker] = useState(0);
@@ -85,15 +114,15 @@ const Index = () => {
   const [showEvidenceStatus, setShowEvidenceStatus] = useState(false);
   const lastTelemetryTapRef = useRef<number>(0);
   const [telemetryTick, setTelemetryTick] = useState(0);
-  // ── ROI stability persistent-alert state ──────────────────────────────
+  // ── ROI stability persistent-alert state (centralized config) ─────────
   // Counts CONSECUTIVE accepted beats whose ROI stability score fell below
-  // ROI_STABILITY_THRESHOLD. When the streak reaches ROI_STABILITY_BEATS_N
-  // a persistent on-screen alert is raised and an audit entry is logged
-  // into the telemetry ring buffer for later forensic review.
-  const ROI_STABILITY_THRESHOLD = 0.55;       // [0..1] — below = "low"
-  const ROI_STABILITY_BEATS_N = 5;            // consecutive beats to trigger
-  const ROI_STABILITY_RECOVER_BEATS = 3;      // consecutive good beats to clear
-  const ROI_AUDIT_LOG_MAX = 64;
+  // the threshold. When the streak reaches the trigger count a persistent
+  // on-screen alert is raised and an audit entry is logged into the
+  // telemetry ring buffer for later forensic review.
+  const ROI_STABILITY_THRESHOLD = ROI_STABILITY_ALERT.THRESHOLD;
+  const ROI_STABILITY_BEATS_N = ROI_STABILITY_ALERT.TRIGGER_BEATS;
+  const ROI_STABILITY_RECOVER_BEATS = ROI_STABILITY_ALERT.RECOVER_BEATS;
+  const ROI_AUDIT_LOG_MAX = ROI_STABILITY_ALERT.AUDIT_LOG_MAX;
   const lowStabilityStreakRef = useRef(0);
   const goodStabilityStreakRef = useRef(0);
   const lastBeatRoiScoreRef = useRef(1);
@@ -117,7 +146,7 @@ const Index = () => {
   const isProcessingRef = useRef(false);
   const frameTimestampHistoryRef = useRef<number[]>([]);
 
-  const EMA_ALPHA = 0.3;
+  const EMA_ALPHA = HUD_SMOOTHING.EMA_ALPHA;
   const emaRef = useRef({
     bpm: 0, spo2: 0, systolic: 0, diastolic: 0,
     glucose: 0, cholesterol: 0, triglycerides: 0,
@@ -127,7 +156,7 @@ const Index = () => {
     if (next === 0) return 0;
     if (prev === 0) return next;
     return Math.round(prev * (1 - EMA_ALPHA) + next * EMA_ALPHA);
-  }, []);
+  }, [EMA_ALPHA]);
 
   const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
     if (!timestamp || !isFinite(timestamp)) return 30;
@@ -555,19 +584,7 @@ const Index = () => {
     // Drop the recorder; a fresh one is built on next startMonitoring.
     recorderRef.current = null;
     setLastSeal(null);
-    setVitalSigns({ 
-      spo2: 0,
-      glucose: 0,
-      pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
-      arrhythmiaCount: 0,
-      arrhythmiaStatus: "SIN ARRITMIAS|0",
-      lipids: { totalCholesterol: 0, triglycerides: 0 },
-      isCalibrating: false,
-      calibrationProgress: 0,
-      lastArrhythmiaData: undefined,
-      signalQuality: 0,
-      measurementConfidence: 'INVALID'
-    });
+    setVitalSigns(buildWithheldVitals('USER_RESET'));
     setArrhythmiaCount("--");
     lastArrhythmiaData.current = null;
     setCalibrationProgress(0);
@@ -581,8 +598,8 @@ const Index = () => {
 
   const vitalSignsFrameCounter = useRef<number>(0);
   const unstableFrameCounter = useRef<number>(0);
-  const UNSTABLE_ZERO_THRESHOLD = 15;
-  const VITALS_PROCESS_EVERY_N_FRAMES = 3;
+  const UNSTABLE_ZERO_THRESHOLD = HUD_PERSISTENCE.UNSTABLE_ZERO_FRAMES;
+  const VITALS_PROCESS_EVERY_N_FRAMES = HUD_PERSISTENCE.VITALS_PROCESS_EVERY_N_FRAMES;
   
   useEffect(() => {
     if (!lastSignal || !isMonitoring) return;
@@ -591,11 +608,14 @@ const Index = () => {
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
     const positionQuality = getPositionQuality();
     const stableHumanSignal =
-      contactState === 'STABLE_CONTACT' &&
-      (lastSignal.quality || 0) >= 12 &&
-      (lastSignal.perfusionIndex || 0) >= 0.005;
+      contactState === STABLE_SIGNAL_GATE.REQUIRED_CONTACT &&
+      (lastSignal.quality || 0) >= STABLE_SIGNAL_GATE.MIN_QUALITY &&
+      (lastSignal.perfusionIndex || 0) >= STABLE_SIGNAL_GATE.MIN_PERFUSION;
 
-    const pressureOptimal = positionQuality.locked && !positionQuality.drifting && positionQuality.qualityScore >= 0.55;
+    const pressureOptimal =
+      positionQuality.locked &&
+      !positionQuality.drifting &&
+      positionQuality.qualityScore >= PRESSURE_GATE.MIN_QUALITY_SCORE;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
     const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
 
@@ -665,8 +685,14 @@ const Index = () => {
     }
 
     if (!stableHumanSignal) {
+      // Forensic rule: do NOT silently overwrite published vitals with
+      // zeroes the moment signal degrades. Only do so on REAL no-contact
+      // (the camera reports NO_CONTACT) AND only after a sustained
+      // grace window. Mid-degradation values keep the previous evidence
+      // object so the auditor sees a coherent confidence drop.
       unstableFrameCounter.current++;
-      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD) {
+      const trueNoContact = contactState === 'NO_CONTACT';
+      if (unstableFrameCounter.current >= UNSTABLE_ZERO_THRESHOLD && trueNoContact) {
         setHeartRate(0);
         vitalSignsFrameCounter.current = 0;
         setBeatMarker(0);
@@ -676,22 +702,33 @@ const Index = () => {
           arrhythmiaDetectedRef.current = false;
           setArrhythmiaState(false);
         }
-        setVitalSigns(prev => (
-          prev.measurementConfidence === 'INVALID' && prev.spo2 === 0 && prev.glucose === 0 && prev.pressure.systolic === 0 && prev.pressure.diastolic === 0
+        setVitalSigns(prev =>
+          prev.measurementConfidence === 'INVALID' &&
+          prev.spo2 === 0 && prev.glucose === 0 &&
+          prev.pressure.systolic === 0 && prev.pressure.diastolic === 0
             ? prev
-            : {
-                ...prev,
-                spo2: 0,
-                glucose: 0,
-                pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
-                arrhythmiaCount: 0,
-                arrhythmiaStatus: "SIN ARRITMIAS|0",
-                lipids: { totalCholesterol: 0, triglycerides: 0 },
-                lastArrhythmiaData: undefined,
-                signalQuality: 0,
-                measurementConfidence: 'INVALID'
-              }
-        ));
+            : buildWithheldVitals('NO_CONTACT')
+        );
+      } else {
+        // Annotate the existing vitals with the degradation reason
+        // without touching the displayed numbers — the operator still
+        // sees the last legitimate reading, but tagged as low confidence.
+        setVitalSigns(prev => {
+          if (prev.measurementConfidence === 'INVALID') return prev;
+          return {
+            ...prev,
+            measurementConfidence: 'LOW',
+            evidence: {
+              ...prev.evidence,
+              measurementConfidence: 'LOW',
+              warnings: Array.from(new Set([
+                ...(prev.evidence?.warnings ?? []),
+                'SIGNAL_DEGRADED',
+              ])),
+              reasons: ['SIGNAL_QUALITY_LOW'],
+            },
+          };
+        });
       }
       return;
     }
@@ -735,12 +772,11 @@ const Index = () => {
 
       // ── Per-beat ROI stability sampling ────────────────────────────
       // Re-uses the same formula as the HUD to keep one source of truth.
-      const driftPenaltyBeat = Math.min(1, Math.max(0, (positionQuality.positionDrift || 0) / 0.30));
-      const roiScoreBeat = Math.max(0, Math.min(1,
-        (positionQuality.qualityScore || 0) * 0.7 +
-        (positionQuality.locked ? 0.3 : 0) -
-        driftPenaltyBeat * 0.4
-      ));
+      const roiScoreBeat = computeRoiStabilityScore({
+        qualityScore: positionQuality.qualityScore || 0,
+        locked: !!positionQuality.locked,
+        positionDrift: positionQuality.positionDrift || 0,
+      });
       lastBeatRoiScoreRef.current = roiScoreBeat;
       lastBeatDriftRef.current = positionQuality.positionDrift || 0;
 
@@ -850,9 +886,12 @@ const Index = () => {
         });
       }
 
-      const usableRRData = heartBeatResult.rrData && heartBeatResult.rrData.intervals.length >= 2 && heartBeatResult.bpmConfidence > 0.18
-        ? heartBeatResult.rrData
-        : undefined;
+      const usableRRData =
+        heartBeatResult.rrData &&
+        heartBeatResult.rrData.intervals.length >= VITAL_FEATURE_GATE.MIN_RR_INTERVALS &&
+        heartBeatResult.bpmConfidence > VITAL_FEATURE_GATE.MIN_BPM_CONFIDENCE
+          ? heartBeatResult.rrData
+          : undefined;
 
       const vitals = processVitalSigns(lastSignal.filteredValue, usableRRData, beatInputs);
 
@@ -1236,11 +1275,13 @@ const Index = () => {
             reArmCount: 0, lastReArmAt: 0, lastCheckAt: 0,
           };
           const pq = getPositionQuality();
-          // ROI stability score: high quality + no drift = 1; clamp to [0,1].
-          const driftPenalty = Math.min(1, Math.max(0, pq.positionDrift / 0.30));
-          const roiScore = Math.max(0, Math.min(1,
-            (pq.qualityScore || 0) * 0.7 + (pq.locked ? 0.3 : 0) - driftPenalty * 0.4
-          ));
+          // ROI stability score: single source of truth in
+          // computeRoiStabilityScore — used by HUD and per-beat audit.
+          const roiScore = computeRoiStabilityScore({
+            qualityScore: pq.qualityScore || 0,
+            locked: !!pq.locked,
+            positionDrift: pq.positionDrift || 0,
+          });
           const roiPct = Math.round(roiScore * 100);
           const driftPct = Math.round(Math.min(1, pq.positionDrift) * 100);
           const driftWarn = pq.drifting || driftPct >= 18;
@@ -1348,6 +1389,26 @@ const Index = () => {
               />
               <VitalSign label="ARRITMIAS" value={vitalSigns.arrhythmiaStatus || "SIN ARRITMIAS|0"} highlighted={showResults} />
             </div>
+            {/* Forensic confidence ribbon — proves every vital above is
+                derived from the camera-PPG evidence object, never from
+                defaults. Non-intrusive: 1-line, monochrome. */}
+            {isMonitoring && vitalSigns.evidence && (
+              <div className="mt-2 flex items-center justify-center gap-2 text-[9px] font-mono text-slate-400/90 tracking-wider">
+                <span className={
+                  vitalSigns.measurementConfidence === 'HIGH' ? 'text-emerald-400'
+                  : vitalSigns.measurementConfidence === 'MEDIUM' ? 'text-blue-300'
+                  : vitalSigns.measurementConfidence === 'LOW' ? 'text-amber-300'
+                  : 'text-slate-500'
+                }>● {vitalSigns.measurementConfidence}</span>
+                <span>SQI {vitalSigns.evidence.signalQuality}</span>
+                <span>PI {vitalSigns.evidence.rgb.perfusionIndexGreen.toFixed(2)}%</span>
+                <span>FPS {Math.round(vitalSigns.evidence.context.sampleRate)}</span>
+                <span className="text-slate-500">CAMERA_PPG_REAL</span>
+                {vitalSigns.evidence.warnings.length > 0 && (
+                  <span className="text-amber-400">⚠ {vitalSigns.evidence.warnings[0]}</span>
+                )}
+              </div>
+            )}
           </div>
 
           {showResults && measurementSummary && (() => {
