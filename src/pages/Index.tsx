@@ -158,7 +158,14 @@ const Index = () => {
     return Math.round(prev * (1 - EMA_ALPHA) + next * EMA_ALPHA);
   }, [EMA_ALPHA]);
 
-  const estimateSampleRateFromFrames = useCallback((timestamp?: number): number => {
+  /**
+   * Single source of truth for the working sample-rate: the worker
+   * already maintains a median-of-30 frame interval and exports it as
+   * `lastSignal.sampleRate`. We only fall back to a rolling estimate
+   * if for some reason that field is not (yet) populated.
+   */
+  const sampleRateFromSignal = useCallback((timestamp?: number, upstream?: number): number => {
+    if (upstream && isFinite(upstream)) return Math.max(15, Math.min(120, upstream));
     if (!timestamp || !isFinite(timestamp)) return 30;
     const history = frameTimestampHistoryRef.current;
     if (history.length === 0 || timestamp > history[history.length - 1]) {
@@ -416,7 +423,7 @@ const Index = () => {
       const bundle = await recorderRef.current.buildBundle();
       setLastSeal({ sha: bundle.sha256, sessionId: recorderRef.current.sessionId });
       downloadForensicBundle(bundle, recorderRef.current.sessionId);
-      toast({ title: "📦 Bundle Forense Exportado", description: `SHA-256: ${bundle.sha256.slice(0, 16)}...` });
+      toast({ title: "📦 Reporte Diagnóstico Exportado", description: `SHA-256: ${bundle.sha256.slice(0, 16)}...` });
     } catch (err) {
       toast({ title: "Error al exportar", description: String(err), variant: "destructive" });
     } finally {
@@ -617,7 +624,7 @@ const Index = () => {
       !positionQuality.drifting &&
       positionQuality.qualityScore >= PRESSURE_GATE.MIN_QUALITY_SCORE;
     const sourceStability = Math.max(0, Math.min(1, positionQuality.qualityScore || 0));
-    const sampleRate = estimateSampleRateFromFrames(lastSignal.timestamp);
+    const sampleRate = sampleRateFromSignal(lastSignal.timestamp, (lastSignal as any).sampleRate);
 
     // ── EvidenceGate validation ─────────────────────────────────────────
     // Forensic-grade validation of signal quality before processing
@@ -663,6 +670,7 @@ const Index = () => {
         clipLow: 0,
         perfusionIndex: lastSignal.perfusionIndex,
         positionDrifting: positionQuality.drifting,
+        sampleRate,
       }
     );
 
@@ -952,7 +960,7 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, estimateSampleRateFromFrames, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount]);
+  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, setUpstreamContext, getRGBStats, getPositionQuality, sampleRateFromSignal, computeRRStability, applyEMA, vitalSigns.arrhythmiaCount]);
 
   useEffect(() => {
     if (isMonitoring && elapsedTime >= 60) {
@@ -1094,7 +1102,7 @@ const Index = () => {
                 return (
                   <div className="mt-2 pt-1 border-t border-amber-500/30">
                     <div className="flex justify-between items-center mb-1">
-                      <span className="text-amber-400 font-bold tracking-wider text-[9px]">FORENSIC SESSION</span>
+                      <span className="text-amber-400 font-bold tracking-wider text-[9px]">SESIÓN · INTEGRIDAD</span>
                       <button
                         type="button"
                         onClick={onExport}
@@ -1543,7 +1551,7 @@ const Index = () => {
                           className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-all disabled:opacity-50"
                         >
                           {exporting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
-                          {exporting ? 'Exportando...' : 'Exportar Forense'}
+                          {exporting ? 'Exportando...' : 'Exportar Reporte'}
                         </button>
                         <button
                           onClick={() => fileInputRef.current?.click()}
