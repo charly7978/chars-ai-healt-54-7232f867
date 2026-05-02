@@ -460,6 +460,9 @@ const Index = () => {
     setHeartbeatSignal(0);
     setBeatMarker(0);
     setRRIntervals([]);
+    // Drop the recorder; a fresh one is built on next startMonitoring.
+    recorderRef.current = null;
+    setLastSeal(null);
     setVitalSigns({ 
       spo2: 0,
       glucose: 0,
