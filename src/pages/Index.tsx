@@ -4,7 +4,7 @@ import { playCompletionSound } from "@/utils/soundUtils";
 import VitalSign from "@/components/VitalSign";
 import CameraView, { CameraViewHandle } from "@/components/CameraView";
 import { useSignalProcessor } from "@/hooks/useSignalProcessor";
-import { useHeartBeatProcessor } from "@/hooks/useHeartBeatProcessor";
+import { useHeartBeatProcessorOptimized } from "@/hooks/useHeartBeatProcessorOptimized";
 import { useVitalSignsProcessor } from "@/hooks/useVitalSignsProcessor";
 import { useSaveMeasurement } from "@/hooks/useSaveMeasurement";
 import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
@@ -174,7 +174,7 @@ const Index = () => {
     processSignal: processHeartBeat, 
     setArrhythmiaState,
     reset: resetHeartBeat,
-  } = useHeartBeatProcessor();
+  } = useHeartBeatProcessorOptimized();
   
   const { 
     processSignal: processVitalSigns, 
