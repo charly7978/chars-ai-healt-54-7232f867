@@ -409,6 +409,9 @@ const Index = () => {
     frameTimestampHistoryRef.current = [];
     if (savedResults) setVitalSigns(savedResults);
     setShowResults(true);
+    // Seal the forensic session. The bundle stays in memory until the
+    // operator presses EXPORT — we never auto-download.
+    recorderRef.current?.finalize();
     const total = totalBeatsRef.current;
     const arrBeats = arrhythmiaBeatsRef.current;
     setMeasurementSummary({
