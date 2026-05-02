@@ -109,6 +109,7 @@ export class HeartBeatProcessorOptimized {
   private spectralBPM = 0;            // current locked spectral BPM
   private spectralConfidence = 0;     // [0..1] prominence-ratio confidence
   private spectralLockHold = 0;       // consecutive valid PSD updates
+  private spectralBadUpdates = 0;     // consecutive INVALID PSD updates
   private spectralLocked = false;
   private lastSpectralUpdate = 0;
   private cardiacValid = false;       // gate for ALL outputs
@@ -384,21 +385,31 @@ export class HeartBeatProcessorOptimized {
 
     if (valid) {
       this.spectralLockHold = Math.min(this.spectralLockHold + 1, 100);
+      this.spectralBadUpdates = 0;
       if (this.spectralLockHold >= this.config.spectralLockHoldUpdates) {
         this.spectralLocked = true;
       }
     } else {
-      this.spectralLockHold = Math.max(0, this.spectralLockHold - 1);
-      if (this.spectralLockHold === 0) this.spectralLocked = false;
+      // STICKY lock: a single bad PSD update doesn't break the lock.
+      // We only release when ≥6 consecutive PSD updates fail
+      // (~2.4 seconds of bad signal at 400 ms cadence). This stops the
+      // "measures for 5 s then nothing" symptom: a momentary noise
+      // burst won't strip a lock that's actually been valid.
+      this.spectralBadUpdates++;
+      if (this.spectralBadUpdates >= 6) {
+        this.spectralLockHold = 0;
+        this.spectralLocked = false;
+      }
     }
   }
 
   private softReleaseSpectralLock(): void {
-    // Decay the lock without snapping it; if a few bad frames pass we
-    // still hold the value, but if the bad frames persist the gate
-    // will cut output.
-    this.spectralLockHold = Math.max(0, this.spectralLockHold - 1);
-    if (this.spectralLockHold === 0) {
+    // Pre-gate failure (PI obviously bad / no signal range). Same
+    // sticky behaviour as updateSpectralLock — don't kill the lock on
+    // a single bad frame, only after sustained failure.
+    this.spectralBadUpdates++;
+    if (this.spectralBadUpdates >= 12) {       // ~ same time-window
+      this.spectralLockHold = 0;
       this.spectralLocked = false;
       this.cardiacValid = false;
     }
@@ -948,6 +959,7 @@ export class HeartBeatProcessorOptimized {
     this.spectralBPM = 0;
     this.spectralConfidence = 0;
     this.spectralLockHold = 0;
+    this.spectralBadUpdates = 0;
     this.spectralLocked = false;
     this.cardiacValid = false;
     this.lastSpectralUpdate = 0;

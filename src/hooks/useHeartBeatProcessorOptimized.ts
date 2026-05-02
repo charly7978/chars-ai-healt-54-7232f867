@@ -18,6 +18,7 @@ import { HeartBeatProcessorOptimized } from '../modules/HeartBeatProcessorOptimi
 import { ArrhythmiaDetector, type ArrhythmiaEvidence } from '../modules/arrhythmia/ArrhythmiaDetector';
 import type { ContactState } from '../types/signal';
 import type { HeartBeatResult } from '../types/beat';
+import { playHeartBeep, playAlertBeep } from '../utils/soundUtils';
 
 export const useHeartBeatProcessorOptimized = () => {
   const processorRef = useRef<HeartBeatProcessorOptimized | null>(null);
@@ -114,17 +115,28 @@ export const useHeartBeatProcessorOptimized = () => {
 
     setLastResult(result);
 
-    // Analyze arrhythmia if beat detected with valid RR interval
-    if (arrhythmiaDetectorRef.current && result.isPeak && result.rrData?.intervals?.length > 0) {
-      const lastRR = result.rrData.intervals[result.rrData.intervals.length - 1];
-      const newEvidence = arrhythmiaDetectorRef.current.processBeat(lastRR, currentTime);
-      // CRITICAL: Update with new evidence OR refresh last evidence to ensure UI updates
-      setArrhythmiaEvidence(prev => {
-        if (newEvidence) return newEvidence; // New analysis result
-        // If no new analysis (throttled), keep previous but add stale flag
-        if (prev && currentTime - prev.timestamp < 10000) return prev; // Keep if < 10s old
-        return null; // Clear if too old
-      });
+    // Cardiac beep + arrhythmia analysis on every accepted beat.
+    if (result.isPeak) {
+      // Audio feedback. The beep itself is throttled inside soundUtils
+      // to ~220 ms so a runaway detector can't make it buzz.
+      playHeartBeep();
+
+      // Analyse the new RR interval for arrhythmia patterns.
+      if (arrhythmiaDetectorRef.current && result.rrData?.intervals?.length > 0) {
+        const lastRR = result.rrData.intervals[result.rrData.intervals.length - 1];
+        const newEvidence = arrhythmiaDetectorRef.current.processBeat(lastRR, currentTime);
+        setArrhythmiaEvidence(prev => {
+          if (newEvidence) {
+            // Audible alert when a NEW arrhythmia event surfaces.
+            if (newEvidence.detected && (!prev || !prev.detected || prev.type !== newEvidence.type)) {
+              playAlertBeep();
+            }
+            return newEvidence;
+          }
+          if (prev && currentTime - prev.timestamp < 10000) return prev;
+          return null;
+        });
+      }
     }
 
     // Update state with hysteresis to prevent flickering
