@@ -578,6 +578,24 @@ const Index = () => {
         lastArrhythmiaCountForBeatsRef.current = currentArrCount;
       }
 
+      // Forensic beat record. Type degrades to SUSPECT_PREMATURE if the
+      // global arrhythmia counter ticked on this beat. We never invent an
+      // RR — we only forward what the heart-beat engine produced.
+      if (recorderRef.current) {
+        const intervals = heartBeatResult.rrData?.intervals || [];
+        const rrMs = intervals.length > 0 ? intervals[intervals.length - 1] : null;
+        const isArrThis = currentArrCount > (lastArrhythmiaCountForBeatsRef.current - 1);
+        recorderRef.current.pushBeat({
+          timestampMs: lastSignal.timestamp,
+          amplitude: heartBeatResult.filteredValue,
+          rrMs: rrMs,
+          bpmInstant: rrMs && rrMs > 0 ? 60000 / rrMs : null,
+          quality: heartBeatResult.beatSQI || 0,
+          type: isArrThis ? 'SUSPECT_PREMATURE' : 'NORMAL',
+          reason: isArrThis ? 'arrhythmia-counter-tick' : 'consensus',
+        });
+      }
+
       // ── Per-beat ROI stability sampling ────────────────────────────
       // Re-uses the same formula as the HUD to keep one source of truth.
       const driftPenaltyBeat = Math.min(1, Math.max(0, (positionQuality.positionDrift || 0) / 0.30));
