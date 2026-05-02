@@ -87,7 +87,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private readonly POS_DRIFT_TOL = 0.12;
   private positionDrifting = false;
   private positionDrift = 0;
-  private positionGuidance = 'COLOQUE SU DEDO SOBRE LA CÁMARA Y EL FLASH';
+  private positionGuidance = 'COLOQUE LA PUNTA DEL DEDO SOBRE LA CÁMARA Y FLASH';
+  private fingerPositionType: 'TIP' | 'FLAT' | 'UNKNOWN' = 'UNKNOWN';
+  private optimalPressureDetected = false;
   private positionQualityScore = 0;
   private spatialUniformity = 0;
   private centerCoverage = 0;
@@ -299,7 +301,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       perfusionIndex,
       rawRed: roi.rawRed,
       rawGreen: roi.rawGreen,
-      fingerPosition: roi.fingerPosition,
+      fingerPosition: this.fingerPositionType,
       diagnostics: {
         message:
           `${source.label} PI:${perfusionIndex.toFixed(2)} P:${this.pressureState.charAt(0)} ` +
@@ -412,6 +414,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       this.smoothedFingerScore += (roi.fingerScore - this.smoothedFingerScore) * ca;
     }
 
+    // Detect finger position type based on pressure and coverage patterns
+    this.detectFingerPositionType(roi);
+
     const r = this.smoothedRed;
     const g = this.smoothedGreen;
     const b = this.smoothedBlue;
@@ -420,18 +425,25 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const totalI = r + g + b;
     const notBlownOut = !(r > 253 && g > 252 && b > 252);
 
+    // Adaptive thresholds based on finger position
+    const isTipPosition = this.fingerPositionType === 'TIP';
+    const coverageThreshold = isTipPosition ? 0.35 : 0.50;
+    const redDominanceThreshold = isTipPosition ? 20 : 30;
+    const rgRatioThreshold = isTipPosition ? 1.20 : 1.10;
+
     if (this.fingerDetected) {
-      // MAINTAIN — moderately strict
-      return r > 50 && rgRatio > 1.08 && redDominance > 10 &&
-        this.smoothedCoverage > 0.15 && this.smoothedFingerScore > 0.15 &&
-        notBlownOut;
+      // MAINTAIN — adaptive thresholds
+      return r > 45 && rgRatio > rgRatioThreshold && redDominance > redDominanceThreshold &&
+        this.smoothedCoverage > coverageThreshold && this.smoothedFingerScore > 0.12 &&
+        notBlownOut && this.pressureState !== 'HIGH_PRESSURE';
     } else {
-      // ACQUIRE — very strict, only optimal placement
-      return r > 90 && rgRatio > 1.25 && redDominance > 25 &&
-        totalI > 150 && totalI < 720 &&
-        this.smoothedCoverage > 0.40 && this.smoothedFingerScore > 0.40 &&
-        roi.clipHighRatio < 0.3 &&
-        this.motionScore < 1.0 &&
+      // ACQUIRE — optimized for fingertip detection
+      return r > 85 && rgRatio > (isTipPosition ? 1.30 : 1.25) && redDominance > (isTipPosition ? 22 : 25) &&
+        totalI > 140 && totalI < 680 &&
+        this.smoothedCoverage > (isTipPosition ? 0.35 : 0.45) && 
+        this.smoothedFingerScore > (isTipPosition ? 0.35 : 0.40) &&
+        roi.clipHighRatio < 0.25 &&
+        this.motionScore < 0.8 &&
         notBlownOut;
     }
   }
@@ -483,19 +495,33 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       } else {
         this.positionStabilityCount = Math.max(0, this.positionStabilityCount - 3);
         if (this.pressureState === 'HIGH_PRESSURE') {
-          this.positionGuidance = 'REDUZCA LA PRESIÓN DEL DEDO';
+          this.positionGuidance = this.fingerPositionType === 'TIP' 
+            ? '⚠️ PRESIÓN EXCESIVA - USE PUNTA MÁS SUAVE' 
+            : '⚠️ PRESIÓN EXCESIVA - REDUZCA FUERZA';
         } else if (roi.coverageRatio < 0.40) {
-          this.positionGuidance = 'CUBRA TODA LA CÁMARA CON SU DEDO';
+          this.positionGuidance = this.fingerPositionType === 'TIP'
+            ? 'CUBRA TODA LA CÁMARA CON PUNTA DEL DEDO'
+            : 'CUBRA TODA LA CÁMARA CON SU DEDO';
         } else if (roi.spatialUniformity < 0.40) {
-          this.positionGuidance = 'CENTRE EL DEDO SOBRE LA CÁMARA';
+          this.positionGuidance = this.fingerPositionType === 'TIP'
+            ? 'CENTRE LA PUNTA DEL DEDO SOBRE LA CÁMARA'
+            : 'CENTRE EL DEDO SOBRE LA CÁMARA';
         } else {
-          this.positionGuidance = 'PRESIONE SUAVEMENTE — FIRME Y SIN MOVER';
+          this.positionGuidance = this.fingerPositionType === 'TIP'
+            ? 'PRESIONE PUNTA SUAVEMENTE - FIRME Y SIN MOVER'
+            : 'PRESIONE SUAVEMENTE - FIRME Y SIN MOVER';
         }
       }
     } else {
       this.positionStabilityCount = 0;
       this.positionDrifting = false;
-      this.positionGuidance = 'COLOQUE SU DEDO SOBRE LA CÁMARA Y EL FLASH';
+      if (this.fingerPositionType === 'TIP') {
+        this.positionGuidance = '✓ PUNTA DEL DEDO DETECTADA - MANTENGA ASÍ';
+      } else if (this.fingerPositionType === 'FLAT') {
+        this.positionGuidance = '⚠️ DEDO ACOSTADO - USE PUNTA PARA MEJOR SEÑAL';
+      } else {
+        this.positionGuidance = 'COLOQUE LA PUNTA DEL DEDO SOBRE LA CÁMARA Y FLASH';
+      }
     }
   }
 
@@ -656,7 +682,40 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.spatialUniformity = 0; this.centerCoverage = 0;
     this.positionDrift = 0; this.positionDrifting = false;
     this.positionQualityScore = 0;
-    this.positionGuidance = 'COLOQUE SU DEDO';
+    this.positionGuidance = 'COLOQUE LA PUNTA DEL DEDO SOBRE LA CÁMARA Y FLASH';
+  }
+
+  private detectFingerPositionType(roi: ROIMaskResult): void {
+    // Analyze pressure distribution and spatial patterns to determine finger position
+    const pressure = this.pressureState;
+    const coverage = roi.coverageRatio;
+    const spatialUniformity = roi.spatialUniformity;
+    const centerCoverage = roi.centerCoverage;
+    const clipHigh = roi.clipHighRatio;
+    
+    // Tip position characteristics:
+    // - Higher pressure concentration (smaller area, higher pressure)
+    // - Better center coverage
+    // - Lower overall coverage but higher spatial uniformity
+    // - Moderate clip ratio (not too saturated)
+    
+    if (pressure === 'HIGH_PRESSURE' && clipHigh > 0.15) {
+      this.fingerPositionType = 'FLAT'; // Excessive pressure suggests flat positioning
+    } else if (coverage > 0.45 && centerCoverage > 0.35 && spatialUniformity > 0.50 && clipHigh < 0.20) {
+      this.fingerPositionType = 'FLAT'; // Broad coverage suggests flat positioning
+    } else if (coverage >= 0.25 && coverage <= 0.45 && centerCoverage > 0.40 && spatialUniformity > 0.35 && clipHigh < 0.25) {
+      this.fingerPositionType = 'TIP'; // Focused coverage suggests tip positioning
+    } else if (pressure === 'OPTIMAL_PRESSURE' && centerCoverage > 0.45) {
+      this.fingerPositionType = 'TIP'; // Optimal pressure with good center coverage
+    } else {
+      // Keep previous state if unclear
+      if (this.fingerPositionType === 'UNKNOWN') {
+        this.fingerPositionType = coverage > 0.40 ? 'FLAT' : 'TIP';
+      }
+    }
+
+    // Update ROI result with finger position
+    roi.fingerPosition = this.fingerPositionType;
   }
 
   // ══════════════════════════════════════════════════════

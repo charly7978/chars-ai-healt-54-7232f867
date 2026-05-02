@@ -246,7 +246,8 @@ export class HeartBeatProcessorOptimized {
     this.filteredBuf.push(normalizedValue);
     
     // Signal quality check: if range too small, not a valid PPG signal
-    if (normRange < 0.15) {
+    // Lowered threshold for better weak signal detection
+    if (normRange < 0.08) {
       return this.makeEmptyResult(0);
     }
     
@@ -259,7 +260,15 @@ export class HeartBeatProcessorOptimized {
     }
     
     // Update adaptive thresholds based on signal statistics
+    // More aggressive adaptation for weak signals
     this.updateAdaptiveThresholds();
+    
+    // Enhanced signal quality assessment
+    const signalStrength = this.assessSignalStrength();
+    if (signalStrength < 0.3) {
+      // Boost gain for very weak signals
+      return this.processWeakSignal(now, signalStrength);
+    }
     
     // Detect beats using adaptive double-threshold
     const detection = this.detectBeatOptimized(now);
@@ -304,19 +313,21 @@ export class HeartBeatProcessorOptimized {
         this.lastPeakTime = now;
         this.lastPeakValue = candidate.amplitude;
         
+        // Enhanced arrhythmia detection
+        const arrhythmiaScore = this.detectArrhythmias(candidate, now);
+        if (arrhythmiaScore > 0.7) {
+          beatFlags.isSuspicious = true;
+          beatFlags.isPremature = true;
+        }
+        
         // Compute quality metrics
         currentBeatSQI = this.computeBeatSQIOptimized(candidate);
         beatFlags = this.computeBeatFlags(candidate, timeSinceLastPeak);
         
         // Update template
-        if (currentBeatSQI > 50) {
+        if (currentBeatSQI > 40) {
           this.updateTemplate();
         }
-        
-        // Feedback
-        this.beatsAccepted++;
-        this.vibrate();
-        this.playBeep();
       } else {
         rejectionReason = validation.reason;
         this.beatsRejected++;
@@ -482,8 +493,115 @@ export class HeartBeatProcessorOptimized {
   }
 
   /**
-   * Find local minimum in buffer range
+   * Assess signal strength for adaptive processing
    */
+  private assessSignalStrength(): number {
+    if (this.filteredBuf.length < 30) return 0;
+    
+    const n = Math.min(60, this.filteredBuf.length);
+    const recent = [];
+    for (let i = 0; i < n; i++) {
+      recent.push(this.filteredBuf.get(this.filteredBuf.length - n + i));
+    }
+    
+    // Calculate signal metrics
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const variance = recent.reduce((a, v) => a + (v - mean) ** 2, 0) / recent.length;
+    const stdDev = Math.sqrt(variance);
+    const range = Math.max(...recent) - Math.min(...recent);
+    
+    // Signal strength score (0-1)
+    const normalizedStd = Math.min(1, stdDev / Math.max(1, mean));
+    const rangeScore = Math.min(1, range / Math.max(1, mean));
+    const perfusionScore = Math.min(1, this.perfusionIndex * 50);
+    
+    return (normalizedStd * 0.4 + rangeScore * 0.3 + perfusionScore * 0.3);
+  }
+
+  /**
+   * Process weak signals with enhanced sensitivity
+   */
+  private processWeakSignal(now: number, signalStrength: number): HeartBeatResult {
+    // Apply gain boost for weak signals
+    const gainBoost = 1.0 + (0.3 - signalStrength) * 2; // Boost up to 2x
+    const boostedValue = this.filteredBuf.get(this.filteredBuf.length - 1) * gainBoost;
+    
+    // Lower thresholds for weak signals
+    const originalPeakThreshold = this.peakThreshold;
+    const originalValleyThreshold = this.valleyThreshold;
+    
+    this.peakThreshold *= 0.7; // 30% more sensitive
+    this.valleyThreshold *= 0.7;
+    
+    // Process with boosted signal
+    const detection = this.detectBeatOptimized(now);
+    
+    // Restore original thresholds
+    this.peakThreshold = originalPeakThreshold;
+    this.valleyThreshold = originalValleyThreshold;
+    
+    if (detection.detected) {
+      return {
+        bpm: 0,
+        bpmConfidence: 0.1,
+        isPeak: true,
+        filteredValue: boostedValue,
+        arrhythmiaCount: 0,
+        sqi: Math.max(5, signalStrength * 100),
+        beatSQI: 20,
+        rrData: { intervals: [], lastPeakTime: null },
+        hypothesis: null,
+        detectorAgreement: detection.candidate?.detectorAgreement ?? 0,
+        rejectionReason: 'weak_signal_boosted',
+        beatFlags: null,
+        debug: this.buildDebugInfo(true, now, 20, detection),
+      };
+    }
+    
+    return this.makeEmptyResult(0);
+  }
+
+  /**
+   * Enhanced arrhythmia detection using RR interval analysis
+   */
+  private detectArrhythmias(candidate: BeatCandidate, now: number): number {
+    if (this.rrIntervals.length < 3) return 0;
+    
+    const recent = this.rrIntervals.slice(-6);
+    const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const variance = recent.reduce((a, rr) => a + (rr - mean) ** 2, 0) / recent.length;
+    const stdDev = Math.sqrt(variance);
+    const cv = stdDev / Math.max(1, mean);
+    
+    // Arrhythmia indicators
+    let score = 0;
+    
+    // Irregularity score (coefficient of variation)
+    if (cv > 0.15) score += 0.3;
+    if (cv > 0.25) score += 0.4;
+    
+    // RR interval variation
+    const maxRR = Math.max(...recent);
+    const minRR = Math.min(...recent);
+    const rrRatio = maxRR / Math.max(1, minRR);
+    if (rrRatio > 1.5) score += 0.2;
+    if (rrRatio > 2.0) score += 0.3;
+    
+    // Premature beat detection
+    const expectedRR = this.getExpectedRR();
+    if (expectedRR > 0) {
+      const lastRR = this.rrIntervals[this.rrIntervals.length - 1];
+      const prematurityRatio = lastRR / expectedRR;
+      if (prematurityRatio < 0.7) score += 0.2;
+      if (prematurityRatio < 0.5) score += 0.4;
+    }
+    
+    // Morphology irregularities
+    if (candidate.morphologyScore < 30) score += 0.1;
+    if (candidate.prominence < 0.2) score += 0.2;
+    
+    return Math.min(1, score);
+  }
   private findLocalMin(startIdx: number, endIdx: number): number {
     let min = Infinity;
     for (let i = Math.max(0, startIdx); i < Math.min(endIdx, this.filteredBuf.length); i++) {

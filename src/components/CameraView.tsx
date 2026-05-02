@@ -188,7 +188,7 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
               facingMode: { ideal: 'environment' },
               width: { ideal: 640, max: 960 },
               height: { ideal: 480, max: 720 },
-              frameRate: { ideal: 30, min: 24, max: 30 }
+              frameRate: { ideal: 30, min: 25, max: 30 }
             };
 
         let stream: MediaStream;
@@ -276,17 +276,19 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
         // Frame rate lock
         await tryConstraint('frameRate', 30);
 
-        // Exposure
+        // Exposure — optimized for PPG
         if (caps?.exposureMode?.includes('manual')) {
           diagnosticsRef.current.exposureLocked = await tryConstraint('exposureMode', 'manual');
         } else if (caps?.exposureMode?.includes('continuous')) {
           await tryConstraint('exposureMode', 'continuous');
         }
 
+        // Exposure compensation for better PPG signal
         if (caps?.exposureCompensation) {
           const min = caps.exposureCompensation.min ?? -2;
           const max = caps.exposureCompensation.max ?? 2;
-          const target = Math.max(min, Math.min(max, -0.35));
+          // Slightly negative exposure for better contrast
+          const target = Math.max(min, Math.min(max, -0.5));
           await tryConstraint('exposureCompensation', target);
         }
 
@@ -295,11 +297,12 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
           diagnosticsRef.current.wbLocked = await tryConstraint('whiteBalanceMode', 'manual');
         }
 
-        // ISO
+        // ISO — optimized for PPG signal quality
         if (caps?.iso) {
           const minISO = caps.iso.min ?? 50;
-          const maxISO = caps.iso.max ?? 400;
-          const targetISO = Math.max(minISO, Math.min(maxISO, 140));
+          const maxISO = caps.iso.max ?? 800;
+          // Use lower ISO for better signal-to-noise ratio
+          const targetISO = Math.max(minISO, Math.min(maxISO, 100));
           if (await tryConstraint('iso', targetISO)) {
             diagnosticsRef.current.isoValue = targetISO;
           }
