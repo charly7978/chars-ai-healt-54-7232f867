@@ -52,6 +52,7 @@
 
 import { RingBuffer } from './signal-processing/RingBuffer';
 import { parameterRegistry } from '@/config/medical-parameter-registry/loader';
+import { dualDetectorFusion, type FusionResult } from './signal-processing/DualDetectorFusion';
 import type {
   BeatCandidate, AcceptedBeat, BeatFlags, BPMHypothesis,
   HeartBeatResult, HeartBeatDebug
@@ -132,6 +133,12 @@ export class HeartBeatProcessorOptimized {
   private motionPenalty = 0;
   private contactStable = true;
   private perfusionIndex = 0;
+
+  // Dual-detector fusion state (Elgendi + derivative consensus)
+  private lastFusion: FusionResult | null = null;
+  private fusionConsensusCount = 0;
+  private fusionDisagreeCount = 0;
+  private lastFusionEvalMs = 0;
 
   private config: OptimizedProcessorConfig;
 
@@ -231,6 +238,13 @@ export class HeartBeatProcessorOptimized {
     }
 
     this.cardiacValid = true;
+
+    // ─── DUAL-DETECTOR FUSION (Elgendi + derivative) ───
+    // Run no more often than the spectral cadence to keep cost bounded.
+    if (now - this.lastFusionEvalMs >= this.config.spectralUpdateMs) {
+      this.lastFusionEvalMs = now;
+      this.runDualDetectorFusion(now);
+    }
 
     // ─── SLAVED PEAK DETECTOR ───
     this.updateAdaptiveThresholds();
@@ -334,6 +348,27 @@ export class HeartBeatProcessorOptimized {
       s1 = s0;
     }
     return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+  }
+
+  /**
+   * Build a Float64Array snapshot of the last N filteredBuf samples
+   * and feed it to the dual-detector fusion. The fusion is pure /
+   * stateless — we keep only the latest result for the slaved
+   * detector to consult when it produces a candidate.
+   */
+  private runDualDetectorFusion(now: number): void {
+    const targetN = Math.min(this.filteredBuf.length, Math.round(this.fs * 3));
+    if (targetN < Math.round(this.fs * 1.5)) {
+      this.lastFusion = null;
+      return;
+    }
+    const snapshot = new Float64Array(targetN);
+    const start = this.filteredBuf.length - targetN;
+    for (let i = 0; i < targetN; i++) snapshot[i] = this.filteredBuf.get(start + i);
+    const result = dualDetectorFusion.evaluate({ buffer: snapshot, fs: this.fs, nowMs: now });
+    this.lastFusion = result;
+    if (result.consensus) this.fusionConsensusCount++;
+    else if (result.elgendiPeak !== result.derivativePeak) this.fusionDisagreeCount++;
   }
 
   /**
@@ -527,6 +562,23 @@ export class HeartBeatProcessorOptimized {
         candidate.morphologyScore = this.calculateMorphologyScore(candidate);
         candidate.rhythmScore = this.calculateRhythmScore(candidate);
         candidate.totalScore = candidate.morphologyScore * 0.5 + candidate.rhythmScore * 0.3 + 20;
+        // Augment detector hits / agreement using the dual-detector
+        // fusion: a recent consensus from Elgendi+derivative confirms
+        // this is a real beat, not a dicrotic shoulder. NEVER fabricates
+        // a beat — only RAISES the agreement of one already produced.
+        if (this.lastFusion) {
+          if (this.lastFusion.consensus) {
+            candidate.detectorHits = Math.max(candidate.detectorHits, 2);
+            candidate.detectorAgreement = Math.min(1, Math.max(
+              candidate.detectorAgreement, this.lastFusion.agreement,
+            ));
+          } else if (this.lastFusion.elgendiPeak || this.lastFusion.derivativePeak) {
+            // Single-detector support — modest bump only.
+            candidate.detectorAgreement = Math.min(1,
+              candidate.detectorAgreement * 0.6 + 0.25,
+            );
+          }
+        }
         return { detected: true, candidate };
       }
     } else if (cur < this.valleyThreshold) {
@@ -976,6 +1028,10 @@ export class HeartBeatProcessorOptimized {
     this.doublePeakCount = 0;
     this.missedBeatCount = 0;
     this.lastRejectionReason = '';
+    this.lastFusion = null;
+    this.fusionConsensusCount = 0;
+    this.fusionDisagreeCount = 0;
+    this.lastFusionEvalMs = 0;
   }
 
   dispose(): void { /* no-op */ }
