@@ -351,6 +351,27 @@ export class HeartBeatProcessorOptimized {
   }
 
   /**
+   * Build a Float64Array snapshot of the last N filteredBuf samples
+   * and feed it to the dual-detector fusion. The fusion is pure /
+   * stateless — we keep only the latest result for the slaved
+   * detector to consult when it produces a candidate.
+   */
+  private runDualDetectorFusion(now: number): void {
+    const targetN = Math.min(this.filteredBuf.length, Math.round(this.fs * 3));
+    if (targetN < Math.round(this.fs * 1.5)) {
+      this.lastFusion = null;
+      return;
+    }
+    const snapshot = new Float64Array(targetN);
+    const start = this.filteredBuf.length - targetN;
+    for (let i = 0; i < targetN; i++) snapshot[i] = this.filteredBuf.get(start + i);
+    const result = dualDetectorFusion.evaluate({ buffer: snapshot, fs: this.fs, nowMs: now });
+    this.lastFusion = result;
+    if (result.consensus) this.fusionConsensusCount++;
+    else if (result.elgendiPeak !== result.derivativePeak) this.fusionDisagreeCount++;
+  }
+
+  /**
    * Compute PSD across cardiac band (35..200 BPM at 1 BPM resolution),
    * find argmax, validate prominence vs band median. Updates
    * spectralBPM / spectralConfidence / spectralLocked.
