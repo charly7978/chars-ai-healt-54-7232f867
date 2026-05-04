@@ -323,14 +323,11 @@ const Index = () => {
         return;
       }
 
-      let frameTimestamp: number | undefined;
-      if (typeof nowOrMetadata === 'object' && nowOrMetadata?.mediaTime != null) {
-        frameTimestamp = performance.now();
-      } else if (typeof nowOrMetadata === 'number') {
-        frameTimestamp = nowOrMetadata;
-      } else {
-        frameTimestamp = performance.now();
-      }
+      // Real frame timing via FrameTimingEstimator inside CameraView.
+      // Prefer rVFC metadata (mediaTime / presentationTime); fall back to performance.now().
+      const metadata = (typeof nowOrMetadata === 'object' && nowOrMetadata) ? nowOrMetadata : undefined;
+      const timing = cameraRef.current?.pushFrameTiming(metadata);
+      const frameTimestamp = timing?.timestamp ?? (typeof nowOrMetadata === 'number' ? nowOrMetadata : performance.now());
 
       try {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -343,7 +340,8 @@ const Index = () => {
     const scheduleNext = (video: HTMLVideoElement) => {
       if (!isProcessingRef.current) return;
       if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback((now: number, metadata: any) => captureOneFrame(metadata?.presentationTime ?? now));
+        // Pass the full metadata object so the timing estimator can pick the best clock.
+        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => captureOneFrame(metadata));
       } else {
         frameLoopRef.current = requestAnimationFrame(() => captureOneFrame(performance.now()));
       }

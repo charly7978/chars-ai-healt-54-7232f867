@@ -1,9 +1,17 @@
 import React, { useRef, useEffect, forwardRef, useImperativeHandle } from "react";
+import { ConstraintNegotiator, type NegotiationReport } from "@/modules/camera/ConstraintNegotiator";
+import { FrameTimingEstimator, type FrameTiming } from "@/modules/camera/FrameTimingEstimator";
 
 export interface CameraViewHandle {
   getVideoElement: () => HTMLVideoElement | null;
   getDiagnostics: () => CameraDiagnostics;
   getTorchStatus: () => TorchStatus;
+  /** Push a frame metadata sample (rVFC) and get the latest timing snapshot. */
+  pushFrameTiming: (metadata?: any) => FrameTiming;
+  /** Read-only timing snapshot without mutating the estimator state. */
+  getFrameTiming: () => { fps: number; droppedCount: number; frameCount: number };
+  /** Last constraint negotiation report (capabilities + what was actually applied). */
+  getNegotiationReport: () => NegotiationReport | null;
 }
 
 export interface CameraDiagnostics {
@@ -17,6 +25,10 @@ export interface CameraDiagnostics {
   focusLocked: boolean;
   isoValue: number;
   supportedConstraints: string[];
+  /** Cumulative dropped frame count from the timing estimator. */
+  droppedFrames?: number;
+  /** Source of the last timing sample (rvfc-mediaTime preferred). */
+  timingSource?: FrameTiming['source'];
 }
 
 export interface TorchStatus {
@@ -51,6 +63,9 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const isStartingRef = useRef(false);
   const torchWatchdogRef = useRef<number | null>(null);
   const wakeLockRef = useRef<any>(null);
+  const timingRef = useRef<FrameTimingEstimator>(new FrameTimingEstimator());
+  const negotiationRef = useRef<NegotiationReport | null>(null);
+  const lastTimingSourceRef = useRef<FrameTiming['source']>('performance.now');
   const torchStatusRef = useRef<TorchStatus>({
     supported: false,
     active: false,
@@ -74,8 +89,23 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
 
   useImperativeHandle(ref, () => ({
     getVideoElement: () => videoRef.current,
-    getDiagnostics: () => ({ ...diagnosticsRef.current }),
+    getDiagnostics: () => {
+      const snap = timingRef.current.snapshot();
+      return {
+        ...diagnosticsRef.current,
+        realFrameRate: snap.fps > 0 ? snap.fps : diagnosticsRef.current.realFrameRate,
+        droppedFrames: snap.droppedCount,
+        timingSource: lastTimingSourceRef.current,
+      };
+    },
     getTorchStatus: () => ({ ...torchStatusRef.current }),
+    pushFrameTiming: (metadata?: any) => {
+      const t = timingRef.current.push(metadata);
+      lastTimingSourceRef.current = t.source;
+      return t;
+    },
+    getFrameTiming: () => timingRef.current.snapshot(),
+    getNegotiationReport: () => negotiationRef.current,
   }), []);
 
   useEffect(() => {
@@ -263,66 +293,25 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
 
         // PHASE 4: Fine lock — apply each independently, log what succeeds
         await new Promise(r => setTimeout(r, 300));
-        
-        const tryConstraint = async (name: string, value: any): Promise<boolean> => {
-          try {
-            await track.applyConstraints({ advanced: [{ [name]: value } as any] });
-            return true;
-          } catch {
-            return false;
-          }
-        };
+        const report = await ConstraintNegotiator.negotiate(track);
+        negotiationRef.current = report;
+        diagnosticsRef.current.exposureLocked = report.applied.exposureMode === 'manual';
+        diagnosticsRef.current.wbLocked = report.applied.whiteBalanceMode === 'manual';
+        diagnosticsRef.current.focusLocked = report.applied.focusMode === 'manual';
+        if (report.applied.iso != null) diagnosticsRef.current.isoValue = report.applied.iso;
 
-        // Frame rate lock
-        await tryConstraint('frameRate', 30);
+        // Reset frame timing estimator at the start of every session.
+        timingRef.current.reset();
 
-        // Exposure — optimized for PPG
-        if (caps?.exposureMode?.includes('manual')) {
-          diagnosticsRef.current.exposureLocked = await tryConstraint('exposureMode', 'manual');
-        } else if (caps?.exposureMode?.includes('continuous')) {
-          await tryConstraint('exposureMode', 'continuous');
-        }
-
-        // Exposure compensation for better PPG signal
-        if (caps?.exposureCompensation) {
-          const min = caps.exposureCompensation.min ?? -2;
-          const max = caps.exposureCompensation.max ?? 2;
-          // Slightly negative exposure for better contrast
-          const target = Math.max(min, Math.min(max, -0.5));
-          await tryConstraint('exposureCompensation', target);
-        }
-
-        // White balance
-        if (caps?.whiteBalanceMode?.includes('manual')) {
-          diagnosticsRef.current.wbLocked = await tryConstraint('whiteBalanceMode', 'manual');
-        }
-
-        // ISO — optimized for PPG signal quality
-        if (caps?.iso) {
-          const minISO = caps.iso.min ?? 50;
-          const maxISO = caps.iso.max ?? 800;
-          // Use lower ISO for better signal-to-noise ratio
-          const targetISO = Math.max(minISO, Math.min(maxISO, 100));
-          if (await tryConstraint('iso', targetISO)) {
-            diagnosticsRef.current.isoValue = targetISO;
-          }
-        }
-
-        // Focus
-        if (caps?.focusMode?.includes('manual')) {
-          diagnosticsRef.current.focusLocked = await tryConstraint('focusMode', 'manual');
-        } else if (caps?.focusMode?.includes('continuous')) {
-          await tryConstraint('focusMode', 'continuous');
-        }
-
-        // Log final settings
-        const finalSettings = track.getSettings() as any;
+        const finalSettings = (report.finalSettings as any) || (track.getSettings() as any);
         console.log('📹 Camera ready:', finalSettings.width, 'x', finalSettings.height,
           '@', finalSettings.frameRate, 'fps',
           '| Torch:', diagnosticsRef.current.torchActive,
-          '| Exp:', diagnosticsRef.current.exposureLocked,
-          '| WB:', diagnosticsRef.current.wbLocked,
-          '| ISO:', diagnosticsRef.current.isoValue);
+          '| Exp:', report.applied.exposureMode,
+          '| WB:', report.applied.whiteBalanceMode,
+          '| Focus:', report.applied.focusMode,
+          '| ISO:', diagnosticsRef.current.isoValue,
+          '| Failures:', report.failures);
 
         // PHASE 5: Anti-flicker hardening — keep torch ON and re-apply if the
         // OS or browser turns it off opportunistically (common on mid-range
