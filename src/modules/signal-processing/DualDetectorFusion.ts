@@ -70,6 +70,26 @@ const ELGENDI_W2_MS = 667;
 
 export class DualDetectorFusion {
   /**
+   * Reusable scratch buffers for Elgendi. Grown on demand, never
+   * shrunk — keeps the hot path allocation-free across calls.
+   * NOTE: the class is single-consumer (one instance per processor),
+   * so this is safe.
+   */
+  private sqBuf: Float64Array = new Float64Array(0);
+  private ma1Buf: Float64Array = new Float64Array(0);
+  private ma2Buf: Float64Array = new Float64Array(0);
+
+  private ensureScratch(n: number): void {
+    if (this.sqBuf.length < n) {
+      // Grow geometrically to amortise reallocs.
+      const cap = Math.max(n, this.sqBuf.length * 2, 256);
+      this.sqBuf = new Float64Array(cap);
+      this.ma1Buf = new Float64Array(cap);
+      this.ma2Buf = new Float64Array(cap);
+    }
+  }
+
+  /**
    * Run both detectors over the provided normalised PPG buffer and
    * return a consensus payload. Pure function — no internal state, so
    * it is safe to call per-frame from the hot path.
@@ -133,21 +153,33 @@ export class DualDetectorFusion {
     const w2 = Math.max(w1 + 2, Math.round((ELGENDI_W2_MS / 1000) * fs));
     if (n < w2 + 4) return -1;
 
-    // 1) clip negatives & square
+    this.ensureScratch(n);
+    const sq = this.sqBuf;
+    const ma1 = this.ma1Buf;
+    const ma2 = this.ma2Buf;
+
+    // 1) clip-negative + square + both moving averages in a single pass.
+    //    Running sums avoid allocating intermediate arrays and keep the
+    //    inner loop branch-light. Tail at index i covers x[i-w+1..i].
     let meanSq = 0;
-    const sq = new Float64Array(n);
+    let sum1 = 0;
+    let sum2 = 0;
     for (let i = 0; i < n; i++) {
       const v = buf[i] > 0 ? buf[i] : 0;
       const v2 = v * v;
       sq[i] = v2;
       meanSq += v2;
+
+      sum1 += v2;
+      if (i >= w1) sum1 -= sq[i - w1];
+      ma1[i] = sum1 / (i + 1 < w1 ? i + 1 : w1);
+
+      sum2 += v2;
+      if (i >= w2) sum2 -= sq[i - w2];
+      ma2[i] = sum2 / (i + 1 < w2 ? i + 1 : w2);
     }
     meanSq /= n;
     if (meanSq <= 0) return -1;
-
-    // 2) moving averages (causal trailing)
-    const ma1 = movingAverageTail(sq, w1);
-    const ma2 = movingAverageTail(sq, w2);
 
     // 3) threshold
     const alpha = ELGENDI_BETA * meanSq;
@@ -223,25 +255,6 @@ export class DualDetectorFusion {
     }
     return lastPeakIdx;
   }
-}
-
-/**
- * Tail-only moving average. Returns a Float64Array of length N where
- * ma[i] is the mean of x[i-w+1 .. i] (or shorter near the start).
- * Allocates one array — acceptable because only invoked on the
- * spectral-update tick, not per-sample.
- */
-function movingAverageTail(x: Float64Array, w: number): Float64Array {
-  const n = x.length;
-  const out = new Float64Array(n);
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    sum += x[i];
-    if (i >= w) sum -= x[i - w];
-    const denom = Math.min(i + 1, w);
-    out[i] = sum / denom;
-  }
-  return out;
 }
 
 export const dualDetectorFusion = new DualDetectorFusion();
