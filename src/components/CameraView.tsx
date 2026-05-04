@@ -1,9 +1,17 @@
 import React, { useRef, useEffect, forwardRef, useImperativeHandle } from "react";
+import { ConstraintNegotiator, type NegotiationReport } from "@/modules/camera/ConstraintNegotiator";
+import { FrameTimingEstimator, type FrameTiming } from "@/modules/camera/FrameTimingEstimator";
 
 export interface CameraViewHandle {
   getVideoElement: () => HTMLVideoElement | null;
   getDiagnostics: () => CameraDiagnostics;
   getTorchStatus: () => TorchStatus;
+  /** Push a frame metadata sample (rVFC) and get the latest timing snapshot. */
+  pushFrameTiming: (metadata?: any) => FrameTiming;
+  /** Read-only timing snapshot without mutating the estimator state. */
+  getFrameTiming: () => { fps: number; droppedCount: number; frameCount: number };
+  /** Last constraint negotiation report (capabilities + what was actually applied). */
+  getNegotiationReport: () => NegotiationReport | null;
 }
 
 export interface CameraDiagnostics {
@@ -17,6 +25,10 @@ export interface CameraDiagnostics {
   focusLocked: boolean;
   isoValue: number;
   supportedConstraints: string[];
+  /** Cumulative dropped frame count from the timing estimator. */
+  droppedFrames?: number;
+  /** Source of the last timing sample (rvfc-mediaTime preferred). */
+  timingSource?: FrameTiming['source'];
 }
 
 export interface TorchStatus {
@@ -51,6 +63,9 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const isStartingRef = useRef(false);
   const torchWatchdogRef = useRef<number | null>(null);
   const wakeLockRef = useRef<any>(null);
+  const timingRef = useRef<FrameTimingEstimator>(new FrameTimingEstimator());
+  const negotiationRef = useRef<NegotiationReport | null>(null);
+  const lastTimingSourceRef = useRef<FrameTiming['source']>('performance.now');
   const torchStatusRef = useRef<TorchStatus>({
     supported: false,
     active: false,
@@ -74,8 +89,23 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
 
   useImperativeHandle(ref, () => ({
     getVideoElement: () => videoRef.current,
-    getDiagnostics: () => ({ ...diagnosticsRef.current }),
+    getDiagnostics: () => {
+      const snap = timingRef.current.snapshot();
+      return {
+        ...diagnosticsRef.current,
+        realFrameRate: snap.fps > 0 ? snap.fps : diagnosticsRef.current.realFrameRate,
+        droppedFrames: snap.droppedCount,
+        timingSource: lastTimingSourceRef.current,
+      };
+    },
     getTorchStatus: () => ({ ...torchStatusRef.current }),
+    pushFrameTiming: (metadata?: any) => {
+      const t = timingRef.current.push(metadata);
+      lastTimingSourceRef.current = t.source;
+      return t;
+    },
+    getFrameTiming: () => timingRef.current.snapshot(),
+    getNegotiationReport: () => negotiationRef.current,
   }), []);
 
   useEffect(() => {
