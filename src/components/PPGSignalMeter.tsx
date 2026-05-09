@@ -121,7 +121,24 @@ const PPGSignalMeter = ({
   const lastStrideSeenRef = useRef<number>(0);
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure };
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring };
+
+    // Marca cuando el algoritmo cambia stride (única señal de "cambio de
+    // parámetros" disponible hoy desde Index). Si en el futuro se exponen
+    // gain/filter, se pueden añadir aquí con kind: 'gain' | 'filter'.
+    if (currentStride && currentStride !== lastStrideSeenRef.current) {
+      if (lastStrideSeenRef.current !== 0) {
+        algoMarksRef.current.push({
+          t: Date.now(),
+          label: `stride ${currentStride}`,
+          kind: 'stride',
+        });
+        // Mantener solo marcas dentro de la ventana visible del trend (~80s).
+        const cutoff = Date.now() - 90_000;
+        algoMarksRef.current = algoMarksRef.current.filter(m => m.t >= cutoff);
+      }
+      lastStrideSeenRef.current = currentStride;
+    }
     
     // Compute HRV metrics from RR intervals
     if (rrIntervals && rrIntervals.length >= 2) {
@@ -156,8 +173,9 @@ const PPGSignalMeter = ({
       // Reset trend stats when contact is lost
       bpmStatsRef.current = { min: 0, max: 0, sum: 0, n: 0 };
       bpmTrendRef.current = [];
+      algoMarksRef.current = [];
     }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure]);
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
