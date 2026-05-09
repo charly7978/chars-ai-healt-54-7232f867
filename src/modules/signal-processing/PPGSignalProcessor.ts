@@ -844,6 +844,38 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     return Math.min(max, Math.max(min, value));
   }
 
+  /**
+   * Backpressure: si el fps real cae por debajo de 20 durante > 3s, sube el
+   * stride espacial a 4 (≈1.78× más rápido el bucle de píxeles). Cuando el fps
+   * vuelve a >= 25 sostenido > 3s, restaura stride 3. No toca el resto del
+   * pipeline ni la frecuencia temporal de muestreo.
+   */
+  private maybeAdaptBackpressure(nowMs: number): void {
+    if (nowMs - this.lastBackpressureCheck < this.BACKPRESSURE_CHECK_MS) return;
+    this.lastBackpressureCheck = nowMs;
+    const fps = ppgPerf.snapshot().fps;
+    if (fps <= 0) return;
+
+    if (fps < 20) {
+      this.highFpsSinceMs = 0;
+      if (this.lowFpsSinceMs === 0) this.lowFpsSinceMs = nowMs;
+      else if (this.pixelStride < 4 && nowMs - this.lowFpsSinceMs >= this.BACKPRESSURE_SUSTAIN_MS) {
+        this.pixelStride = 4;
+        log.warn(`Backpressure ON — fps=${fps.toFixed(1)} stride=${this.pixelStride}`);
+      }
+    } else if (fps >= 25) {
+      this.lowFpsSinceMs = 0;
+      if (this.highFpsSinceMs === 0) this.highFpsSinceMs = nowMs;
+      else if (this.pixelStride > 3 && nowMs - this.highFpsSinceMs >= this.BACKPRESSURE_SUSTAIN_MS) {
+        this.pixelStride = 3;
+        log.info(`Backpressure OFF — fps=${fps.toFixed(1)} stride=${this.pixelStride}`);
+      }
+    } else {
+      this.lowFpsSinceMs = 0;
+      this.highFpsSinceMs = 0;
+    }
+  }
+
   getRGBStats() {
     return {
       redAC: this.redAC, redDC: this.redDC,
