@@ -74,6 +74,7 @@ const Index = () => {
     isProcessing, 
     framesProcessed,
     getRGBStats,
+    getBackpressureState,
   } = useSignalProcessor();
   
   const { 
@@ -112,6 +113,7 @@ const Index = () => {
         bpm: heartRate,
         spo2: vitalSigns.spo2,
         confidence: vitalSigns.measurementConfidence,
+        backpressure: getBackpressureState(),
       }),
     },
   });
