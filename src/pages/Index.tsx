@@ -655,6 +655,13 @@ const Index = () => {
       lastSignal.timestamp
     );
 
+    // Track quality-gate verdict (PI + Cardiac Power Ratio) for the session.
+    gateTotalFramesRef.current += 1;
+    if (heartBeatResult.gateAccepted) gateAcceptedFramesRef.current += 1;
+    gateLastReasonRef.current = heartBeatResult.gateReason;
+    gateLastPiRef.current = heartBeatResult.perfusionIndex;
+    gateLastRatioRef.current = heartBeatResult.cardiacPowerRatio;
+
     setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
 
     if (!stableHumanSignal) {
