@@ -15,6 +15,24 @@ import { ppgPerf } from "@/utils/logger";
 import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
 import type { BackpressureConfig } from "@/lib/perf/backpressureConfig";
 import { VitalsSanityChecker } from "@/lib/sanity/vitalsSanity";
+import {
+  SANITY_PROFILES,
+  getActiveProfileId,
+  setActiveProfileId,
+  getCustomOverrides,
+  setCustomOverrides,
+  resolveProfile,
+} from "@/lib/sanity/sanityProfiles";
+import {
+  startSession as startAuditSession,
+  setActiveProfile as setAuditProfile,
+  recordVerdict as recordAuditVerdict,
+  clearLog as clearAuditLog,
+  downloadJSON as downloadAuditJSON,
+  downloadCSV as downloadAuditCSV,
+  getEntries as getAuditEntries,
+  getNegativeCount as getAuditNegativeCount,
+} from "@/lib/sanity/sanityAuditLog";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -68,10 +86,64 @@ const Index = () => {
   const isProcessingRef = useRef(false);
   // anti-sim-allow: reason="Wires up the runtime detector for fabricated vitals streams." ref="GUARDRAIL-DIST-RUNTIME"
   // Runtime guardrail: detect implausible vitals streams.
-  const bpmSanityRef = useRef(new VitalsSanityChecker({ min: 30, max: 220 }));
+  const [sanityProfileId, setSanityProfileId] = useState<string>(() => getActiveProfileId());
+  const [customJSON, setCustomJSON] = useState<string>(() => {
+    const o = getCustomOverrides();
+    return Object.keys(o).length ? JSON.stringify(o, null, 2) : "";
+  });
+  const [auditNegativeCount, setAuditNegativeCount] = useState(0);
+  const bpmSanityRef = useRef<VitalsSanityChecker>(
+    new VitalsSanityChecker({
+      ...resolveProfile(getActiveProfileId()).effective,
+      onVerdict: (sample, verdict, win) => {
+        recordAuditVerdict(sample, verdict, win);
+        if (!verdict.ok) setAuditNegativeCount(getAuditNegativeCount());
+      },
+    })
+  );
   const sanityErrorRef = useRef<string | null>(null);
   const sanityToastAtRef = useRef<number>(0);
   const [sanityError, setSanityError] = useState<string | null>(null);
+
+  const rebuildSanityChecker = useCallback((profileId: string) => {
+    const { effective } = resolveProfile(profileId);
+    bpmSanityRef.current = new VitalsSanityChecker({
+      ...effective,
+      onVerdict: (sample, verdict, win) => {
+        recordAuditVerdict(sample, verdict, win);
+        if (!verdict.ok) setAuditNegativeCount(getAuditNegativeCount());
+      },
+    });
+    setAuditProfile(profileId);
+  }, []);
+
+  const handleProfileChange = useCallback((id: string) => {
+    setSanityProfileId(id);
+    setActiveProfileId(id);
+    rebuildSanityChecker(id);
+  }, [rebuildSanityChecker]);
+
+  const handleCustomApply = useCallback(() => {
+    const txt = customJSON.trim();
+    try {
+      const parsed = txt ? JSON.parse(txt) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        setCustomOverrides(parsed);
+        rebuildSanityChecker(sanityProfileId);
+        toast({ title: "✓ Umbrales aplicados", description: "Configuración personalizada activa." });
+      } else {
+        throw new Error("JSON debe ser un objeto");
+      }
+    } catch (e) {
+      toast({ variant: "destructive", title: "JSON inválido", description: String((e as Error).message ?? e) });
+    }
+  }, [customJSON, sanityProfileId, rebuildSanityChecker]);
+
+  const handleCustomClear = useCallback(() => {
+    setCustomOverrides(null);
+    setCustomJSON("");
+    rebuildSanityChecker(sanityProfileId);
+  }, [sanityProfileId, rebuildSanityChecker]);
   
   // HOOKS DE PROCESAMIENTO
   const { 
@@ -349,13 +421,18 @@ const Index = () => {
     measurementTimerRef.current = window.setInterval(() => {
       setElapsedTime(prev => prev + 1);
     }, 1000);
+
+    // Audit log: nueva sesión
+    const sid = `${Date.now().toString(36)}-${Math.floor(performance.now()).toString(36)}`;
+    startAuditSession(sid, sanityProfileId);
+    setAuditNegativeCount(0);
     
     // Calibración automática
     setIsCalibrating(true);
     startCalibration();
     setTimeout(() => setIsCalibrating(false), 3000);
     
-  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
+  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen, sanityProfileId]);
 
   // === CUANDO LA CÁMARA ESTÁ LISTA ===
   const handleStreamReady = useCallback((stream: MediaStream) => {
@@ -859,6 +936,73 @@ const Index = () => {
                       {s === undefined ? 'auto' : s}
                     </button>
                   ))}
+                </div>
+              </div>
+
+              {/* Sanity profile + audit log */}
+              <div className="mt-5 pt-4 border-t border-white/10">
+                <div className="text-sm font-medium mb-2">Guardrail anti-simulación</div>
+                <label className="text-xs text-white/70 block">
+                  Perfil de umbrales
+                  <select
+                    value={sanityProfileId}
+                    onChange={(e) => handleProfileChange(e.target.value)}
+                    className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                  >
+                    {SANITY_PROFILES.map(p => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-[11px] text-white/50 mt-1">
+                  {SANITY_PROFILES.find(p => p.id === sanityProfileId)?.description}
+                </p>
+
+                <details className="mt-3 text-xs text-white/70">
+                  <summary className="cursor-pointer text-white/80">Umbrales efectivos / overrides JSON</summary>
+                  <pre className="mt-2 p-2 bg-zinc-800 rounded text-[10px] text-white/60 overflow-auto max-h-32">
+{JSON.stringify(resolveProfile(sanityProfileId).effective, null, 2)}
+                  </pre>
+                  <textarea
+                    value={customJSON}
+                    onChange={(e) => setCustomJSON(e.target.value)}
+                    placeholder='{ "windowSize": 40, "min": 35 }'
+                    rows={4}
+                    className="mt-2 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white font-mono text-[11px]"
+                  />
+                  <div className="mt-2 flex gap-2">
+                    <button type="button" onClick={handleCustomApply}
+                      className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                      Aplicar overrides
+                    </button>
+                    <button type="button" onClick={handleCustomClear}
+                      className="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-white/10">
+                      Limpiar
+                    </button>
+                  </div>
+                </details>
+
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <span className="text-xs text-white/70">
+                    Veredictos: {getAuditEntries().length}
+                    {auditNegativeCount > 0 && (
+                      <span className="ml-1 text-amber-400">({auditNegativeCount} alertas)</span>
+                    )}
+                  </span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => downloadAuditJSON()}
+                      className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                      JSON
+                    </button>
+                    <button type="button" onClick={() => downloadAuditCSV()}
+                      className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                      CSV
+                    </button>
+                    <button type="button" onClick={() => { clearAuditLog(); setAuditNegativeCount(0); }}
+                      className="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-white/10">
+                      Limpiar
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
