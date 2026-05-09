@@ -337,6 +337,200 @@ const PPGSignalMeter = ({
     ctx.fillText('25mm/s', plot.x + plot.width, plot.y + plot.height + 40);
   }, [getPlotArea]);
 
+  // === PANEL INFERIOR TIPO MONITOR CARDÍACO ===
+  // Muestra: reloj, elapsed, sweep, gain, PR, PI, MAP, PP, RR mean, min/max BPM,
+  // RR(resp est), límites de alarma. Todo derivado de props/refs ya disponibles.
+  const drawClinicalPanel = useCallback((ctx: CanvasRenderingContext2D) => {
+    const { CANVAS_WIDTH: W, CANVAS_HEIGHT: H, COLORS } = CONFIG;
+    const { bpm, spo2, rrIntervals, perfusionIndex, pressure, elapsedTime } = propsRef.current;
+
+    const panelH = 110;
+    const panelY = H - panelH - 50;
+    const panelX = 80;
+    const panelW = W - 160;
+
+    // Fondo del panel
+    const grad = ctx.createLinearGradient(0, panelY, 0, panelY + panelH);
+    grad.addColorStop(0, 'rgba(8, 16, 28, 0.92)');
+    grad.addColorStop(1, 'rgba(4, 8, 15, 0.95)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(panelX, panelY, panelW, panelH);
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.35)';
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(panelX, panelY, panelW, panelH);
+
+    // Header strip
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.12)';
+    ctx.fillRect(panelX, panelY, panelW, 22);
+    ctx.font = 'bold 11px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_PRIMARY;
+    ctx.textAlign = 'left';
+    ctx.fillText('● MONITOR · PARÁMETROS HEMODINÁMICOS', panelX + 10, panelY + 15);
+
+    // Reloj + elapsed (derecha del header)
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    const elapsedStr = (() => {
+      const t = Math.max(0, Math.floor(elapsedTime || 0));
+      const m = String(Math.floor(t / 60)).padStart(2, '0');
+      const s = String(t % 60).padStart(2, '0');
+      return `${m}:${s}`;
+    })();
+    ctx.textAlign = 'right';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText(`⏱ ${elapsedStr} · ${hh}:${mm}:${ss}`, panelX + panelW - 10, panelY + 15);
+
+    // === Bloque 1: Pulse Rate + min/max + mean RR ===
+    const colW = panelW / 4;
+    const rowY1 = panelY + 38;
+    const rowY2 = panelY + 60;
+    const rowY3 = panelY + 82;
+    const rowY4 = panelY + 100;
+
+    const drawCell = (cx: number, label: string, value: string, color: string, sub?: string) => {
+      ctx.font = '9px "SF Mono", Consolas, monospace';
+      ctx.fillStyle = COLORS.TEXT_SECONDARY;
+      ctx.textAlign = 'left';
+      ctx.fillText(label, cx + 10, rowY1);
+      ctx.font = 'bold 22px "SF Mono", Consolas, monospace';
+      ctx.fillStyle = color;
+      ctx.fillText(value, cx + 10, rowY2);
+      if (sub) {
+        ctx.font = '9px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = COLORS.TEXT_SECONDARY;
+        ctx.fillText(sub, cx + 10, rowY3);
+      }
+    };
+
+    // BPM stats
+    const stats = bpmStatsRef.current;
+    const meanBpm = stats.n > 0 ? Math.round(stats.sum / stats.n) : 0;
+    const meanRR = rrIntervals && rrIntervals.length > 0
+      ? Math.round(rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length)
+      : 0;
+
+    // Resp rate estimate ~ from RR oscillation (very coarse): use RMSSD/SDNN ratio scale
+    // fallback: assume 12-20 if we have enough RR
+    let respRate = 0;
+    if (rrIntervals && rrIntervals.length >= 4) {
+      const m = rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length;
+      // approximate respiratory cycles: count zero-crossings of (rr - mean)
+      let zc = 0;
+      for (let i = 1; i < rrIntervals.length; i++) {
+        if ((rrIntervals[i - 1] - m) * (rrIntervals[i] - m) < 0) zc++;
+      }
+      const cycles = zc / 2;
+      const totalSec = rrIntervals.reduce((a, b) => a + b, 0) / 1000;
+      if (totalSec > 0) respRate = Math.round((cycles / totalSec) * 60);
+      if (respRate < 6 || respRate > 40) respRate = 0;
+    }
+
+    // PR (cell 0)
+    const prColor = bpm <= 0 ? COLORS.TEXT_SECONDARY : (bpm < 60 || bpm > 100) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
+    drawCell(panelX + colW * 0, 'PR · PULSE RATE', bpm > 0 ? `${Math.round(bpm)}` : '--', prColor, 'lím 50–120 bpm');
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText(`min ${stats.min || '--'}  max ${stats.max || '--'}  x̄ ${meanBpm || '--'}`, panelX + colW * 0 + 10, rowY4);
+
+    // PI · Perfusion Index (cell 1)
+    const piVal = perfusionIndex || 0;
+    const piColor = piVal >= 0.02 ? COLORS.TEXT_PRIMARY : piVal >= 0.005 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
+    drawCell(panelX + colW * 1, 'PI · PERFUSIÓN', piVal > 0 ? (piVal * 100).toFixed(2) : '--', piColor, '% AC/DC');
+    // mini barra
+    const piBarX = panelX + colW * 1 + 10;
+    const piBarY = rowY4 - 3;
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(piBarX, piBarY, 110, 5);
+    const piPct = Math.min(1, piVal / 0.05);
+    ctx.fillStyle = piColor;
+    ctx.fillRect(piBarX, piBarY, 110 * piPct, 5);
+
+    // MAP / PP (cell 2)
+    const sys = pressure?.systolic || 0;
+    const dia = pressure?.diastolic || 0;
+    const map = sys > 0 && dia > 0 ? Math.round(dia + (sys - dia) / 3) : 0;
+    const pp = sys > 0 && dia > 0 ? sys - dia : 0;
+    const mapColor = map === 0 ? COLORS.TEXT_SECONDARY : (map < 65 || map > 110) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
+    drawCell(panelX + colW * 2, 'MAP · TAM', map > 0 ? `${map}` : '--', mapColor, 'mmHg · objetivo 70–105');
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText(`PP ${pp > 0 ? pp + ' mmHg' : '--'}  ·  ${sys || '--'}/${dia || '--'}`, panelX + colW * 2 + 10, rowY4);
+
+    // RR resp · IBI (cell 3)
+    const rrColor = respRate === 0 ? COLORS.TEXT_SECONDARY : (respRate < 12 || respRate > 20) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
+    drawCell(panelX + colW * 3, 'RESP (EST.)', respRate > 0 ? `${respRate}` : '--', rrColor, 'rpm · derivado RR');
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.fillText(`IBI x̄ ${meanRR > 0 ? meanRR + 'ms' : '--'}  ·  SpO₂ ${spo2 > 0 ? spo2.toFixed(0) + '%' : '--'}`, panelX + colW * 3 + 10, rowY4);
+
+    // Separadores verticales entre celdas
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      ctx.beginPath();
+      ctx.moveTo(panelX + colW * i, panelY + 26);
+      ctx.lineTo(panelX + colW * i, panelY + panelH - 6);
+      ctx.stroke();
+    }
+
+    // === Mini trend strip de BPM (debajo del panel) ===
+    const trend = bpmTrendRef.current;
+    if (trend.length >= 2) {
+      const tx = panelX;
+      const ty = panelY + panelH + 6;
+      const tw = panelW;
+      const th = 26;
+      ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
+      ctx.fillRect(tx, ty, tw, th);
+      ctx.strokeStyle = 'rgba(34, 197, 94, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, ty, tw, th);
+
+      ctx.font = '9px "SF Mono", Consolas, monospace';
+      ctx.fillStyle = COLORS.TEXT_SECONDARY;
+      ctx.textAlign = 'left';
+      ctx.fillText('TENDENCIA PR', tx + 6, ty + 11);
+
+      const minB = Math.min(...trend.map(p => p.bpm));
+      const maxB = Math.max(...trend.map(p => p.bpm));
+      const range = Math.max(10, maxB - minB);
+      ctx.beginPath();
+      ctx.strokeStyle = COLORS.TEXT_PRIMARY;
+      ctx.lineWidth = 1.5;
+      trend.forEach((p, i) => {
+        const px = tx + 90 + (i / (trend.length - 1)) * (tw - 100);
+        const py = ty + th - 4 - ((p.bpm - minB) / range) * (th - 8);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = COLORS.TEXT_SECONDARY;
+      ctx.fillText(`${Math.round(minB)}–${Math.round(maxB)} bpm`, tx + tw - 6, ty + 11);
+    }
+
+    // === Footer técnico: sweep, gain, filtro, alarmas ===
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    const fy = H - 8;
+    ctx.fillText('SWEEP 25mm/s   GAIN ×1.0   FILTRO 0.5–4 Hz   FUENTE PPG/RG', panelX + 10, fy);
+    ctx.textAlign = 'right';
+    const alarms: string[] = [];
+    if (bpm > 0 && (bpm < 50 || bpm > 120)) alarms.push(`HR!`);
+    if (spo2 > 0 && spo2 < 92) alarms.push(`SpO₂!`);
+    if (map > 0 && (map < 65 || map > 110)) alarms.push(`MAP!`);
+    if (alarms.length > 0) {
+      ctx.fillStyle = COLORS.TEXT_DANGER;
+      ctx.fillText(`⚠ ALARMAS: ${alarms.join(' ')}`, panelX + panelW - 10, fy);
+    } else {
+      ctx.fillStyle = COLORS.TEXT_PRIMARY;
+      ctx.fillText('● SIN ALARMAS', panelX + panelW - 10, fy);
+    }
+  }, []);
+
   const drawVitalInfo = useCallback((ctx: CanvasRenderingContext2D, now: number) => {
     const { CANVAS_WIDTH: W, COLORS } = CONFIG;
     const { bpm, spo2, arrhythmiaStatus, quality, rrIntervals, rawArrhythmiaData } = propsRef.current;
