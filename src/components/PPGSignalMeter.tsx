@@ -80,7 +80,10 @@ const PPGSignalMeter = ({
   isPeak = false,
   bpm = 0,
   spo2 = 0,
-  rrIntervals = []
+  rrIntervals = [],
+  elapsedTime = 0,
+  perfusionIndex = 0,
+  pressure
 }: PPGSignalMeterProps) => {
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -88,7 +91,7 @@ const PPGSignalMeter = ({
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -100,9 +103,13 @@ const PPGSignalMeter = ({
   // Track consecutive IBI for display
   const ibiDisplayRef = useRef<number>(0);
   const hrvDisplayRef = useRef<{ sdnn: number; rmssd: number }>({ sdnn: 0, rmssd: 0 });
+  // BPM trend tracking (min/max/mean and rolling history for trend strip)
+  const bpmStatsRef = useRef<{ min: number; max: number; sum: number; n: number }>({ min: 0, max: 0, sum: 0, n: 0 });
+  const bpmTrendRef = useRef<{ t: number; bpm: number }[]>([]);
+  const lastBpmSampleRef = useRef<number>(0);
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData };
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure };
     
     // Compute HRV metrics from RR intervals
     if (rrIntervals && rrIntervals.length >= 2) {
@@ -121,7 +128,24 @@ const PPGSignalMeter = ({
       }
       hrvDisplayRef.current.rmssd = Math.round(Math.sqrt(sumSqDiffs / (rrIntervals.length - 1)));
     }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData]);
+
+    // Track BPM stats and trend (sample at most every 500ms, only valid bpm)
+    const nowMs = Date.now();
+    if (bpm > 30 && bpm < 220 && nowMs - lastBpmSampleRef.current > 500) {
+      lastBpmSampleRef.current = nowMs;
+      const s = bpmStatsRef.current;
+      if (s.n === 0) { s.min = bpm; s.max = bpm; }
+      else { if (bpm < s.min) s.min = bpm; if (bpm > s.max) s.max = bpm; }
+      s.sum += bpm; s.n += 1;
+      bpmTrendRef.current.push({ t: nowMs, bpm });
+      if (bpmTrendRef.current.length > 80) bpmTrendRef.current.shift();
+    }
+    if (!isFingerDetected && !preserveResults) {
+      // Reset trend stats when contact is lost
+      bpmStatsRef.current = { min: 0, max: 0, sum: 0, n: 0 };
+      bpmTrendRef.current = [];
+    }
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
