@@ -36,6 +36,13 @@ import {
   getPersistedNegativeCount as getPersistedAuditNegativeCount,
   clearPersistedLog as clearPersistedAuditLog,
 } from "@/lib/sanity/sanityAuditLog";
+import {
+  getPpgRuntimeConfig,
+  setPpgRuntimeConfig,
+  resetPpgRuntimeConfig,
+  subscribePpgRuntimeConfig,
+  type PpgRuntimeConfig,
+} from "@/lib/ppg/config/ppgRuntimeConfig";
 
 import { supabase } from "@/integrations/supabase/client";
 
