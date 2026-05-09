@@ -592,7 +592,12 @@ const Index = () => {
 
     // Señal estable — resetear contador de inestabilidad
     unstableFrameCounter.current = 0;
-    setHeartRate(heartBeatResult.bpm);
+    // Durante la fase de adquisición no publicamos BPM al UI (evita "saltos
+    // iniciales" mientras el HeartBeatProcessor aún no consolidó plantilla).
+    // El procesador sigue recibiendo muestras y madurando internamente.
+    if (!isAcquiring) {
+      setHeartRate(heartBeatResult.bpm);
+    }
 
     if (heartBeatResult.isPeak) {
       setBeatMarker(1);
