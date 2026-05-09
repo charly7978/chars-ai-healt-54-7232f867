@@ -31,6 +31,22 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private readonly TILE_COLUMNS = 5;
   private readonly TILE_ROWS = 5;
 
+  // === BACKPRESSURE / ADAPTIVE STRIDE ===
+  // Stride de muestreo de píxeles dentro del ROI. 3 = baseline (cada 3 píxeles).
+  // Sube a 4 si fps < 20 sostenido > 3s, baja a 3 cuando fps >= 25.
+  // Evita reescribir el pipeline cuando el dispositivo es lento; sólo reduce el
+  // muestreo espacial preservando la temporal (que es lo que importa para BPM).
+  private pixelStride = 3;
+  private lastBackpressureCheck = 0;
+  private lowFpsSinceMs = 0;
+  private highFpsSinceMs = 0;
+  private readonly BACKPRESSURE_CHECK_MS = 1000;
+  private readonly BACKPRESSURE_SUSTAIN_MS = 3000;
+
+  // Buffer reutilizable de tiles (evita Array.from + map por frame).
+  private readonly tileBuffer: { red: number; green: number; blue: number; count: number }[] =
+    Array.from({ length: this.TILE_COLUMNS * this.TILE_ROWS }, () => ({ red: 0, green: 0, blue: 0, count: 0 }));
+
   // Buffers
   private rawBuffer: number[] = [];
   private filteredBuffer: number[] = [];
@@ -129,6 +145,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.frameCount++;
     const timestamp = Date.now();
     this.updateSampleRate(timestamp);
+    this.maybeAdaptBackpressure(timestamp);
 
     const endRoi = ppgPerf.start('roi');
     const roi = this.extractROI(imageData);
@@ -394,16 +411,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const endX = startX + Math.floor(roiSize);
     const endY = startY + Math.floor(roiSize);
 
-    const tiles = Array.from({ length: this.TILE_COLUMNS * this.TILE_ROWS }, () => ({
-      red: 0, green: 0, blue: 0, count: 0,
-    }));
+    // Reset reusable tile buffer (no GC churn por frame)
+    const tiles = this.tileBuffer;
+    for (let i = 0; i < tiles.length; i++) {
+      const t = tiles[i];
+      t.red = 0; t.green = 0; t.blue = 0; t.count = 0;
+    }
 
     const roiWidth = Math.max(1, endX - startX);
     const roiHeight = Math.max(1, endY - startY);
 
-    // Sample every 3rd pixel for performance
-    for (let y = startY; y < endY; y += 3) {
-      for (let x = startX; x < endX; x += 3) {
+    // Sample every Nth pixel — N adaptativo (3 normal, 4 bajo backpressure)
+    const stride = this.pixelStride;
+    for (let y = startY; y < endY; y += stride) {
+      for (let x = startX; x < endX; x += stride) {
         const i = (y * width + x) * 4;
         const tileX = Math.min(this.TILE_COLUMNS - 1, Math.floor(((x - startX) / roiWidth) * this.TILE_COLUMNS));
         const tileY = Math.min(this.TILE_ROWS - 1, Math.floor(((y - startY) / roiHeight) * this.TILE_ROWS));
