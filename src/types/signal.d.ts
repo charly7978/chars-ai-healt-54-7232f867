@@ -1,8 +1,4 @@
-// NOTE: The legacy HeartBeatProcessor module was removed. The optimized
-// implementation lives at modules/HeartBeatProcessorOptimized.ts and is
-// instantiated through useHeartBeatProcessorOptimized. We deliberately
-// avoid exposing it on `window` because doing so encouraged duplicate
-// instances bypassing the React lifecycle.
+import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
 
 export type ContactState = 'NO_CONTACT' | 'UNSTABLE_CONTACT' | 'STABLE_CONTACT';
 
@@ -23,9 +19,6 @@ export interface ProcessedSignal {
   perfusionIndex?: number;
   rawRed?: number;
   rawGreen?: number;
-  /** Real measured frame-rate at the moment this sample was produced. */
-  sampleRate?: number;
-  fingerPosition?: 'TIP' | 'FLAT' | 'UNKNOWN';  // TIP=punta, FLAT=acostado
   diagnostics?: {
     message: string;
     hasPulsatility: boolean;
@@ -48,4 +41,8 @@ export interface SignalProcessor {
   onError?: (error: ProcessingError) => void;
 }
 
-// (window.heartBeatProcessor removed — see comment above.)
+declare global {
+  interface Window {
+    heartBeatProcessor: HeartBeatProcessor;
+  }
+}

@@ -34,10 +34,7 @@
     "useDefineForClassFields": true
   },
   "exclude": [
-    "node_modules",
-    "src/**/__tests__/**",
-    "src/**/*.test.ts",
-    "src/**/*.test.tsx"
+    "node_modules"
   ],
   "include": [
     "src",

@@ -38,36 +38,45 @@ const VitalSign = ({
     
     if (typeof value === 'string') {
       switch(label) {
-        case 'PRESIÓN ARTERIAL': {
-          // Forensic-grade: never publish a clinical label (Hipertensión,
-          // Hipotensión, …) on top of an uncalibrated population estimate.
-          // The number is derived from PPG features, but the population
-          // model is NOT a clinically validated cuff measurement.
-          if (!confidenceLevel || confidenceLevel === 'INSUFFICIENT' || confidenceLevel === 'LOW') {
-            return '';
-          }
+        case 'PRESIÓN ARTERIAL':
           const pressureParts = value.split('/');
           if (pressureParts.length === 2) {
             const systolic = parseInt(pressureParts[0], 10);
             const diastolic = parseInt(pressureParts[1], 10);
             if (!isNaN(systolic) && !isNaN(diastolic)) {
-              if (systolic >= 140 || diastolic >= 90) return 'Hipertensión (est.)';
-              if (systolic < 90 || diastolic < 60) return 'Hipotensión (est.)';
+              if (systolic >= 140 || diastolic >= 90) return 'Hipertensión';
+              if (systolic < 90 || diastolic < 60) return 'Hipotensión';
             }
           }
           return '';
-        }
         case 'COLESTEROL/TRIGL.':
-        case 'COLEST./TRIGL. (EST.)': {
-          // Lipid model is research-grade only — never publish a clinical
-          // condition string here. The numeric estimate carries its own
-          // RESEARCH_ONLY badge upstream.
+          const lipidParts = value.split('/');
+          if (lipidParts.length === 2) {
+            const cholesterol = parseInt(lipidParts[0], 10);
+            const triglycerides = parseInt(lipidParts[1], 10);
+            if (!isNaN(cholesterol)) {
+              if (cholesterol > 200) return 'Hipercolesterolemia';
+            }
+            if (!isNaN(triglycerides)) {
+              if (triglycerides > 150) return 'Hipertrigliceridemia';
+            }
+          }
           return '';
-        }
-        case 'ARRITMIAS': {
-          const status = parseArrhythmiaStatus(value);
-          return getArrhythmiaText(status);
-        }
+        case 'ARRITMIAS':
+          const arrhythmiaParts = value.split('|');
+          if (arrhythmiaParts.length === 2) {
+            const status = arrhythmiaParts[0];
+            const count = arrhythmiaParts[1];
+            
+            if (status === "ARRITMIA DETECTADA" && parseInt(count) > 1) {
+              return `Arritmias: ${count}`;
+            } else if (status === "SIN ARRITMIAS") {
+              return 'Normal';
+            } else if (status === "CALIBRANDO...") {
+              return 'Calibrando';
+            }
+          }
+          return '';
         default:
           return '';
       }
@@ -100,6 +109,7 @@ const VitalSign = ({
 
   const getArrhythmiaDisplay = (value: string | number) => {
     if (typeof value !== 'string') return null;
+    
     const status = parseArrhythmiaStatus(value);
     return (
       <div className="text-sm font-medium mt-2" style={{ color: getArrhythmiaColor(status) }}>
@@ -139,19 +149,18 @@ const VitalSign = ({
       )}
       onClick={handleClick}
     >
-      <div className="text-[11px] font-medium uppercase tracking-wider text-white mb-1">
+      <div className="text-[11px] font-medium uppercase tracking-wider text-black/70 mb-1">
         {label}
       </div>
       
       <div className="font-bold text-xl sm:text-2xl transition-all duration-300">
         <span className="text-gradient-soft animate-value-glow">
-          {isArrhytmia && typeof value === 'string'
-            ? getArrhythmiaText(parseArrhythmiaStatus(value))
-            : value}
+          {isArrhytmia && typeof value === 'string' ? value.split('|')[0] : value}
         </span>
         {unit && <span className="text-xs text-white/70 ml-1">{unit}</span>}
       </div>
 
+      {/* Confidence indicator for BP */}
       {confidenceLevel && confidenceLevel !== 'INSUFFICIENT' && label === 'PRESIÓN ARTERIAL' && (
         <div className="flex items-center gap-1.5 mt-1">
           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${

@@ -2,8 +2,8 @@ import { useCallback, useRef, useState, useEffect } from 'react';
 import { VitalSignsProcessor, VitalSignsResult, RGBData } from '../modules/vital-signs/VitalSignsProcessor';
 
 /**
- * HOOK DE SIGNOS VITALES V2
- * Accepts RGB data + upstream context for gating
+ * HOOK DE SIGNOS VITALES - OPTIMIZADO
+ * Ahora acepta datos RGB para cálculo correcto de SpO2
  */
 export const useVitalSignsProcessor = () => {
   const processorRef = useRef<VitalSignsProcessor | null>(null);
@@ -11,10 +11,12 @@ export const useVitalSignsProcessor = () => {
   const sessionId = useRef<string>(`${Date.now().toString(36)}${(performance.now() | 0).toString(36)}`);
   const processedSignals = useRef<number>(0);
   
+  // Lazy initialization
   if (!processorRef.current) {
     processorRef.current = new VitalSignsProcessor();
   }
   
+  // Cleanup
   useEffect(() => {
     return () => {
       if (processorRef.current) {
@@ -32,63 +34,47 @@ export const useVitalSignsProcessor = () => {
     processorRef.current?.forceCalibrationCompletion();
   }, []);
   
+  /**
+   * Actualizar datos RGB para SpO2
+   */
   const setRGBData = useCallback((data: RGBData) => {
     processorRef.current?.setRGBData(data);
-  }, []);
-
-  const setUpstreamContext = useCallback((ctx: {
-    contactStable?: boolean;
-    pressureOptimal?: boolean;
-    clipHighRatio?: number;
-    sourceStability?: number;
-    avgBeatSQI?: number;
-    beatCount?: number;
-    sampleRate?: number;
-    detectorAgreement?: number;
-    rrStability?: number;
-  }) => {
-    processorRef.current?.setUpstreamContext(ctx);
   }, []);
   
   const processSignal = useCallback((
     value: number, 
-    rrData?: { intervals: number[], lastPeakTime: number | null },
-    beatInputs?: Array<{
-      ibiMs: number; beatSQI: number; morphologyScore: number;
-      detectorAgreement: number; amplitude?: number;
-      flags: { isWeak: boolean; isPremature: boolean; isSuspicious: boolean; isDoublePeak: boolean };
-    }>
+    rrData?: { intervals: number[], lastPeakTime: number | null }
   ): VitalSignsResult => {
     const defaultResult: VitalSignsResult = {
-      spo2: 0, glucose: 0,
+      spo2: 0, 
+      glucose: 0, 
+      hemoglobin: 0,
       pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
-      arrhythmiaCount: 0, arrhythmiaStatus: "SIN ARRITMIAS|0",
+      arrhythmiaCount: 0, 
+      arrhythmiaStatus: "SIN ARRITMIAS|0",
       lipids: { totalCholesterol: 0, triglycerides: 0 },
-      isCalibrating: false, calibrationProgress: 0, lastArrhythmiaData: undefined,
-      signalQuality: 0, measurementConfidence: 'INVALID' as const,
-      evidence: {
-        source: 'CAMERA_PPG_REAL',
-        timestampMs: Date.now(),
-        rgb: { redAC: 0, redDC: 0, greenAC: 0, greenDC: 0, perfusionIndexGreen: 0, rgACRatio: 0 },
-        beatStream: { beatCount: 0, avgBeatSQI: 0, rrIntervals: [], detectorAgreement: 0, rrStability: 0 },
-        context: { contactStable: false, pressureOptimal: false, clipHighRatio: 0, sourceStability: 0, sampleRate: 30 },
-        signalQuality: 0,
-        measurementConfidence: 'INVALID',
-        reasons: ['NO_PROCESSOR'],
-        warnings: ['CONTACT_NOT_STABLE'],
-      },
+      isCalibrating: false, 
+      calibrationProgress: 0, 
+      lastArrhythmiaData: undefined,
+      signalQuality: 0,
+      measurementConfidence: 'INVALID' as const
     };
     
     if (!processorRef.current) return defaultResult;
     
     processedSignals.current++;
-    const result = processorRef.current.processSignal(value, rrData, beatInputs);
     
+    const result = processorRef.current.processSignal(value, rrData);
+    
+    // Guardar la última ventana realmente válida para cierre/exportación
     if (
       result.measurementConfidence !== 'INVALID' ||
       result.pressure.confidence !== 'INSUFFICIENT' ||
-      result.spo2 > 0 || result.glucose > 0 ||
-      result.lipids.totalCholesterol > 0 || result.arrhythmiaCount > 0
+      result.spo2 > 0 ||
+      result.glucose > 0 ||
+      result.hemoglobin > 0 ||
+      result.lipids.totalCholesterol > 0 ||
+      result.arrhythmiaCount > 0
     ) {
       setLastValidResults(result);
     }
@@ -100,9 +86,13 @@ export const useVitalSignsProcessor = () => {
     if (!processorRef.current) return lastValidResults;
     const savedResults = processorRef.current.reset();
     const resultToReturn = savedResults ?? lastValidResults;
-    if (resultToReturn) setLastValidResults(resultToReturn);
+    if (resultToReturn) {
+      setLastValidResults(resultToReturn);
+    }
     return resultToReturn;
   }, [lastValidResults]);
+  
+  // calibrateBP eliminado — BP se calcula exclusivamente desde morfología PPG
 
   const fullReset = useCallback(() => {
     processorRef.current?.fullReset();
@@ -117,7 +107,6 @@ export const useVitalSignsProcessor = () => {
   return {
     processSignal,
     setRGBData,
-    setUpstreamContext,
     reset,
     fullReset,
     startCalibration,
