@@ -626,6 +626,18 @@ const Index = () => {
   const unstableFrameCounter = useRef<number>(0);
   const UNSTABLE_ZERO_THRESHOLD = 15; // ~0.5s de señal mala antes de borrar vitales
   const VITALS_PROCESS_EVERY_N_FRAMES = 3;
+
+  // === QUALITY GATE TRACKING (PI + Cardiac Power Ratio) ===
+  // Aggregates the per-frame verdict from HeartBeatProcessor's measurement
+  // gate. We use it to BLOCK persisting and displaying results when the
+  // measurement does not meet the clinical-quality thresholds.
+  const gateAcceptedFramesRef = useRef<number>(0);
+  const gateTotalFramesRef = useRef<number>(0);
+  const gateLastReasonRef = useRef<string>("INSUFFICIENT_SAMPLES");
+  const gateLastPiRef = useRef<number>(0);
+  const gateLastRatioRef = useRef<number>(0);
+  const GATE_MIN_ACCEPTED_FRAMES = 90;          // ≥3s of accepted signal @30fps
+  const GATE_MIN_ACCEPTED_RATIO = 0.30;         // ≥30% of frames must pass gate
   
   useEffect(() => {
     if (!lastSignal || !isMonitoring) return;
