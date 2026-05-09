@@ -1,7 +1,7 @@
 /**
  * PPG core — stable contracts and immutable configuration.
  *
- * Strict types only. No `any`, no synthetic generators.
+ * Strict typing only; no fabricated values anywhere in the pipeline.
  */
 
 export const PPG_CONFIG = {
