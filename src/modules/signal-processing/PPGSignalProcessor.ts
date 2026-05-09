@@ -1,5 +1,8 @@
 import type { ProcessedSignal, ProcessingError, SignalProcessor as SignalProcessorInterface, ContactState } from '../../types/signal';
 import { BandpassFilter } from './BandpassFilter';
+import { createLogger, ppgPerf } from '../../utils/logger';
+
+const log = createLogger('PPGSignalProcessor');
 
 interface ROIMetrics {
   rawRed: number;
@@ -127,7 +130,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const timestamp = Date.now();
     this.updateSampleRate(timestamp);
 
+    const endRoi = ppgPerf.start('roi');
     const roi = this.extractROI(imageData);
+    endRoi();
     this.updateContactState(roi);
 
     const motionArtifact = this.motionScore > this.MOTION_THRESHOLD;
@@ -179,14 +184,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       this.rawBuffer.shift();
     }
 
+    const endFilt = ppgPerf.start('bandpass');
     const filtered = this.bandpassFilter.filter(pulseSource.value);
+    endFilt();
     this.filteredBuffer.push(filtered);
     if (this.filteredBuffer.length > this.BUFFER_SIZE) {
       this.filteredBuffer.shift();
     }
 
+    const endDeriv = ppgPerf.start('derivatives');
     this.calculateDerivatives();
+    endDeriv();
+    const endSqi = ppgPerf.start('sqi');
     this.signalQuality = this.calculateSignalQuality();
+    endSqi();
 
     const perfusionIndex = this.calculatePerfusionIndex();
     const adjustedQuality = motionArtifact
@@ -199,10 +210,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const now = Date.now();
     if (now - this.lastLogTime >= 2000) {
       this.lastLogTime = now;
-      console.log(
-        `📷 PPG [${pulseSource.label}] Filt=${filtered.toFixed(3)} ` +
-        `Q=${gatedQuality.toFixed(0)}% PI=${perfusionIndex.toFixed(2)} ` +
-        `Contact=${this.contactState} FPS=${this.estimatedSampleRate.toFixed(0)}`
+      const snap = ppgPerf.snapshot();
+      log.info(
+        `[${pulseSource.label}] Filt=${filtered.toFixed(3)} Q=${gatedQuality.toFixed(0)}% ` +
+        `PI=${perfusionIndex.toFixed(2)} Contact=${this.contactState} ` +
+        `FPS=${snap.fps.toFixed(1)} jitter=${snap.jitterMs.toFixed(1)}ms ` +
+        `roi=${(snap.stages.roi?.p95 ?? 0).toFixed(2)}ms ` +
+        `filt=${(snap.stages.bandpass?.p95 ?? 0).toFixed(2)}ms ` +
+        `sqi=${(snap.stages.sqi?.p95 ?? 0).toFixed(2)}ms ` +
+        `dropEst=${snap.droppedEstimate}`
       );
     }
 
