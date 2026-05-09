@@ -78,7 +78,6 @@ const Index = () => {
     getBackpressureState,
     getBackpressureConfig,
     setBackpressureConfig,
-    currentStride,
   } = useSignalProcessor();
   
   const { 
@@ -127,52 +126,6 @@ const Index = () => {
       }),
     },
   });
-
-  // ---- Aviso visual cuando el backpressure adaptativo cambia el stride ----
-  // Solo notifica cambios *automáticos* (no overrides manuales del usuario)
-  // y solo durante una medición activa, con una ventana de gracia inicial
-  // para no disparar al arrancar.
-  const prevStrideRef = useRef<number>(currentStride);
-  const monitoringStartedAtRef = useRef<number>(0);
-  useEffect(() => {
-    if (isMonitoring && monitoringStartedAtRef.current === 0) {
-      monitoringStartedAtRef.current = performance.now();
-      prevStrideRef.current = currentStride;
-      return;
-    }
-    if (!isMonitoring) {
-      monitoringStartedAtRef.current = 0;
-      prevStrideRef.current = currentStride;
-      return;
-    }
-    const prev = prevStrideRef.current;
-    if (prev === currentStride) return;
-    prevStrideRef.current = currentStride;
-
-    // Ventana de gracia: ignora transiciones en los primeros 2s.
-    if (performance.now() - monitoringStartedAtRef.current < 2000) return;
-
-    // Si el cambio es manual (forceStride definido), no notificamos.
-    try {
-      const cfg = getBackpressureConfig();
-      if (typeof cfg.forceStride === 'number') return;
-      if (!cfg.enabled) return;
-    } catch { return; }
-
-    if (currentStride > prev) {
-      toast({
-        title: "⚡ Modo ahorro activado",
-        description: `Rendimiento bajo detectado, reduciendo muestreo (stride ${currentStride}).`,
-        duration: 3000,
-      });
-    } else {
-      toast({
-        title: "✓ Rendimiento restaurado",
-        description: `Muestreo completo activo (stride ${currentStride}).`,
-        duration: 2500,
-      });
-    }
-  }, [currentStride, isMonitoring, getBackpressureConfig]);
 
   // CANVAS PARA CAPTURA
   useEffect(() => {
