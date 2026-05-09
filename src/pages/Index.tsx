@@ -76,7 +76,6 @@ const Index = () => {
   
   const { 
     processSignal: processHeartBeat, 
-    setArrhythmiaState,
     reset: resetHeartBeat,
   } = useHeartBeatProcessor();
   
@@ -459,10 +458,7 @@ const Index = () => {
         setBeatMarker(0);
         setRRIntervals([]);
         setArrhythmiaCount("--");
-        if (arrhythmiaDetectedRef.current) {
-          arrhythmiaDetectedRef.current = false;
-          setArrhythmiaState(false);
-        }
+        arrhythmiaDetectedRef.current = false;
         setVitalSigns(prev => (
           prev.measurementConfidence === 'INVALID' &&
           prev.spo2 === 0 &&
@@ -544,7 +540,6 @@ const Index = () => {
           const isArrhythmiaDetected = arrhythmiaStatus.includes("ARRITMIA DETECTADA");
           if (isArrhythmiaDetected !== arrhythmiaDetectedRef.current) {
             arrhythmiaDetectedRef.current = isArrhythmiaDetected;
-            setArrhythmiaState(isArrhythmiaDetected);
 
             if (isArrhythmiaDetected) {
               if (navigator.vibrate) {
@@ -561,7 +556,7 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, getRGBStats]);
+  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setRGBData, getRGBStats]);
 
   // AUTO-FINALIZAR a los 60 segundos (1 minuto)
   useEffect(() => {
