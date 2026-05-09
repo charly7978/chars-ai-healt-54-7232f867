@@ -433,6 +433,11 @@ const Index = () => {
     totalBeatsRef.current = 0;
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
+    gateAcceptedFramesRef.current = 0;
+    gateTotalFramesRef.current = 0;
+    gateLastReasonRef.current = "INSUFFICIENT_SAMPLES";
+    gateLastPiRef.current = 0;
+    gateLastRatioRef.current = 0;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     
     // Iniciar procesamiento
@@ -519,9 +524,35 @@ const Index = () => {
     }
     
     const savedResults = resetVitalSigns();
-    
-    // Guardar medición en la base de datos automáticamente
-    if (savedResults || vitalSigns.spo2 > 0) {
+
+    // === QUALITY GATE ENFORCEMENT ===
+    // Block save + result visualization when the PI / Cardiac Power Ratio
+    // gate did not accept a sufficient fraction of frames during the session.
+    const gateAcc = gateAcceptedFramesRef.current;
+    const gateTot = gateTotalFramesRef.current;
+    const gateRatio = gateTot > 0 ? gateAcc / gateTot : 0;
+    const gatePassedSession =
+      gateAcc >= GATE_MIN_ACCEPTED_FRAMES &&
+      gateRatio >= GATE_MIN_ACCEPTED_RATIO;
+
+    if (!gatePassedSession) {
+      // Hard block: do not persist, do not display results.
+      console.warn('🚫 Quality gate blocked save/results', {
+        acceptedFrames: gateAcc,
+        totalFrames: gateTot,
+        ratio: gateRatio,
+        lastReason: gateLastReasonRef.current,
+        lastPI: gateLastPiRef.current,
+        lastPowerRatio: gateLastRatioRef.current,
+      });
+      toast({
+        variant: "destructive",
+        title: "🚫 Medición rechazada por calidad",
+        description: `Señal insuficiente (PI=${gateLastPiRef.current.toFixed(4)}, banda cardíaca=${(gateLastRatioRef.current * 100).toFixed(0)}%, frames OK=${gateAcc}/${gateTot}). No se guardó ningún resultado.`,
+        duration: 6000,
+      });
+    } else if (savedResults || vitalSigns.spo2 > 0) {
+      // Guardar medición en la base de datos automáticamente
       const dataToSave = savedResults || vitalSigns;
       await saveMeasurement({
         heartRate,
@@ -529,7 +560,7 @@ const Index = () => {
         signalQuality: lastSignal?.quality || 0
       });
     }
-    
+
     // Detener cámara
     setIsCameraOn(false);
     
@@ -540,11 +571,29 @@ const Index = () => {
     
     setIsMonitoring(false);
     setIsCalibrating(false);
-    
-    if (savedResults) {
-      setVitalSigns(savedResults);
+
+    if (gatePassedSession) {
+      if (savedResults) {
+        setVitalSigns(savedResults);
+      }
+      setShowResults(true);
+    } else {
+      // Gate failed: clear visible vitals so the rejected reading is not shown.
+      setVitalSigns(prev => ({
+        ...prev,
+        spo2: 0,
+        glucose: 0,
+        hemoglobin: 0,
+        pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+        arrhythmiaCount: 0,
+        arrhythmiaStatus: "SIN ARRITMIAS|0",
+        lipids: { totalCholesterol: 0, triglycerides: 0 },
+        signalQuality: 0,
+        measurementConfidence: 'INVALID',
+      }));
+      setHeartRate(0);
+      setShowResults(false);
     }
-    setShowResults(true);
     
     // Generar resumen estadístico
     const total = totalBeatsRef.current;
@@ -626,6 +675,18 @@ const Index = () => {
   const unstableFrameCounter = useRef<number>(0);
   const UNSTABLE_ZERO_THRESHOLD = 15; // ~0.5s de señal mala antes de borrar vitales
   const VITALS_PROCESS_EVERY_N_FRAMES = 3;
+
+  // === QUALITY GATE TRACKING (PI + Cardiac Power Ratio) ===
+  // Aggregates the per-frame verdict from HeartBeatProcessor's measurement
+  // gate. We use it to BLOCK persisting and displaying results when the
+  // measurement does not meet the clinical-quality thresholds.
+  const gateAcceptedFramesRef = useRef<number>(0);
+  const gateTotalFramesRef = useRef<number>(0);
+  const gateLastReasonRef = useRef<string>("INSUFFICIENT_SAMPLES");
+  const gateLastPiRef = useRef<number>(0);
+  const gateLastRatioRef = useRef<number>(0);
+  const GATE_MIN_ACCEPTED_FRAMES = 90;          // ≥3s of accepted signal @30fps
+  const GATE_MIN_ACCEPTED_RATIO = 0.30;         // ≥30% of frames must pass gate
   
   useEffect(() => {
     if (!lastSignal || !isMonitoring) return;
@@ -642,6 +703,13 @@ const Index = () => {
       contactState,
       lastSignal.timestamp
     );
+
+    // Track quality-gate verdict (PI + Cardiac Power Ratio) for the session.
+    gateTotalFramesRef.current += 1;
+    if (heartBeatResult.gateAccepted) gateAcceptedFramesRef.current += 1;
+    gateLastReasonRef.current = heartBeatResult.gateReason;
+    gateLastPiRef.current = heartBeatResult.perfusionIndex;
+    gateLastRatioRef.current = heartBeatResult.cardiacPowerRatio;
 
     setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
 

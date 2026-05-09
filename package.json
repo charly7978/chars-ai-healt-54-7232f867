@@ -13,6 +13,7 @@
     "check:orphans": "node scripts/check-orphan-imports.mjs",
     "check:no-sim": "node scripts/check-no-simulation.mjs",
     "check:no-sim:dist": "node scripts/check-no-simulation-dist.mjs",
+    "check:no-third-party": "node scripts/check-no-third-party.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
