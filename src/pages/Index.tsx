@@ -97,6 +97,26 @@ const Index = () => {
   const { analysis, isAnalyzing, analyzeVitals, clearAnalysis } = useHealthAnalysis();
   const [showAIAnalysis, setShowAIAnalysis] = useState(false);
 
+  // ---- Telemetría de rendimiento (opt-in) ----
+  const [telemetryOn, setTelemetryOn] = useState<boolean>(() => getPerfConsent());
+  const [showSettings, setShowSettings] = useState(false);
+  const cameraDiagRef = useRef<Record<string, unknown>>({});
+  usePerfTelemetry({
+    enabled: telemetryOn && isMonitoring,
+    intervalMs: 15000,
+    context: {
+      getCamera: () => cameraDiagRef.current,
+      getPipeline: () => ({
+        sqi: lastSignal?.quality ?? 0,
+        fingerDetected: !!lastSignal?.fingerDetected,
+        perfusionIndex: lastSignal?.perfusionIndex ?? 0,
+        bpm: heartRate,
+        spo2: vitalSigns.spo2,
+        confidence: vitalSigns.measurementConfidence,
+      }),
+    },
+  });
+
   // CANVAS PARA CAPTURA
   useEffect(() => {
     if (!canvasRef.current) {
