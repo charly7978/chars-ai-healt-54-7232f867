@@ -491,6 +491,9 @@ const Index = () => {
     setHeartbeatSignal(0);
     setBeatMarker(0);
     setRRIntervals([]);
+    bpmSanityRef.current.reset();
+    sanityErrorRef.current = null;
+    setSanityError(null);
     setVitalSigns({ 
       spo2: 0,
       glucose: 0,
