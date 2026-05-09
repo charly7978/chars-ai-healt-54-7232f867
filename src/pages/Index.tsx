@@ -32,6 +32,9 @@ import {
   downloadCSV as downloadAuditCSV,
   getEntries as getAuditEntries,
   getNegativeCount as getAuditNegativeCount,
+  getPersistedEntries as getPersistedAuditEntries,
+  getPersistedNegativeCount as getPersistedAuditNegativeCount,
+  clearPersistedLog as clearPersistedAuditLog,
 } from "@/lib/sanity/sanityAuditLog";
 
 import { supabase } from "@/integrations/supabase/client";
