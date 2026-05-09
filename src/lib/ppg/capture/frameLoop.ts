@@ -24,10 +24,10 @@ interface RVFCMetadata {
 
 type RVFCallback = (now: number, metadata: RVFCMetadata) => void;
 
-interface RVFCVideo extends HTMLVideoElement {
+type RVFCVideo = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: RVFCallback) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
-}
+};
 
 export type FrameTickHandler = (timing: FrameTiming) => void;
 
