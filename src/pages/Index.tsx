@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Heart, AlertTriangle, Activity, X, Shield, Clock, CheckCircle2, Brain, Loader2 } from "lucide-react";
+import { Heart, AlertTriangle, Activity, X, Shield, Clock, CheckCircle2, Brain, Loader2, Settings as SettingsIcon } from "lucide-react";
 import { playCompletionSound } from "@/utils/soundUtils";
 import VitalSign from "@/components/VitalSign";
 import CameraView, { CameraViewHandle } from "@/components/CameraView";
@@ -12,6 +12,7 @@ import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { toast } from "@/components/ui/use-toast";
 import { ppgPerf } from "@/utils/logger";
+import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
 
 import { supabase } from "@/integrations/supabase/client";
 
