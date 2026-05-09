@@ -846,6 +846,9 @@ const Index = () => {
               bpm={heartRate}
               spo2={vitalSigns.spo2}
               rrIntervals={rrIntervals}
+              elapsedTime={elapsedTime}
+              perfusionIndex={lastSignal?.perfusionIndex || 0}
+              pressure={vitalSigns.pressure}
             />
           </div>
 
