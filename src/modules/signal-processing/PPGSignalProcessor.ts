@@ -886,4 +886,13 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         : 0,
     };
   }
+
+  /** Estado actual del backpressure adaptativo (para telemetría). */
+  getBackpressureState() {
+    return {
+      pixelStride: this.pixelStride,
+      estimatedSampleRate: this.estimatedSampleRate,
+      activeSource: this.activeSource,
+    };
+  }
 }
