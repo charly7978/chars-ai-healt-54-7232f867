@@ -433,6 +433,11 @@ const Index = () => {
     totalBeatsRef.current = 0;
     arrhythmiaBeatsRef.current = 0;
     lastArrhythmiaCountForBeatsRef.current = 0;
+    gateAcceptedFramesRef.current = 0;
+    gateTotalFramesRef.current = 0;
+    gateLastReasonRef.current = "INSUFFICIENT_SAMPLES";
+    gateLastPiRef.current = 0;
+    gateLastRatioRef.current = 0;
     setVitalSigns(prev => ({ ...prev, arrhythmiaStatus: "SIN ARRITMIAS|0" }));
     
     // Iniciar procesamiento
