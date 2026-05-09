@@ -66,7 +66,8 @@ const Index = () => {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
-  // Runtime guardrail: detect implausible synthetic vitals streams.
+  // anti-sim-allow: reason="Wires up the runtime detector for fabricated vitals streams." ref="GUARDRAIL-DIST-RUNTIME"
+  // Runtime guardrail: detect implausible vitals streams.
   const bpmSanityRef = useRef(new VitalsSanityChecker({ min: 30, max: 220 }));
   const sanityErrorRef = useRef<string | null>(null);
   const sanityToastAtRef = useRef<number>(0);
