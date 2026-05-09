@@ -13,6 +13,7 @@ import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { toast } from "@/components/ui/use-toast";
 import { ppgPerf } from "@/utils/logger";
 import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
+import type { BackpressureConfig } from "@/lib/perf/backpressureConfig";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -75,6 +76,8 @@ const Index = () => {
     framesProcessed,
     getRGBStats,
     getBackpressureState,
+    getBackpressureConfig,
+    setBackpressureConfig,
   } = useSignalProcessor();
   
   const { 
@@ -101,6 +104,12 @@ const Index = () => {
   // ---- Telemetría de rendimiento (opt-in) ----
   const [telemetryOn, setTelemetryOn] = useState<boolean>(() => getPerfConsent());
   const [showSettings, setShowSettings] = useState(false);
+  const [bpCfg, setBpCfg] = useState<BackpressureConfig>(() => getBackpressureConfig());
+
+  const updateBp = useCallback((patch: Partial<BackpressureConfig>) => {
+    const next = setBackpressureConfig(patch);
+    setBpCfg(next);
+  }, [setBackpressureConfig]);
   usePerfTelemetry({
     enabled: telemetryOn && isMonitoring,
     intervalMs: 15000,
@@ -695,6 +704,80 @@ const Index = () => {
                   </span>
                 </span>
               </label>
+
+              <div className="mt-5 pt-4 border-t border-white/10">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={bpCfg.enabled}
+                    onChange={(e) => updateBp({ enabled: e.target.checked, forceStride: undefined })}
+                  />
+                  <span className="text-sm leading-snug">
+                    <span className="font-medium">Backpressure adaptativo</span>
+                    <span className="block text-white/60 text-xs mt-1">
+                      Reduce el muestreo espacial (stride) cuando el dispositivo no llega al fps objetivo. No altera la frecuencia temporal.
+                    </span>
+                  </span>
+                </label>
+
+                <div className={`mt-3 grid grid-cols-2 gap-3 ${bpCfg.enabled && typeof bpCfg.forceStride !== 'number' ? '' : 'opacity-50 pointer-events-none'}`}>
+                  <label className="text-xs text-white/70">
+                    fps bajo (sube stride)
+                    <input
+                      type="number" min={5} max={59} step={1}
+                      value={bpCfg.lowFpsThreshold}
+                      onChange={(e) => updateBp({ lowFpsThreshold: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-white/70">
+                    fps alto (baja stride)
+                    <input
+                      type="number" min={6} max={60} step={1}
+                      value={bpCfg.highFpsThreshold}
+                      onChange={(e) => updateBp({ highFpsThreshold: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-white/70">
+                    Sostenido (ms)
+                    <input
+                      type="number" min={250} max={30000} step={250}
+                      value={bpCfg.sustainMs}
+                      onChange={(e) => updateBp({ sustainMs: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-white/70">
+                    Stride máximo
+                    <input
+                      type="number" min={3} max={8} step={1}
+                      value={bpCfg.maxStride}
+                      onChange={(e) => updateBp({ maxStride: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-3 flex items-center gap-2">
+                  <span className="text-xs text-white/70">Forzar stride:</span>
+                  {[undefined, 3, 4, 5].map((s) => (
+                    <button
+                      key={String(s)}
+                      type="button"
+                      onClick={() => updateBp({ forceStride: s })}
+                      className={`text-xs px-2 py-1 rounded border ${
+                        (bpCfg.forceStride ?? 'auto') === (s ?? 'auto')
+                          ? 'bg-white/20 border-white/40 text-white'
+                          : 'bg-zinc-800 border-white/10 text-white/70 hover:text-white'
+                      }`}
+                    >
+                      {s === undefined ? 'auto' : s}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         )}
