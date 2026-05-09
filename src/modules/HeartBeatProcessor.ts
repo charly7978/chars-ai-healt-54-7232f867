@@ -1,3 +1,5 @@
+import { evaluateQualityGate, type QualityGateReason, type QualityGateThresholds, DEFAULT_GATE_THRESHOLDS } from "@/lib/ppg/quality/measurementGate";
+
 /**
  * HEARTBEAT PROCESSOR - FUSIÓN TIEMPO + FRECUENCIA
  *
@@ -7,6 +9,8 @@
  *    spectral dominante cuando señal débil
  * 3. Scoring de candidatos de pico por prominencia + pendiente + consistencia RR
  * 4. Ventanas adaptativas: cortas para señal débil, largas para estable
+ * 5. Hard gate: PI + cardiac power ratio bloquean salida si la señal no califica
+ * 6. Parabolic sub-frame peak interpolation para precisión de IBI sin re-muestrear
  */
 export class HeartBeatProcessor {
   private readonly MIN_PEAK_INTERVAL_MS = 330;
@@ -35,6 +39,15 @@ export class HeartBeatProcessor {
   private consecutivePeaks = 0;
   private signalQualityIndex = 0;
 
+  /** Quality gate state — exposed via getGateReason() and reflected in BPM=0 when gating fails. */
+  private gateReason: QualityGateReason = "INSUFFICIENT_SAMPLES";
+  private gateAccepted = false;
+  private gatePerfusionIndex = 0;
+  private gateCardiacPowerRatio = 0;
+  private gateThresholds: QualityGateThresholds = DEFAULT_GATE_THRESHOLDS;
+  private lastGateEvalFrame = -1;
+  private gateScratch: Float32Array = new Float32Array(0);
+
   constructor() {
     this.setupAudio();
   }
@@ -62,6 +75,10 @@ export class HeartBeatProcessor {
     filteredValue: number;
     arrhythmiaCount: number;
     sqi: number;
+    gateAccepted: boolean;
+    gateReason: QualityGateReason;
+    perfusionIndex: number;
+    cardiacPowerRatio: number;
   } {
     this.frameCount++;
     const now = timestamp ?? Date.now();
@@ -80,7 +97,7 @@ export class HeartBeatProcessor {
     }
 
     if (this.signalBuffer.length < 20) {
-      return { bpm: 0, confidence: 0, isPeak: false, filteredValue: 0, arrhythmiaCount: 0, sqi: 0 };
+      return { bpm: 0, confidence: 0, isPeak: false, filteredValue: 0, arrhythmiaCount: 0, sqi: 0, gateAccepted: false, gateReason: "INSUFFICIENT_SAMPLES", perfusionIndex: 0, cardiacPowerRatio: 0 };
     }
 
     // === GATE: minimum signal energy to reject noise ===
@@ -88,7 +105,9 @@ export class HeartBeatProcessor {
     const gSorted = [...recentForGate].sort((a, b) => a - b);
     const gRange = (gSorted[Math.floor(gSorted.length * 0.9)] ?? 0) - (gSorted[Math.floor(gSorted.length * 0.1)] ?? 0);
     if (gRange < 0.5) {
-      return { bpm: 0, confidence: 0, isPeak: false, filteredValue: 0, arrhythmiaCount: 0, sqi: 0 };
+      this.gateAccepted = false;
+      this.gateReason = "INSUFFICIENT_SAMPLES";
+      return { bpm: 0, confidence: 0, isPeak: false, filteredValue: 0, arrhythmiaCount: 0, sqi: 0, gateAccepted: false, gateReason: "INSUFFICIENT_SAMPLES", perfusionIndex: 0, cardiacPowerRatio: 0 };
     }
 
     // Adaptive window for normalization
@@ -111,18 +130,22 @@ export class HeartBeatProcessor {
 
     const timeSinceLastPeak = this.lastPeakTime > 0 ? now - this.lastPeakTime : Number.MAX_SAFE_INTEGER;
     let isPeak = false;
+    let refinedPeakTime = now;
 
     if (timeSinceLastPeak >= this.MIN_PEAK_INTERVAL_MS) {
-      isPeak = this.detectPeakWithScoring(timeSinceLastPeak);
+      const detection = this.detectPeakWithScoring(timeSinceLastPeak);
+      isPeak = detection.isPeak;
+      if (isPeak) refinedPeakTime = detection.refinedTimestamp;
 
       if (isPeak) {
-        if (this.lastPeakTime > 0 && timeSinceLastPeak <= this.MAX_PEAK_INTERVAL_MS) {
-          this.rrIntervals.push(timeSinceLastPeak);
+        const refinedInterval = this.lastPeakTime > 0 ? refinedPeakTime - this.lastPeakTime : Number.MAX_SAFE_INTEGER;
+        if (this.lastPeakTime > 0 && refinedInterval <= this.MAX_PEAK_INTERVAL_MS && refinedInterval >= this.MIN_PEAK_INTERVAL_MS) {
+          this.rrIntervals.push(refinedInterval);
           if (this.rrIntervals.length > this.MAX_RR_INTERVALS) {
             this.rrIntervals.shift();
           }
 
-          const instantBPM = 60000 / timeSinceLastPeak;
+          const instantBPM = 60000 / refinedInterval;
 
           if (this.smoothBPM === 0) {
             this.smoothBPM = instantBPM;
@@ -139,7 +162,7 @@ export class HeartBeatProcessor {
           this.consecutivePeaks++;
         }
 
-        this.lastPeakTime = now;
+        this.lastPeakTime = refinedPeakTime;
         this.vibrate();
         this.playBeep();
       }
@@ -166,13 +189,50 @@ export class HeartBeatProcessor {
 
     const confidence = this.calculateConfidence();
 
+    // === HARD QUALITY GATE (PI + cardiac power ratio) ===
+    // Re-evaluated every ~10 frames to keep cost low; uses real sample rate.
+    if (this.frameCount - this.lastGateEvalFrame >= 10 && this.signalBuffer.length >= 64) {
+      this.lastGateEvalFrame = this.frameCount;
+      const winLen = Math.min(this.signalBuffer.length, 256);
+      if (this.gateScratch.length !== winLen) this.gateScratch = new Float32Array(winLen);
+      const startIdx = this.signalBuffer.length - winLen;
+      let sum = 0;
+      for (let i = 0; i < winLen; i++) {
+        const v = this.signalBuffer[startIdx + i];
+        this.gateScratch[i] = v;
+        sum += v;
+      }
+      const dc = sum / winLen;
+      // De-mean in place so PI uses true AC and Goertzel sees zero-mean signal.
+      for (let i = 0; i < winLen; i++) this.gateScratch[i] -= dc;
+      const verdict = evaluateQualityGate(
+        this.gateScratch,
+        winLen,
+        Math.abs(dc) > 1e-6 ? dc : 1,
+        this.estimateSampleRate(),
+        this.gateThresholds,
+      );
+      this.gateAccepted = verdict.accepted;
+      this.gateReason = verdict.reason;
+      this.gatePerfusionIndex = verdict.perfusionIndex;
+      this.gateCardiacPowerRatio = verdict.cardiacPowerRatio;
+    }
+
+    // Hard block: when the gate rejects, never publish a BPM number.
+    const finalBpm = this.gateAccepted ? displayBPM : 0;
+    const finalConfidence = this.gateAccepted ? confidence : 0;
+
     return {
-      bpm: displayBPM,
-      confidence,
+      bpm: finalBpm,
+      confidence: finalConfidence,
       isPeak,
       filteredValue: normalizedValue,
       arrhythmiaCount: 0,
       sqi: this.signalQualityIndex,
+      gateAccepted: this.gateAccepted,
+      gateReason: this.gateReason,
+      perfusionIndex: this.gatePerfusionIndex,
+      cardiacPowerRatio: this.gateCardiacPowerRatio,
     };
   }
 
@@ -308,10 +368,10 @@ export class HeartBeatProcessor {
   }
 
   // === PEAK DETECTION WITH CANDIDATE SCORING ===
-  private detectPeakWithScoring(timeSinceLastPeak: number): boolean {
+  private detectPeakWithScoring(timeSinceLastPeak: number): { isPeak: boolean; refinedTimestamp: number } {
     const n = this.signalBuffer.length;
     const dn = this.derivativeBuffer.length;
-    if (n < 11 || dn < 6) return false;
+    if (n < 11 || dn < 6) return { isPeak: false, refinedTimestamp: 0 };
 
     const deriv = this.derivativeBuffer.slice(-6);
     const zeroCrossing = (deriv[2] > 0 && deriv[3] <= 0) || (deriv[3] > 0 && deriv[4] <= 0);
@@ -340,10 +400,10 @@ export class HeartBeatProcessor {
     let score = 0;
 
     // Prominence gate: reject flat noise but accept real PPG
-    if (prominence < 2.2) return false;
+    if (prominence < 2.2) return { isPeak: false, refinedTimestamp: 0 };
 
     // Morphology gate: PPG has rising edge
-    if (risingSlope < 0.8) return false;
+    if (risingSlope < 0.8) return { isPeak: false, refinedTimestamp: 0 };
 
     // Prominence (0-30 points)
     score += Math.min(30, prominence * 2.5);
@@ -356,7 +416,7 @@ export class HeartBeatProcessor {
     if (zeroCrossing) score += 15;
 
     // First peak: need periodic support (chicken-and-egg)
-    if (this.consecutivePeaks === 0 && this.periodicityScore < 0.25 && !zeroCrossing) return false;
+    if (this.consecutivePeaks === 0 && this.periodicityScore < 0.25 && !zeroCrossing) return { isPeak: false, refinedTimestamp: 0 };
 
     // Rhythm consistency (0-20 points)
     if (nearExpected) score += 20;
@@ -369,7 +429,7 @@ export class HeartBeatProcessor {
     const thresholdCheck = center > this.peakThreshold * (nearExpected ? 0.65 : 0.9) || prominence > Math.max(2.0, this.peakThreshold * 0.55);
 
     // Falling slope must also be positive for real PPG morphology
-    if (fallingSlope < 0.35) return false;
+    if (fallingSlope < 0.35) return { isPeak: false, refinedTimestamp: 0 };
 
     const amplitudeValid = this.lastPeakValue > 0
       ? (Math.abs(center) / Math.max(1, Math.abs(this.lastPeakValue))) > 0.08 && (Math.abs(center) / Math.max(1, Math.abs(this.lastPeakValue))) < 8
@@ -379,9 +439,32 @@ export class HeartBeatProcessor {
 
     if (isPeak) {
       this.lastPeakValue = center;
+      // === Parabolic sub-frame interpolation ===
+      // Fit y = a·x² + b·x + c through the three samples around the peak in
+      // the RAW buffer (using the same indexing as `recentNormalized`).
+      // Vertex offset δ ∈ (-0.5, +0.5) samples; 0 means the discrete max is
+      // already the true peak.
+      const yL = this.signalBuffer[n - 7]; // index ci-1 in window
+      const yC = this.signalBuffer[n - 6]; // index ci   in window
+      const yR = this.signalBuffer[n - 5]; // index ci+1 in window
+      const denom = yL - 2 * yC + yR;
+      let delta = 0;
+      if (Math.abs(denom) > 1e-9) {
+        delta = 0.5 * (yL - yR) / denom;
+        if (delta > 0.5) delta = 0.5;
+        else if (delta < -0.5) delta = -0.5;
+      }
+      // Convert sub-sample offset to a sub-millisecond timestamp using the
+      // real local frame interval — does NOT alter the actual sample rate.
+      const tC = this.timestampBuffer[n - 6] ?? 0;
+      const tR = this.timestampBuffer[n - 5] ?? tC;
+      const tL = this.timestampBuffer[n - 7] ?? tC;
+      const localDt = delta >= 0 ? (tR - tC) : (tC - tL);
+      const refinedTimestamp = tC + delta * Math.max(1, Math.abs(localDt));
+      return { isPeak: true, refinedTimestamp };
     }
 
-    return isPeak;
+    return { isPeak, refinedTimestamp: 0 };
   }
 
   private calculateConfidence(): number {
@@ -434,6 +517,13 @@ export class HeartBeatProcessor {
   getSQI(): number { return this.signalQualityIndex; }
   getDerivativeBuffer(): number[] { return [...this.derivativeBuffer]; }
 
+  /** Last quality-gate verdict reason. */
+  getGateReason(): QualityGateReason { return this.gateReason; }
+  /** Last quality-gate accepted flag. */
+  isGateAccepted(): boolean { return this.gateAccepted; }
+  /** Override gate thresholds (e.g. from runtime config). */
+  setGateThresholds(th: QualityGateThresholds): void { this.gateThresholds = th; }
+
 
   reset(): void {
     this.signalBuffer = [];
@@ -449,6 +539,11 @@ export class HeartBeatProcessor {
     this.frameCount = 0;
     this.consecutivePeaks = 0;
     this.signalQualityIndex = 0;
+    this.gateAccepted = false;
+    this.gateReason = "INSUFFICIENT_SAMPLES";
+    this.gatePerfusionIndex = 0;
+    this.gateCardiacPowerRatio = 0;
+    this.lastGateEvalFrame = -1;
   }
 
   dispose(): void {
