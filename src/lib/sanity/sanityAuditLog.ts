@@ -29,13 +29,22 @@ export function setActiveProfile(profileId: string): void {
 }
 
 export function recordVerdict(sample: number, verdict: SanityVerdict, window: number[]): void {
+  let verdictTag: AuditEntry["verdict"];
+  let detail: string | undefined;
+  if (verdict.ok) {
+    verdictTag = "OK";
+    detail = undefined;
+  } else {
+    verdictTag = verdict.reason;
+    detail = verdict.detail;
+  }
   const entry: AuditEntry = {
     ts: Date.now(),
     sessionId,
     sample,
     windowSize: window.length,
-    verdict: verdict.ok === true ? "OK" : verdict.reason,
-    detail: verdict.ok === true ? undefined : verdict.detail,
+    verdict: verdictTag,
+    detail,
     bpmWindow: window.length > SNAPSHOT_CAP ? window.slice(-SNAPSHOT_CAP) : window.slice(),
     thresholdsId,
   };
