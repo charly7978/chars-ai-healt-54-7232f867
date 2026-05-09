@@ -605,12 +605,22 @@ const PPGSignalMeter = ({
       ctx.restore();
     }
 
-    // === Footer técnico: sweep, gain, filtro, alarmas ===
+    // === Footer técnico: sweep, gain, filtro, alarmas + fuente MAP/PP ===
     ctx.font = '9px "SF Mono", Consolas, monospace';
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
     ctx.textAlign = 'left';
     const fy = H - 8;
-    ctx.fillText('SWEEP 25mm/s   GAIN ×1.0   FILTRO 0.5–4 Hz   FUENTE PPG/RG', panelX + 10, fy);
+    const strideTxt = propsRef.current.currentStride
+      ? `STRIDE ${propsRef.current.currentStride}`
+      : 'STRIDE auto';
+    ctx.fillText(
+      `SWEEP 25mm/s   GAIN ×1.0   FILTRO 0.5–4 Hz   ${strideTxt}   FUENTE PPG/RG`,
+      panelX + 10, fy,
+    );
+    // Línea adicional con el origen explícito de MAP/PP (a 14 px debajo del
+    // panel principal pero todavía visible dentro del canvas).
+    ctx.fillStyle = COLORS.SCALE_TEXT;
+    ctx.fillText(PRESSURE_SOURCE_NOTE, panelX + 10, fy - 14);
     ctx.textAlign = 'right';
     const alarms: string[] = [];
     if (bpm > 0 && (bpm < 50 || bpm > 120)) alarms.push(`HR!`);
