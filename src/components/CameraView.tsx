@@ -2,7 +2,6 @@ import React, { useRef, useEffect, forwardRef, useImperativeHandle } from "react
 
 export interface CameraViewHandle {
   getVideoElement: () => HTMLVideoElement | null;
-  getDiagnostics: () => Record<string, unknown>;
 }
 
 interface CameraViewProps {
@@ -28,24 +27,7 @@ const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(({
   const isStartingRef = useRef(false);
 
   useImperativeHandle(ref, () => ({
-    getVideoElement: () => videoRef.current,
-    getDiagnostics: () => {
-      const track = streamRef.current?.getVideoTracks?.()[0];
-      if (!track) return { active: false };
-      try {
-        const settings = track.getSettings?.() ?? {};
-        const caps = (track.getCapabilities?.() ?? {}) as Record<string, unknown>;
-        return {
-          active: true,
-          label: track.label,
-          readyState: track.readyState,
-          settings,
-          torchSupported: !!(caps as any).torch,
-        };
-      } catch {
-        return { active: true, error: 'caps_unavailable' };
-      }
-    },
+    getVideoElement: () => videoRef.current
   }), []);
 
   useEffect(() => {

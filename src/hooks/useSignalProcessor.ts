@@ -139,12 +139,6 @@ export const useSignalProcessor = () => {
     return processorRef.current.getRGBStats();
   }, []);
 
-  // Estado de backpressure (stride adaptativo + fps estimado) para telemetría
-  const getBackpressureState = useCallback(() => {
-    if (!processorRef.current) return { pixelStride: 3, estimatedSampleRate: 0, activeSource: 'RG' };
-    return processorRef.current.getBackpressureState();
-  }, []);
-
   return {
     isProcessing,
     lastSignal,
@@ -155,7 +149,6 @@ export const useSignalProcessor = () => {
     calibrate,
     processFrame,
     getRGBStats,
-    getBackpressureState,
     debugInfo: {
       sessionId: sessionIdRef.current,
       initializationState: initializationState.current,
