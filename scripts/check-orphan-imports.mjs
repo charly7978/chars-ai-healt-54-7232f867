@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
 const EXTS = ['.ts', '.tsx', '.js', '.jsx'];
+const RESOLVE_EXTS = ['.ts', '.tsx', '.d.ts', '.js', '.jsx'];
 const ENTRYPOINTS = new Set([
   'src/main.tsx',
   'src/App.tsx',
@@ -41,8 +42,8 @@ function tryResolve(spec, fromFile) {
 
   const candidates = [
     base,
-    ...EXTS.map(e => base + e),
-    ...EXTS.map(e => join(base, 'index' + e)),
+    ...RESOLVE_EXTS.map(e => base + e),
+    ...RESOLVE_EXTS.map(e => join(base, 'index' + e)),
   ];
   for (const c of candidates) {
     try { if (statSync(c).isFile()) return c; } catch {}
