@@ -11,9 +11,29 @@
  * upstream stage somehow injects a "too clean" stream.
  */
 
+export interface SanityMetrics {
+  /** Last sample evaluated. */
+  last: number;
+  /** Window mean. */
+  mean: number;
+  /** Window max - min. */
+  span: number;
+  /** Window variance (population). */
+  variance: number;
+  /** Window standard deviation. */
+  std: number;
+  /** Std-dev of consecutive deltas. */
+  deltaStd: number;
+  /** Mean absolute delta between consecutive samples. */
+  meanAbsDelta: number;
+  /** Min/max within window. */
+  min: number;
+  max: number;
+}
+
 export type SanityVerdict =
-  | { ok: true }
-  | { ok: false; reason: 'CONSTANT' | 'REPETITIVE' | 'ZERO_VARIANCE' | 'OUT_OF_RANGE'; detail: string };
+  | { ok: true; metrics?: SanityMetrics }
+  | { ok: false; reason: 'CONSTANT' | 'REPETITIVE' | 'ZERO_VARIANCE' | 'OUT_OF_RANGE'; detail: string; metrics?: SanityMetrics };
 
 export interface VitalsSanityOptions {
   /** Window size in samples (BPM updates ~per beat → ~30 samples ≈ 30 s). */
@@ -76,41 +96,51 @@ export class VitalsSanityChecker {
     if (n < this.opt.minSamples) return { ok: true };
 
     const last = this.buf[n - 1];
-    if (last < this.opt.min || last > this.opt.max) {
-      return { ok: false, reason: 'OUT_OF_RANGE', detail: `value ${last.toFixed(1)} outside [${this.opt.min}, ${this.opt.max}]` };
-    }
 
-    // Constant stream: max-min within tolerance.
+    // Compute all stats up-front so every verdict carries full metrics.
     let mn = Infinity, mx = -Infinity, sum = 0;
     for (const v of this.buf) { if (v < mn) mn = v; if (v > mx) mx = v; sum += v; }
     const span = mx - mn;
-    if (span <= this.opt.constantTolerance) {
-      return { ok: false, reason: 'CONSTANT', detail: `span ${span.toFixed(3)} ≤ tol ${this.opt.constantTolerance}` };
-    }
-
-    // Variance and consecutive deltas (catch sawtooth / loop generators).
     const mean = sum / n;
     let variance = 0;
     for (const v of this.buf) variance += (v - mean) ** 2;
     variance /= n;
-    if (variance < 1e-6) {
-      return { ok: false, reason: 'ZERO_VARIANCE', detail: `var ${variance.toExponential(2)}` };
-    }
+    const std = Math.sqrt(variance);
 
-    const deltas: number[] = [];
-    for (let i = 1; i < n; i++) deltas.push(this.buf[i] - this.buf[i - 1]);
-    const dMean = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+    let dSum = 0, dAbsSum = 0;
+    const dN = n - 1;
+    for (let i = 1; i < n; i++) {
+      const d = this.buf[i] - this.buf[i - 1];
+      dSum += d;
+      dAbsSum += Math.abs(d);
+    }
+    const dMean = dN > 0 ? dSum / dN : 0;
     let dVar = 0;
-    for (const d of deltas) dVar += (d - dMean) ** 2;
-    dVar /= deltas.length;
+    for (let i = 1; i < n; i++) {
+      const d = this.buf[i] - this.buf[i - 1];
+      dVar += (d - dMean) ** 2;
+    }
+    dVar = dN > 0 ? dVar / dN : 0;
     const dStd = Math.sqrt(dVar);
-    // Repetitive: nearly identical successive deltas (e.g. linear ramp / sine loop)
-    // AND the absolute deltas are non-trivial — pure plateau is already caught above.
-    const meanAbsDelta = deltas.reduce((a, b) => a + Math.abs(b), 0) / deltas.length;
+    const meanAbsDelta = dN > 0 ? dAbsSum / dN : 0;
+
+    const metrics: SanityMetrics = {
+      last, mean, span, variance, std, deltaStd: dStd, meanAbsDelta, min: mn, max: mx,
+    };
+
+    if (last < this.opt.min || last > this.opt.max) {
+      return { ok: false, reason: 'OUT_OF_RANGE', detail: `value ${last.toFixed(1)} outside [${this.opt.min}, ${this.opt.max}]`, metrics };
+    }
+    if (span <= this.opt.constantTolerance) {
+      return { ok: false, reason: 'CONSTANT', detail: `span ${span.toFixed(3)} ≤ tol ${this.opt.constantTolerance}`, metrics };
+    }
+    if (variance < 1e-6) {
+      return { ok: false, reason: 'ZERO_VARIANCE', detail: `var ${variance.toExponential(2)}`, metrics };
+    }
     if (dStd < this.opt.repetitiveStdMin && meanAbsDelta > this.opt.constantTolerance) {
-      return { ok: false, reason: 'REPETITIVE', detail: `delta-std ${dStd.toFixed(3)} too low for delta-mean ${meanAbsDelta.toFixed(2)}` };
+      return { ok: false, reason: 'REPETITIVE', detail: `delta-std ${dStd.toFixed(3)} too low for delta-mean ${meanAbsDelta.toFixed(2)}`, metrics };
     }
 
-    return { ok: true };
+    return { ok: true, metrics };
   }
 }
