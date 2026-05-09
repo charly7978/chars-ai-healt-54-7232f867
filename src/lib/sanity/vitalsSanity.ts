@@ -27,11 +27,14 @@ export interface VitalsSanityOptions {
   /** Plausible physiologic range for the stream (BPM defaults: 30–220). */
   min?: number;
   max?: number;
+  /** Optional listener invoked for every push (after verdict is computed). */
+  onVerdict?: (sample: number, verdict: SanityVerdict, window: number[]) => void;
 }
 
 export class VitalsSanityChecker {
   private buf: number[] = [];
-  private readonly opt: Required<VitalsSanityOptions>;
+  private readonly opt: Required<Omit<VitalsSanityOptions, 'onVerdict'>>;
+  private readonly onVerdict?: VitalsSanityOptions['onVerdict'];
   private lastVerdict: SanityVerdict = { ok: true };
 
   constructor(opt: VitalsSanityOptions = {}) {
@@ -43,11 +46,17 @@ export class VitalsSanityChecker {
       min: opt.min ?? 30,
       max: opt.max ?? 220,
     };
+    this.onVerdict = opt.onVerdict;
   }
 
   reset(): void {
     this.buf = [];
     this.lastVerdict = { ok: true };
+  }
+
+  /** Read-only accessor for the active thresholds (for audit / UI display). */
+  getOptions() {
+    return { ...this.opt };
   }
 
   /** Push a new sample. 0 / non-finite values are treated as "no reading" and skipped. */
@@ -56,6 +65,9 @@ export class VitalsSanityChecker {
     this.buf.push(value);
     if (this.buf.length > this.opt.windowSize) this.buf.shift();
     this.lastVerdict = this.evaluate();
+    if (this.onVerdict) {
+      try { this.onVerdict(value, this.lastVerdict, this.buf.slice()); } catch { /* listener errors must not break pipeline */ }
+    }
     return this.lastVerdict;
   }
 
