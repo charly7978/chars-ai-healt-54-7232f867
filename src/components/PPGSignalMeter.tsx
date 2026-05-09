@@ -395,7 +395,11 @@ const PPGSignalMeter = ({
     ctx.font = 'bold 11px "SF Mono", Consolas, monospace';
     ctx.fillStyle = COLORS.TEXT_PRIMARY;
     ctx.textAlign = 'left';
-    ctx.fillText('● MONITOR · PARÁMETROS HEMODINÁMICOS', panelX + 10, panelY + 15);
+    const headerLabel = propsRef.current.isAcquiring
+      ? '● ADQUISICIÓN · CONFIRMANDO COBERTURA Y PERFIL DE DEDO…'
+      : '● MONITOR · PARÁMETROS HEMODINÁMICOS';
+    ctx.fillStyle = propsRef.current.isAcquiring ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
+    ctx.fillText(headerLabel, panelX + 10, panelY + 15);
 
     // Reloj + elapsed (derecha del header)
     const d = new Date();
