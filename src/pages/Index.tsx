@@ -581,7 +581,7 @@ const Index = () => {
     // repetitivo / fuera de rango fisiológico, congelamos la actualización
     // y exponemos un estado de error en lugar de pintar datos sospechosos.
     const verdict = bpmSanityRef.current.push(heartBeatResult.bpm);
-    if (!verdict.ok) {
+    if (verdict.ok === false) {
       const msg = `BPM stream ${verdict.reason} (${verdict.detail})`;
       if (sanityErrorRef.current !== verdict.reason) {
         sanityErrorRef.current = verdict.reason;
