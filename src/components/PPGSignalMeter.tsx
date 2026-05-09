@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Heart, Activity } from 'lucide-react';
 import { CircularBuffer, PPGDataPoint } from '../utils/CircularBuffer';
-import { deriveMapAndPp, PRESSURE_SOURCE_NOTE } from '../lib/vitals/derivedPressure';
 
 interface PPGSignalMeterProps {
   value: number;
@@ -23,14 +22,6 @@ interface PPGSignalMeterProps {
   bpm?: number;
   spo2?: number;
   rrIntervals?: number[];
-  elapsedTime?: number;
-  perfusionIndex?: number;
-  pressure?: { systolic: number; diastolic: number; confidence?: string; featureQuality?: number };
-  /** stride actual del backpressure adaptativo (1, 2, 3, 4, …). Se usa para
-   *  marcar visualmente en el trend cuándo el algoritmo cambió parámetros. */
-  currentStride?: number;
-  /** true durante la fase corta de adquisición posterior a iniciar la medición. */
-  isAcquiring?: boolean;
 }
 
 const CONFIG = {
@@ -86,12 +77,7 @@ const PPGSignalMeter = ({
   isPeak = false,
   bpm = 0,
   spo2 = 0,
-  rrIntervals = [],
-  elapsedTime = 0,
-  perfusionIndex = 0,
-  pressure,
-  currentStride = 0,
-  isAcquiring = false,
+  rrIntervals = []
 }: PPGSignalMeterProps) => {
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -99,7 +85,7 @@ const PPGSignalMeter = ({
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -111,34 +97,9 @@ const PPGSignalMeter = ({
   // Track consecutive IBI for display
   const ibiDisplayRef = useRef<number>(0);
   const hrvDisplayRef = useRef<{ sdnn: number; rmssd: number }>({ sdnn: 0, rmssd: 0 });
-  // BPM trend tracking (min/max/mean and rolling history for trend strip)
-  const bpmStatsRef = useRef<{ min: number; max: number; sum: number; n: number }>({ min: 0, max: 0, sum: 0, n: 0 });
-  const bpmTrendRef = useRef<{ t: number; bpm: number }[]>([]);
-  const lastBpmSampleRef = useRef<number>(0);
-  // Marcas en el trend cuando el algoritmo cambia parámetros (p.ej. stride).
-  // Guardamos timestamp absoluto y etiqueta corta para anotación visual.
-  const algoMarksRef = useRef<{ t: number; label: string; kind: 'stride' | 'gain' | 'filter' }[]>([]);
-  const lastStrideSeenRef = useRef<number>(0);
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring };
-
-    // Marca cuando el algoritmo cambia stride (única señal de "cambio de
-    // parámetros" disponible hoy desde Index). Si en el futuro se exponen
-    // gain/filter, se pueden añadir aquí con kind: 'gain' | 'filter'.
-    if (currentStride && currentStride !== lastStrideSeenRef.current) {
-      if (lastStrideSeenRef.current !== 0) {
-        algoMarksRef.current.push({
-          t: Date.now(),
-          label: `stride ${currentStride}`,
-          kind: 'stride',
-        });
-        // Mantener solo marcas dentro de la ventana visible del trend (~80s).
-        const cutoff = Date.now() - 90_000;
-        algoMarksRef.current = algoMarksRef.current.filter(m => m.t >= cutoff);
-      }
-      lastStrideSeenRef.current = currentStride;
-    }
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData };
     
     // Compute HRV metrics from RR intervals
     if (rrIntervals && rrIntervals.length >= 2) {
@@ -157,25 +118,7 @@ const PPGSignalMeter = ({
       }
       hrvDisplayRef.current.rmssd = Math.round(Math.sqrt(sumSqDiffs / (rrIntervals.length - 1)));
     }
-
-    // Track BPM stats and trend (sample at most every 500ms, only valid bpm)
-    const nowMs = Date.now();
-    if (bpm > 30 && bpm < 220 && nowMs - lastBpmSampleRef.current > 500) {
-      lastBpmSampleRef.current = nowMs;
-      const s = bpmStatsRef.current;
-      if (s.n === 0) { s.min = bpm; s.max = bpm; }
-      else { if (bpm < s.min) s.min = bpm; if (bpm > s.max) s.max = bpm; }
-      s.sum += bpm; s.n += 1;
-      bpmTrendRef.current.push({ t: nowMs, bpm });
-      if (bpmTrendRef.current.length > 80) bpmTrendRef.current.shift();
-    }
-    if (!isFingerDetected && !preserveResults) {
-      // Reset trend stats when contact is lost
-      bpmStatsRef.current = { min: 0, max: 0, sum: 0, n: 0 };
-      bpmTrendRef.current = [];
-      algoMarksRef.current = [];
-    }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring]);
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
@@ -219,95 +162,50 @@ const PPGSignalMeter = ({
     const { CANVAS_WIDTH: W, CANVAS_HEIGHT: H, COLORS } = CONFIG;
     const plot = getPlotArea();
     
-    // === FONDO: monitor médico con vignette sutil ===
-    const bgGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) / 1.3);
-    bgGrad.addColorStop(0, '#0c1422');
-    bgGrad.addColorStop(1, '#05080f');
-    ctx.fillStyle = bgGrad;
+    ctx.fillStyle = COLORS.BG;
     ctx.fillRect(0, 0, W, H);
-
-    // Plot area inner background (verde profundo apenas perceptible)
-    const innerGrad = ctx.createLinearGradient(0, plot.y, 0, plot.y + plot.height);
-    innerGrad.addColorStop(0, 'rgba(0, 30, 18, 0.55)');
-    innerGrad.addColorStop(0.5, 'rgba(0, 22, 12, 0.45)');
-    innerGrad.addColorStop(1, 'rgba(0, 30, 18, 0.55)');
-    ctx.fillStyle = innerGrad;
+    
+    ctx.fillStyle = 'rgba(0, 20, 10, 0.3)';
     ctx.fillRect(plot.x, plot.y, plot.width, plot.height);
-
-    // === GRILLA TIPO PAPEL ECG (1mm/5mm) ===
-    // Minor 1mm = 20px (subdivisiones cálidas)
-    ctx.strokeStyle = 'rgba(220, 60, 60, 0.07)';
+    
+    ctx.strokeStyle = COLORS.GRID_MINOR;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     for (let x = plot.x; x <= plot.x + plot.width; x += 20) {
-      ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.height);
+      ctx.moveTo(x, plot.y);
+      ctx.lineTo(x, plot.y + plot.height);
     }
     for (let y = plot.y; y <= plot.y + plot.height; y += 20) {
-      ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.width, y);
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.width, y);
     }
     ctx.stroke();
-
-    // Major 5mm = 100px
-    ctx.strokeStyle = 'rgba(220, 60, 60, 0.18)';
+    
+    ctx.strokeStyle = COLORS.GRID_MAJOR;
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = plot.x; x <= plot.x + plot.width; x += 100) {
-      ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.height);
+      ctx.moveTo(x, plot.y);
+      ctx.lineTo(x, plot.y + plot.height);
     }
     for (let y = plot.y; y <= plot.y + plot.height; y += 100) {
-      ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.width, y);
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.width, y);
     }
     ctx.stroke();
-
-    // Cada 500px (~25mm = 1s a 25mm/s) — línea verde-azul más visible
-    ctx.strokeStyle = 'rgba(34, 197, 94, 0.22)';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    for (let x = plot.x; x <= plot.x + plot.width; x += 500) {
-      ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.height);
-    }
-    ctx.stroke();
-
-    // Marcas de segundos arriba de la grilla
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.55)';
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.textAlign = 'center';
-    const secs = CONFIG.WINDOW_MS / 1000;
-    for (let s = 0; s <= secs; s++) {
-      const x = plot.x + plot.width - (s / secs) * plot.width;
-      ctx.fillRect(x - 0.5, plot.y - 6, 1, 6);
-      if (s % 1 === 0) {
-        ctx.fillText(`${s}s`, x, plot.y - 9);
-      }
-    }
-
-    // Baseline
+    
     ctx.strokeStyle = COLORS.BASELINE;
-    ctx.lineWidth = 1.2;
-    ctx.setLineDash([10, 6]);
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([8, 4]);
     ctx.beginPath();
     ctx.moveTo(plot.x, plot.centerY);
     ctx.lineTo(plot.x + plot.width, plot.centerY);
     ctx.stroke();
     ctx.setLineDash([]);
-
-    // Borde con esquinas en escuadra (corner ticks)
-    ctx.strokeStyle = 'rgba(34, 197, 94, 0.35)';
+    
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.3)';
     ctx.lineWidth = 1;
     ctx.strokeRect(plot.x, plot.y, plot.width, plot.height);
-    ctx.strokeStyle = 'rgba(34, 197, 94, 0.7)';
-    ctx.lineWidth = 2;
-    const ct = 22;
-    ctx.beginPath();
-    // top-left
-    ctx.moveTo(plot.x, plot.y + ct); ctx.lineTo(plot.x, plot.y); ctx.lineTo(plot.x + ct, plot.y);
-    // top-right
-    ctx.moveTo(plot.x + plot.width - ct, plot.y); ctx.lineTo(plot.x + plot.width, plot.y); ctx.lineTo(plot.x + plot.width, plot.y + ct);
-    // bottom-left
-    ctx.moveTo(plot.x, plot.y + plot.height - ct); ctx.lineTo(plot.x, plot.y + plot.height); ctx.lineTo(plot.x + ct, plot.y + plot.height);
-    // bottom-right
-    ctx.moveTo(plot.x + plot.width - ct, plot.y + plot.height); ctx.lineTo(plot.x + plot.width, plot.y + plot.height); ctx.lineTo(plot.x + plot.width, plot.y + plot.height - ct);
-    ctx.stroke();
   }, [getPlotArea]);
 
   const drawAmplitudeScale = useCallback((ctx: CanvasRenderingContext2D) => {
@@ -366,278 +264,6 @@ const PPGSignalMeter = ({
     ctx.fillStyle = COLORS.TEXT_PRIMARY;
     ctx.fillText('25mm/s', plot.x + plot.width, plot.y + plot.height + 40);
   }, [getPlotArea]);
-
-  // === PANEL INFERIOR TIPO MONITOR CARDÍACO ===
-  // Muestra: reloj, elapsed, sweep, gain, PR, PI, MAP, PP, RR mean, min/max BPM,
-  // RR(resp est), límites de alarma. Todo derivado de props/refs ya disponibles.
-  const drawClinicalPanel = useCallback((ctx: CanvasRenderingContext2D) => {
-    const { CANVAS_WIDTH: W, CANVAS_HEIGHT: H, COLORS } = CONFIG;
-    const { bpm, spo2, rrIntervals, perfusionIndex, pressure, elapsedTime } = propsRef.current;
-
-    const panelH = 110;
-    const panelY = H - panelH - 50;
-    const panelX = 80;
-    const panelW = W - 160;
-
-    // Fondo del panel
-    const grad = ctx.createLinearGradient(0, panelY, 0, panelY + panelH);
-    grad.addColorStop(0, 'rgba(8, 16, 28, 0.92)');
-    grad.addColorStop(1, 'rgba(4, 8, 15, 0.95)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(panelX, panelY, panelW, panelH);
-    ctx.strokeStyle = 'rgba(34, 197, 94, 0.35)';
-    ctx.lineWidth = 1.2;
-    ctx.strokeRect(panelX, panelY, panelW, panelH);
-
-    // Header strip
-    ctx.fillStyle = 'rgba(34, 197, 94, 0.12)';
-    ctx.fillRect(panelX, panelY, panelW, 22);
-    ctx.font = 'bold 11px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_PRIMARY;
-    ctx.textAlign = 'left';
-    const headerLabel = propsRef.current.isAcquiring
-      ? '● ADQUISICIÓN · CONFIRMANDO COBERTURA Y PERFIL DE DEDO…'
-      : '● MONITOR · PARÁMETROS HEMODINÁMICOS';
-    ctx.fillStyle = propsRef.current.isAcquiring ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
-    ctx.fillText(headerLabel, panelX + 10, panelY + 15);
-
-    // Reloj + elapsed (derecha del header)
-    const d = new Date();
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    const ss = String(d.getSeconds()).padStart(2, '0');
-    const elapsedStr = (() => {
-      const t = Math.max(0, Math.floor(elapsedTime || 0));
-      const m = String(Math.floor(t / 60)).padStart(2, '0');
-      const s = String(t % 60).padStart(2, '0');
-      return `${m}:${s}`;
-    })();
-    ctx.textAlign = 'right';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText(`⏱ ${elapsedStr} · ${hh}:${mm}:${ss}`, panelX + panelW - 10, panelY + 15);
-
-    // === Bloque 1: Pulse Rate + min/max + mean RR ===
-    const colW = panelW / 4;
-    const rowY1 = panelY + 38;
-    const rowY2 = panelY + 60;
-    const rowY3 = panelY + 82;
-    const rowY4 = panelY + 100;
-
-    const drawCell = (cx: number, label: string, value: string, color: string, sub?: string) => {
-      ctx.font = '9px "SF Mono", Consolas, monospace';
-      ctx.fillStyle = COLORS.TEXT_SECONDARY;
-      ctx.textAlign = 'left';
-      ctx.fillText(label, cx + 10, rowY1);
-      ctx.font = 'bold 22px "SF Mono", Consolas, monospace';
-      ctx.fillStyle = color;
-      ctx.fillText(value, cx + 10, rowY2);
-      if (sub) {
-        ctx.font = '9px "SF Mono", Consolas, monospace';
-        ctx.fillStyle = COLORS.TEXT_SECONDARY;
-        ctx.fillText(sub, cx + 10, rowY3);
-      }
-    };
-
-    // BPM stats
-    const stats = bpmStatsRef.current;
-    const meanBpm = stats.n > 0 ? Math.round(stats.sum / stats.n) : 0;
-    const meanRR = rrIntervals && rrIntervals.length > 0
-      ? Math.round(rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length)
-      : 0;
-
-    // Resp rate estimate ~ from RR oscillation (very coarse): use RMSSD/SDNN ratio scale
-    // fallback: assume 12-20 if we have enough RR
-    let respRate = 0;
-    if (rrIntervals && rrIntervals.length >= 4) {
-      const m = rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length;
-      // approximate respiratory cycles: count zero-crossings of (rr - mean)
-      let zc = 0;
-      for (let i = 1; i < rrIntervals.length; i++) {
-        if ((rrIntervals[i - 1] - m) * (rrIntervals[i] - m) < 0) zc++;
-      }
-      const cycles = zc / 2;
-      const totalSec = rrIntervals.reduce((a, b) => a + b, 0) / 1000;
-      if (totalSec > 0) respRate = Math.round((cycles / totalSec) * 60);
-      if (respRate < 6 || respRate > 40) respRate = 0;
-    }
-
-    // PR (cell 0)
-    const prColor = bpm <= 0 ? COLORS.TEXT_SECONDARY : (bpm < 60 || bpm > 100) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
-    drawCell(panelX + colW * 0, 'PR · PULSE RATE', bpm > 0 ? `${Math.round(bpm)}` : '--', prColor, 'lím 50–120 bpm');
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText(`min ${stats.min || '--'}  max ${stats.max || '--'}  x̄ ${meanBpm || '--'}`, panelX + colW * 0 + 10, rowY4);
-
-    // PI · Perfusion Index (cell 1)
-    const piVal = perfusionIndex || 0;
-    const piColor = piVal >= 0.02 ? COLORS.TEXT_PRIMARY : piVal >= 0.005 ? COLORS.TEXT_WARNING : COLORS.TEXT_DANGER;
-    drawCell(panelX + colW * 1, 'PI · PERFUSIÓN', piVal > 0 ? (piVal * 100).toFixed(2) : '--', piColor, '% AC/DC');
-    // mini barra
-    const piBarX = panelX + colW * 1 + 10;
-    const piBarY = rowY4 - 3;
-    ctx.fillStyle = 'rgba(255,255,255,0.08)';
-    ctx.fillRect(piBarX, piBarY, 110, 5);
-    const piPct = Math.min(1, piVal / 0.05);
-    ctx.fillStyle = piColor;
-    ctx.fillRect(piBarX, piBarY, 110 * piPct, 5);
-
-    // MAP / PP (cell 2) — derivados por el módulo único `deriveMapAndPp`
-    // (fórmulas estándar SBP/DBP). Si la entrada no es coherente, devuelve 0.
-    const sys = pressure?.systolic || 0;
-    const dia = pressure?.diastolic || 0;
-    const derived = deriveMapAndPp({ systolic: sys, diastolic: dia });
-    const map = derived.valid ? Math.round(derived.map) : 0;
-    const pp = derived.valid ? Math.round(derived.pp) : 0;
-    const mapColor = map === 0 ? COLORS.TEXT_SECONDARY : (map < 65 || map > 110) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
-    drawCell(panelX + colW * 2, 'MAP · TAM', map > 0 ? `${map}` : '--', mapColor, 'mmHg · objetivo 70–105');
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText(`PP ${pp > 0 ? pp + ' mmHg' : '--'}  ·  ${sys || '--'}/${dia || '--'}`, panelX + colW * 2 + 10, rowY4);
-
-    // RR resp · IBI (cell 3)
-    const rrColor = respRate === 0 ? COLORS.TEXT_SECONDARY : (respRate < 12 || respRate > 20) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
-    drawCell(panelX + colW * 3, 'RESP (EST.)', respRate > 0 ? `${respRate}` : '--', rrColor, 'rpm · derivado RR');
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.fillText(`IBI x̄ ${meanRR > 0 ? meanRR + 'ms' : '--'}  ·  SpO₂ ${spo2 > 0 ? spo2.toFixed(0) + '%' : '--'}`, panelX + colW * 3 + 10, rowY4);
-
-    // Separadores verticales entre celdas
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      ctx.beginPath();
-      ctx.moveTo(panelX + colW * i, panelY + 26);
-      ctx.lineTo(panelX + colW * i, panelY + panelH - 6);
-      ctx.stroke();
-    }
-
-    // === Trend de PR con eje temporal real (segundos) y marcas de cambios
-    // de parámetros del algoritmo (stride). Esto reemplaza la franja basada
-    // en índice de muestra por una con tiempo absoluto: cada punto se
-    // posiciona según (tNow - p.t) sobre una ventana fija (60s).
-    const trend = bpmTrendRef.current;
-    const tx = panelX;
-    const ty = panelY + panelH + 6;
-    const tw = panelW;
-    const th = 38; // un poco más alto para acomodar el eje
-    const labelW = 96;
-    const plotX0 = tx + labelW;
-    const plotX1 = tx + tw - 6;
-    const plotW = plotX1 - plotX0;
-    const plotY0 = ty + 14;
-    const plotY1 = ty + th - 8;
-    const plotH = plotY1 - plotY0;
-    const WINDOW_S = 60; // ventana temporal mostrada
-    const tNow = Date.now();
-    const tMinMs = tNow - WINDOW_S * 1000;
-
-    // Fondo y borde
-    ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
-    ctx.fillRect(tx, ty, tw, th);
-    ctx.strokeStyle = 'rgba(34, 197, 94, 0.25)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(tx, ty, tw, th);
-
-    // Título + escala
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.textAlign = 'left';
-    ctx.fillText('TENDENCIA PR · 60 s', tx + 6, ty + 11);
-
-    // Ticks de tiempo (cada 15s) en el eje X
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
-    ctx.fillStyle = COLORS.SCALE_TEXT;
-    ctx.font = '8px "SF Mono", Consolas, monospace';
-    ctx.textAlign = 'center';
-    for (let s = 0; s <= WINDOW_S; s += 15) {
-      const px = plotX0 + ((WINDOW_S - s) / WINDOW_S) * plotW;
-      ctx.beginPath();
-      ctx.moveTo(px, plotY1);
-      ctx.lineTo(px, plotY1 + 2);
-      ctx.stroke();
-      ctx.fillText(s === 0 ? 'ahora' : `-${s}s`, px, plotY1 + 11);
-    }
-
-    if (trend.length >= 2) {
-      const visible = trend.filter(p => p.t >= tMinMs);
-      if (visible.length >= 2) {
-        const minB = Math.min(...visible.map(p => p.bpm));
-        const maxB = Math.max(...visible.map(p => p.bpm));
-        const range = Math.max(10, maxB - minB);
-
-        // Línea de tendencia
-        ctx.beginPath();
-        ctx.strokeStyle = COLORS.TEXT_PRIMARY;
-        ctx.lineWidth = 1.5;
-        visible.forEach((p, i) => {
-          const tFrac = (p.t - tMinMs) / (WINDOW_S * 1000);
-          const px = plotX0 + tFrac * plotW;
-          const py = plotY0 + plotH - ((p.bpm - minB) / range) * plotH;
-          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-        });
-        ctx.stroke();
-
-        ctx.textAlign = 'right';
-        ctx.font = '9px "SF Mono", Consolas, monospace';
-        ctx.fillStyle = COLORS.TEXT_SECONDARY;
-        ctx.fillText(`${Math.round(minB)}–${Math.round(maxB)} bpm`, tx + tw - 6, ty + 11);
-      }
-    }
-
-    // Marcas verticales por cambios de parámetros del algoritmo (stride).
-    // Línea discontinua + etiqueta corta en el borde superior del plot.
-    const visibleMarks = algoMarksRef.current.filter(m => m.t >= tMinMs);
-    if (visibleMarks.length > 0) {
-      ctx.save();
-      ctx.setLineDash([3, 3]);
-      ctx.lineWidth = 1;
-      ctx.font = '8px "SF Mono", Consolas, monospace';
-      visibleMarks.forEach(m => {
-        const tFrac = (m.t - tMinMs) / (WINDOW_S * 1000);
-        const px = plotX0 + tFrac * plotW;
-        ctx.strokeStyle = m.kind === 'stride'
-          ? COLORS.TEXT_WARNING
-          : COLORS.SYSTOLIC_MARKER;
-        ctx.beginPath();
-        ctx.moveTo(px, plotY0);
-        ctx.lineTo(px, plotY1);
-        ctx.stroke();
-        ctx.fillStyle = COLORS.TEXT_WARNING;
-        ctx.textAlign = 'left';
-        ctx.fillText(m.label, px + 2, plotY0 + 8);
-      });
-      ctx.restore();
-    }
-
-    // === Footer técnico: sweep, gain, filtro, alarmas + fuente MAP/PP ===
-    ctx.font = '9px "SF Mono", Consolas, monospace';
-    ctx.fillStyle = COLORS.TEXT_SECONDARY;
-    ctx.textAlign = 'left';
-    const fy = H - 8;
-    const strideTxt = propsRef.current.currentStride
-      ? `STRIDE ${propsRef.current.currentStride}`
-      : 'STRIDE auto';
-    ctx.fillText(
-      `SWEEP 25mm/s   GAIN ×1.0   FILTRO 0.5–4 Hz   ${strideTxt}   FUENTE PPG/RG`,
-      panelX + 10, fy,
-    );
-    // Línea adicional con el origen explícito de MAP/PP (a 14 px debajo del
-    // panel principal pero todavía visible dentro del canvas).
-    ctx.fillStyle = COLORS.SCALE_TEXT;
-    ctx.fillText(PRESSURE_SOURCE_NOTE, panelX + 10, fy - 14);
-    ctx.textAlign = 'right';
-    const alarms: string[] = [];
-    if (bpm > 0 && (bpm < 50 || bpm > 120)) alarms.push(`HR!`);
-    if (spo2 > 0 && spo2 < 92) alarms.push(`SpO₂!`);
-    if (map > 0 && (map < 65 || map > 110)) alarms.push(`MAP!`);
-    if (alarms.length > 0) {
-      ctx.fillStyle = COLORS.TEXT_DANGER;
-      ctx.fillText(`⚠ ALARMAS: ${alarms.join(' ')}`, panelX + panelW - 10, fy);
-    } else {
-      ctx.fillStyle = COLORS.TEXT_PRIMARY;
-      ctx.fillText('● SIN ALARMAS', panelX + panelW - 10, fy);
-    }
-  }, []);
 
   const drawVitalInfo = useCallback((ctx: CanvasRenderingContext2D, now: number) => {
     const { CANVAS_WIDTH: W, COLORS } = CONFIG;
@@ -836,7 +462,6 @@ const PPGSignalMeter = ({
       drawAmplitudeScale(ctx);
       drawTimeScale(ctx);
       drawVitalInfo(ctx, now);
-      drawClinicalPanel(ctx);
       
       if (preserve && !detected) {
         animationRef.current = requestAnimationFrame(render);
@@ -1241,7 +866,7 @@ const PPGSignalMeter = ({
       isRunningRef.current = false;
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [drawGrid, drawAmplitudeScale, drawTimeScale, drawVitalInfo, drawClinicalPanel, getPlotArea]);
+  }, [drawGrid, drawAmplitudeScale, drawTimeScale, drawVitalInfo, getPlotArea]);
 
   const handleReset = useCallback(() => {
     dataBufferRef.current?.clear();
