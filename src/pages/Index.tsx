@@ -15,6 +15,24 @@ import { ppgPerf } from "@/utils/logger";
 import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
 import type { BackpressureConfig } from "@/lib/perf/backpressureConfig";
 import { VitalsSanityChecker } from "@/lib/sanity/vitalsSanity";
+import {
+  SANITY_PROFILES,
+  getActiveProfileId,
+  setActiveProfileId,
+  getCustomOverrides,
+  setCustomOverrides,
+  resolveProfile,
+} from "@/lib/sanity/sanityProfiles";
+import {
+  startSession as startAuditSession,
+  setActiveProfile as setAuditProfile,
+  recordVerdict as recordAuditVerdict,
+  clearLog as clearAuditLog,
+  downloadJSON as downloadAuditJSON,
+  downloadCSV as downloadAuditCSV,
+  getEntries as getAuditEntries,
+  getNegativeCount as getAuditNegativeCount,
+} from "@/lib/sanity/sanityAuditLog";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -68,10 +86,64 @@ const Index = () => {
   const isProcessingRef = useRef(false);
   // anti-sim-allow: reason="Wires up the runtime detector for fabricated vitals streams." ref="GUARDRAIL-DIST-RUNTIME"
   // Runtime guardrail: detect implausible vitals streams.
-  const bpmSanityRef = useRef(new VitalsSanityChecker({ min: 30, max: 220 }));
+  const [sanityProfileId, setSanityProfileId] = useState<string>(() => getActiveProfileId());
+  const [customJSON, setCustomJSON] = useState<string>(() => {
+    const o = getCustomOverrides();
+    return Object.keys(o).length ? JSON.stringify(o, null, 2) : "";
+  });
+  const [auditNegativeCount, setAuditNegativeCount] = useState(0);
+  const bpmSanityRef = useRef<VitalsSanityChecker>(
+    new VitalsSanityChecker({
+      ...resolveProfile(getActiveProfileId()).effective,
+      onVerdict: (sample, verdict, win) => {
+        recordAuditVerdict(sample, verdict, win);
+        if (!verdict.ok) setAuditNegativeCount(getAuditNegativeCount());
+      },
+    })
+  );
   const sanityErrorRef = useRef<string | null>(null);
   const sanityToastAtRef = useRef<number>(0);
   const [sanityError, setSanityError] = useState<string | null>(null);
+
+  const rebuildSanityChecker = useCallback((profileId: string) => {
+    const { effective } = resolveProfile(profileId);
+    bpmSanityRef.current = new VitalsSanityChecker({
+      ...effective,
+      onVerdict: (sample, verdict, win) => {
+        recordAuditVerdict(sample, verdict, win);
+        if (!verdict.ok) setAuditNegativeCount(getAuditNegativeCount());
+      },
+    });
+    setAuditProfile(profileId);
+  }, []);
+
+  const handleProfileChange = useCallback((id: string) => {
+    setSanityProfileId(id);
+    setActiveProfileId(id);
+    rebuildSanityChecker(id);
+  }, [rebuildSanityChecker]);
+
+  const handleCustomApply = useCallback(() => {
+    const txt = customJSON.trim();
+    try {
+      const parsed = txt ? JSON.parse(txt) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        setCustomOverrides(parsed);
+        rebuildSanityChecker(sanityProfileId);
+        toast({ title: "✓ Umbrales aplicados", description: "Configuración personalizada activa." });
+      } else {
+        throw new Error("JSON debe ser un objeto");
+      }
+    } catch (e) {
+      toast({ variant: "destructive", title: "JSON inválido", description: String((e as Error).message ?? e) });
+    }
+  }, [customJSON, sanityProfileId, rebuildSanityChecker]);
+
+  const handleCustomClear = useCallback(() => {
+    setCustomOverrides(null);
+    setCustomJSON("");
+    rebuildSanityChecker(sanityProfileId);
+  }, [sanityProfileId, rebuildSanityChecker]);
   
   // HOOKS DE PROCESAMIENTO
   const { 
@@ -349,6 +421,11 @@ const Index = () => {
     measurementTimerRef.current = window.setInterval(() => {
       setElapsedTime(prev => prev + 1);
     }, 1000);
+
+    // Audit log: nueva sesión
+    const sid = `${Date.now().toString(36)}-${Math.floor(performance.now()).toString(36)}`;
+    startAuditSession(sid, sanityProfileId);
+    setAuditNegativeCount(0);
     
     // Calibración automática
     setIsCalibrating(true);
