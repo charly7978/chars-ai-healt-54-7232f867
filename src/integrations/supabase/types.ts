@@ -157,6 +157,57 @@ export type Database = {
           },
         ]
       }
+      perf_snapshots: {
+        Row: {
+          app_version: string | null
+          camera: Json | null
+          consent_given: boolean
+          created_at: string
+          device: Json | null
+          dropped_estimate: number | null
+          fps: number | null
+          frames: number | null
+          id: string
+          jitter_ms: number | null
+          pipeline: Json | null
+          session_id: string
+          stages: Json | null
+          user_id: string
+        }
+        Insert: {
+          app_version?: string | null
+          camera?: Json | null
+          consent_given?: boolean
+          created_at?: string
+          device?: Json | null
+          dropped_estimate?: number | null
+          fps?: number | null
+          frames?: number | null
+          id?: string
+          jitter_ms?: number | null
+          pipeline?: Json | null
+          session_id: string
+          stages?: Json | null
+          user_id: string
+        }
+        Update: {
+          app_version?: string | null
+          camera?: Json | null
+          consent_given?: boolean
+          created_at?: string
+          device?: Json | null
+          dropped_estimate?: number | null
+          fps?: number | null
+          frames?: number | null
+          id?: string
+          jitter_ms?: number | null
+          pipeline?: Json | null
+          session_id?: string
+          stages?: Json | null
+          user_id?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           created_at: string
