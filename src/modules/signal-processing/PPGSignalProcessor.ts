@@ -75,8 +75,9 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private smoothedBlue = 0;
   private smoothedCoverage = 0;
   private smoothedFingerScore = 0;
-  private readonly RGB_SMOOTH_ALPHA = 0.05;       // era 0.10 — más suave
-  private readonly COVERAGE_SMOOTH_ALPHA = 0.06;  // era 0.12 — más suave
+  // Más rápido para adquisición real (antes 0.05/0.06 — bloqueaba detección de dedo varios segundos)
+  private readonly RGB_SMOOTH_ALPHA = 0.18;
+  private readonly COVERAGE_SMOOTH_ALPHA = 0.22;
 
   // IMU / Motion
   private motionScore = 0;
@@ -325,15 +326,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         notBlownOut;
       return maintainContact;
     } else {
-      // ACQUIRE contact — strict hemoglobin thresholds
+      // ACQUIRE contact — firma hemoglobina realista con flash:
+      // mantenemos exigencia clínica pero sin chicken-and-egg en fingerScore.
       const acquireContact =
-        r > 80 &&
-        rgRatio > 1.2 &&
-        redDominance > 20 &&
-        totalIntensity > 120 && totalIntensity < 760 &&
-        this.smoothedCoverage > 0.35 &&
-        this.smoothedFingerScore > 0.40 &&
-        this.motionScore < 1.5 &&
+        r > 70 &&
+        rgRatio > 1.12 &&
+        redDominance > 14 &&
+        totalIntensity > 110 &&
+        this.smoothedCoverage > 0.20 &&
+        this.smoothedFingerScore > 0.20 &&
+        this.motionScore < 2.0 &&
         notBlownOut;
       return acquireContact;
     }
@@ -432,15 +434,16 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       return { rawRed: 0, rawGreen: 0, rawBlue: 0, coverageRatio: 0, fingerScore: 0 };
     }
 
+    // Tile válido por hemoglobina real (independiente de combinedScore EMA,
+    // así no hay chicken-and-egg al arrancar la sesión)
     const fingerTiles = averagedTiles.filter((tile) =>
       tile.red > 55 &&
-      tile.total > 120 &&
-      tile.redDominance > 12 &&
-      tile.rednessRatio > 1.08 &&
-      tile.combinedScore > 0.42
+      tile.total > 110 &&
+      tile.redDominance > 10 &&
+      tile.rednessRatio > 1.06
     );
 
-    const selectedTiles = fingerTiles.length >= 5
+    const selectedTiles = fingerTiles.length >= 3
       ? fingerTiles
       : averagedTiles;
 
@@ -454,10 +457,19 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       return tw > 0 ? ws / tw : averagedTiles.reduce((s, t) => s + t[channel], 0) / averagedTiles.length;
     };
 
-    const coverageRatio = fingerTiles.length / averagedTiles.length;
-    const avgFingerScore = fingerTiles.length > 0
-      ? fingerTiles.reduce((s, t) => s + t.combinedScore, 0) / fingerTiles.length
-      : 0;
+    const coverageRatio = fingerTiles.length / Math.max(1, averagedTiles.length);
+    // fingerScore robusto: usa frameScore (sin EMA) cuando hay fingerTiles,
+    // si no, derivar de la mejor tile candidata para no quedar atascado en 0.
+    let avgFingerScore = 0;
+    if (fingerTiles.length > 0) {
+      avgFingerScore =
+        fingerTiles.reduce((s, t) => s + Math.max(t.frameScore, t.combinedScore), 0) /
+        fingerTiles.length;
+    } else if (averagedTiles.length > 0) {
+      // Tomar el mejor tile candidato como semilla parcial (no inventa, refleja el ROI real)
+      const bestFrame = Math.max(...averagedTiles.map((t) => t.frameScore));
+      avgFingerScore = bestFrame * 0.5; // partial credit — permite ramp-up sin saturar
+    }
 
     return {
       rawRed: weightedAverage('red'),

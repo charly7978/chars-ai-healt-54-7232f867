@@ -447,7 +447,10 @@ const Index = () => {
       lastSignal.timestamp
     );
 
-    setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
+    // Mostrar onda en cuanto haya contacto (incluso UNSTABLE) — sin esto el monitor
+    // se ve plano hasta llegar a STABLE_CONTACT y el usuario cree que no mide.
+    const hasAnyContact = contactState !== 'NO_CONTACT';
+    setHeartbeatSignal(hasAnyContact ? heartBeatResult.filteredValue : 0);
 
     if (!stableHumanSignal) {
       unstableFrameCounter.current++;
