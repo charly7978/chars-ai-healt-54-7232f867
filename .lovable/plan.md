@@ -1,89 +1,108 @@
-# Plan: Pipeline PPG Profesional — Detección + Extracción de nivel forense
+
+# Plan: Telemetría de rendimiento + cierre de optimizaciones del pipeline
 
 ## Objetivo
-Integrar el pipeline avanzado descrito (Adaptive ROI, PCA fusion, SQI por momentos, Web Worker aislado, frame timing real, exposure classifier, ring buffers Float32) **sin romper** lo que ya funciona (BPM detection, VitalSignsProcessor, BP, UI estética actual). Monitor cardíaco a 100% pantalla mostrando toda la actividad incluidas arritmias. Cero simulación.
+1. Persistir y enviar (con consentimiento) snapshots de `PerfTracker` para depurar en campo.
+2. Cerrar las optimizaciones reales pendientes que hoy impiden que la app use el 100% del hardware/software.
 
-## Alcance estricto (NO tocar)
-- Estética visual de PPGSignalMeter (oscilloscope look ya aprobado) — solo ajustar a 100vh/100vw.
-- BloodPressureProcessor, VitalSignsProcessor, arrhythmia-processor — siguen siendo consumidores aguas abajo.
-- Auth, Supabase, save measurement, edge function de IA.
-- HeartBeatProcessor (se conecta como consumidor del nuevo pipeline).
+Sin promesas vacías: solo lo que realmente mejora medición y rendimiento. No se altera la estética.
 
-## Cambios técnicos
+---
 
-### 1. Nueva capa `src/lib/ppg/` (módulos puros, tree-shakeables)
-```
-src/lib/ppg/
-  types.ts                      # PpgCaptureState, FrameSample, PpgSignalSnapshot, PPG_CONFIG
-  camera/
-    cameraController.ts         # Constraints en fases, torch tolerante, lock exposure/WB/focus
-    cameraCapabilities.ts       # Serializa caps/settings para diagnóstico
-  capture/
-    frameLoop.ts                # rVFC con metadata.presentedFrames + jitter tracking
-    downsample.ts               # Canvas 160x120 willReadFrequently:true
-  detection/
-    fingerDetector.ts           # Heurística píxel a píxel: luma/chroma/rn/clipping
-    exposureClassifier.ts       # too-dark/too-bright/too-much-pressure/etc
-  roi/
-    adaptiveRoi.ts              # Grid 10x8, EMA α=0.15, top-30% tiles, center prior
-  signal/
-    ringBuffer.ts               # FloatRingBuffer pre-asignado
-    normalization.ts            # AC/DC + log Beer-Lambert con τ=2.0s
-    filters.ts                  # Biquad Butterworth Direct Form I, fs dinámico
-    signalFusion.ts             # PCA cerrado vía Cardano (eigendecomp 3x3 O(1))
-    sqi.ts                      # Skewness + Kurtosis + PI + clip penalty (Welford)
-  worker/
-    ppgWorker.ts                # Orquesta detection→ROI→normalize→filter→PCA→SQI
-```
+## Parte 1 — Telemetría de rendimiento (PerfTracker → Cloud)
 
-### 2. Integración con código existente
-- **`CameraView.tsx`**: refactor interno usando `CameraController` nuevo, manteniendo mismo API (`onStreamReady`, `isMonitoring`, ref). No cambia UI.
-- **`PPGSignalProcessor.ts`**: convertir en **adapter** que recibe `PpgSignalSnapshot` del worker y emite el `ProcessedSignal` que ya esperan los hooks downstream. Mantiene firma pública (`processFrame`, `getRGBStats`, `start`, `stop`, `calibrate`, `onSignalReady`).
-- **`useSignalProcessor.ts`**: añade hook interno que arranca el worker en lugar de procesar en el main thread; `processFrame(imageData)` queda como fallback. Mismo retorno público.
-- **`Index.tsx`**: usar `requestVideoFrameCallback` con `metadata.mediaTime` (ya existe parcialmente); pasar timestamp real al pipeline.
-- **`HeartBeatProcessor`** y **`VitalSignsProcessor`** consumen `lastSignal.filteredValue` y RGB stats — **sin cambios** salvo asegurar conexión.
+### 1.1 Tabla `perf_snapshots` en Lovable Cloud
+Migración con RLS (`auth.uid() = user_id`):
+- `id uuid PK`, `user_id uuid`, `session_id text`, `created_at timestamptz`
+- `fps numeric`, `jitter_ms numeric`, `dropped_estimate int`, `frames int`
+- `stages jsonb` (mean/p50/p95/max/n por etapa)
+- `device jsonb` (userAgent, hardwareConcurrency, deviceMemory, screen, dpr)
+- `camera jsonb` (resolución real, frameRate, torch, exposureMode, settings reales)
+- `pipeline jsonb` (sqi promedio, contactState ratios, activeSource, pressureState)
+- `app_version text`, `consent_given bool`
 
-### 3. Monitor cardíaco a pantalla completa
-- `PPGSignalMeter.tsx`: ajustar contenedor a `fixed inset-0 w-screen h-screen` con canvas que ocupe 100% del viewport. Mantener estética eléctrica oscilloscope, paneles BPM/SpO2 superpuestos.
-- Renderizar **toda** la actividad: trazo continuo + marcadores de pico + overlay rojo en arritmias (ya existe lógica `isArrhythmia`).
-- Verificar que `Index.tsx` no lo encierre en un wrapper que limite tamaño.
+### 1.2 Hook `usePerfTelemetry`
+- Lee toggle de consentimiento de `localStorage` (`perf_telemetry_consent`).
+- Cada 15 s (configurable) toma `ppgPerf.snapshot()` + métricas del pipeline.
+- Buffer en `IndexedDB` cuando offline; flush al recuperar conexión.
+- Envío vía `supabase.from('perf_snapshots').insert()` (RLS exige user logged-in; si no hay user → solo persiste local).
+- Reset del tracker tras flush exitoso.
 
-### 4. Garantías anti-simulación
-- Toda fuente numérica viene de píxeles reales del frame.
-- Si `fingerScore < 0.55` o SQI < umbral → emit `state: "finger-missing"` y `filtered: 0`, **no** se rellena con valores plausibles.
-- BPM/SpO2/BP se ocultan en UI cuando snapshot.state ≠ "signal-locked".
+### 1.3 UI mínima de consentimiento
+- Switch dentro de un panel de ajustes ya existente (sin cambiar la estética del monitor).
+- Texto claro: "Enviar métricas anónimas de rendimiento para mejorar la app".
+- Default: **off**.
 
-## Detalles técnicos por archivo
+### 1.4 Página/edge function opcional de inspección
+- Edge function `perf-summary` (con verify_jwt) que devuelve agregados por device/sesión para debugging.
 
-**`worker/ppgWorker.ts`** — pipeline por mensaje:
-1. recibir `{data, width, height, t, targetFps}`
-2. `computeFingerMetrics` → fingerScore + RGB global
-3. `AdaptiveRoiSelector.computeRoi` → roiRgb ponderado
-4. push a 3 `FloatRingBuffer` (R,G,B) de capacidad `fps*BUFFER_SECONDS`
-5. `NormalizationPipeline.process(roiRgb)` → AC/DC + logNorm
-6. recompute Biquad coefficients si `|fs - lastFs| > 2 Hz`
-7. `BiquadFilter.process(logNorm.g)` (canal por defecto)
-8. cada N=15 frames: `PcaSignalFusion` sobre últimos 6s → channel selection
-9. `SqiEvaluator.compute` sobre buffer filtrado
-10. `classifyExposure` para hint
-11. `postMessage` snapshot
+---
 
-**`PPGSignalProcessor.ts` (adapter)**:
-- Mantiene interfaz pública.
-- Internamente: spawn worker, recibe snapshots, emite `ProcessedSignal { timestamp, rawValue: snapshot.raw.r, filteredValue: snapshot.filtered, quality: snapshot.sqi, fingerDetected: snapshot.fingerScore>0.55, roi:{...} }`.
-- `getRGBStats()` devuelve buffers ring para SpO2.
+## Parte 2 — Cierre de optimizaciones reales del pipeline
 
-**Arritmias**: el `arrhythmia-processor` y `HeartBeatProcessor` siguen recibiendo `filteredValue` continuo → detectan picos y arritmias como hoy. El monitor las pinta en rojo (ya implementado).
+Solo cosas que mueven la aguja. Nada cosmético.
 
-## Verificación post-implementación
-1. Build OK (TypeScript estricto).
-2. Sin frame en cámara → snapshot.state="finger-missing", filtered=0, BPM oculto.
-3. Con dedo → state=signal-locked en <5s, SQI>50, BPM aparece.
-4. Monitor ocupa 100vh×100vw.
-5. Arritmias se pintan rojo cuando arrhythmiaStatus contiene "ARRITMIA".
-6. Sin valores fake (logs muestran ceros cuando no hay contacto).
+### 2.1 Frame timing real con `VideoFrameCallbackMetadata`
+- Verificar que `PPGSignalProcessor` reciba `mediaTime` del frame y lo use como `timestamp` (no `performance.now()` interno).
+- Estimar `fs` real vía EWMA de `Δmediatime` y propagarlo a `BandpassFilter` (recoef cuando cambie >5%).
 
-## Lo que NO se hace en esta tarea
-- Cambios a BP, SpO2, glucosa, lípidos (ya migrados en commits anteriores).
-- Rediseño visual del oscilloscope (solo full-screen).
-- Validación clínica formal.
+### 2.2 OffscreenCanvas + Web Worker para extracción ROI
+- Mover el loop de píxeles (extracción RGB por tile + clipping ratio) a un Worker con `OffscreenCanvas` cuando el navegador lo soporte.
+- Fallback: main thread como hoy.
+- Beneficio: libera el hilo principal en móviles, reduce jitter.
+
+### 2.3 Camera lock en fases con verificación real
+- Tras `applyConstraints`, leer `track.getSettings()` y registrar qué quedó activo (exposureMode, focusMode, whiteBalanceMode, frameRate, iso si aplica).
+- Si una fase falla, degradación silenciosa + log a telemetría.
+- Exponer `cameraDiagnostics` al snapshot de telemetría.
+
+### 2.4 Ring buffers Float32Array donde aún haya `push/shift`
+- Auditar `PPGSignalProcessor` y `HeartBeatProcessor` para reemplazar arrays mutables en hot path.
+
+### 2.5 Métricas instrumentadas (spans) ya en su sitio
+- Confirmar `ppgPerf.start('roi')`, `'filter'`, `'sqi'`, `'peak'` envuelven cada etapa.
+- Añadir span `'capture'` en `requestVideoFrameCallback` para medir copy de píxeles.
+
+### 2.6 Backpressure
+- Si `ppgPerf.snapshot().fps < 20` durante >3s, reducir tamaño de ROI fina (downscale 0.75) automáticamente; restaurar cuando vuelva a >25fps.
+- Registrar evento en telemetría.
+
+---
+
+## Parte 3 — Verificación
+
+- Tests unitarios nuevos:
+  - `usePerfTelemetry`: flush, retry, respeto del toggle.
+  - Backpressure: simulación de fps bajo activa downscale.
+- Script `check:orphans` y CI ya existentes corren igual.
+- QA manual: medición de 60s con consentimiento on → fila en `perf_snapshots`; con consentimiento off → 0 filas.
+
+---
+
+## Detalles técnicos
+
+**Archivos a crear:**
+- `supabase/migrations/<ts>_perf_snapshots.sql`
+- `src/hooks/usePerfTelemetry.ts`
+- `src/lib/perf/indexedDbBuffer.ts`
+- `src/workers/roi.worker.ts` (si OffscreenCanvas disponible)
+- `supabase/functions/perf-summary/index.ts` (opcional)
+
+**Archivos a editar:**
+- `src/utils/logger.ts` — método `drainSnapshot()` que devuelve y resetea atómicamente.
+- `src/modules/signal-processing/PPGSignalProcessor.ts` — spans, fs real, hook al worker.
+- `src/components/CameraView.tsx` — diagnostics y lock por fases.
+- `src/pages/Index.tsx` — montar `usePerfTelemetry`, span `'capture'`, toggle.
+
+**Sin tocar estética**: el toggle va en un panel de ajustes plegable existente; el monitor cardiaco no cambia.
+
+**Privacidad**: nada de PII. user_id solo si está logueado; sin él, datos quedan en IndexedDB local.
+
+---
+
+## Lo que NO hago (para no inflar el plan)
+- No prometo precisión clínica de SpO2/BP — eso no se arregla con telemetría.
+- No agrego servicios externos (PostHog/Sentry) salvo que lo pidas explícitamente.
+- No reescribo el HeartBeatProcessor — solo audito ring buffers en hot path.
+
+¿Apruebo y arranco?
