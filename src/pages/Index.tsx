@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Heart, AlertTriangle, Activity, X, Shield, Clock, CheckCircle2, Brain, Loader2 } from "lucide-react";
+import { Heart, AlertTriangle, Activity, X, Shield, Clock, CheckCircle2, Brain, Loader2, Settings as SettingsIcon } from "lucide-react";
 import { playCompletionSound } from "@/utils/soundUtils";
 import VitalSign from "@/components/VitalSign";
 import CameraView, { CameraViewHandle } from "@/components/CameraView";
@@ -11,6 +11,9 @@ import { useHealthAnalysis } from "@/hooks/useHealthAnalysis";
 import PPGSignalMeter from "@/components/PPGSignalMeter";
 import { VitalSignsResult } from "@/modules/vital-signs/VitalSignsProcessor";
 import { toast } from "@/components/ui/use-toast";
+import { ppgPerf } from "@/utils/logger";
+import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
+import type { BackpressureConfig } from "@/lib/perf/backpressureConfig";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -72,11 +75,14 @@ const Index = () => {
     isProcessing, 
     framesProcessed,
     getRGBStats,
+    getBackpressureState,
+    getBackpressureConfig,
+    setBackpressureConfig,
+    currentStride,
   } = useSignalProcessor();
   
   const { 
     processSignal: processHeartBeat, 
-    setArrhythmiaState,
     reset: resetHeartBeat,
   } = useHeartBeatProcessor();
   
@@ -95,6 +101,78 @@ const Index = () => {
   const { saveMeasurement } = useSaveMeasurement();
   const { analysis, isAnalyzing, analyzeVitals, clearAnalysis } = useHealthAnalysis();
   const [showAIAnalysis, setShowAIAnalysis] = useState(false);
+
+  // ---- Telemetría de rendimiento (opt-in) ----
+  const [telemetryOn, setTelemetryOn] = useState<boolean>(() => getPerfConsent());
+  const [showSettings, setShowSettings] = useState(false);
+  const [bpCfg, setBpCfg] = useState<BackpressureConfig>(() => getBackpressureConfig());
+
+  const updateBp = useCallback((patch: Partial<BackpressureConfig>) => {
+    const next = setBackpressureConfig(patch);
+    setBpCfg(next);
+  }, [setBackpressureConfig]);
+  usePerfTelemetry({
+    enabled: telemetryOn && isMonitoring,
+    intervalMs: 15000,
+    context: {
+      getCamera: () => cameraRef.current?.getDiagnostics?.() ?? {},
+      getPipeline: () => ({
+        sqi: lastSignal?.quality ?? 0,
+        fingerDetected: !!lastSignal?.fingerDetected,
+        perfusionIndex: lastSignal?.perfusionIndex ?? 0,
+        bpm: heartRate,
+        spo2: vitalSigns.spo2,
+        confidence: vitalSigns.measurementConfidence,
+        backpressure: getBackpressureState(),
+      }),
+    },
+  });
+
+  // ---- Aviso visual cuando el backpressure adaptativo cambia el stride ----
+  // Solo notifica cambios *automáticos* (no overrides manuales del usuario)
+  // y solo durante una medición activa, con una ventana de gracia inicial
+  // para no disparar al arrancar.
+  const prevStrideRef = useRef<number>(currentStride);
+  const monitoringStartedAtRef = useRef<number>(0);
+  useEffect(() => {
+    if (isMonitoring && monitoringStartedAtRef.current === 0) {
+      monitoringStartedAtRef.current = performance.now();
+      prevStrideRef.current = currentStride;
+      return;
+    }
+    if (!isMonitoring) {
+      monitoringStartedAtRef.current = 0;
+      prevStrideRef.current = currentStride;
+      return;
+    }
+    const prev = prevStrideRef.current;
+    if (prev === currentStride) return;
+    prevStrideRef.current = currentStride;
+
+    // Ventana de gracia: ignora transiciones en los primeros 2s.
+    if (performance.now() - monitoringStartedAtRef.current < 2000) return;
+
+    // Si el cambio es manual (forceStride definido), no notificamos.
+    try {
+      const cfg = getBackpressureConfig();
+      if (typeof cfg.forceStride === 'number') return;
+      if (!cfg.enabled) return;
+    } catch { return; }
+
+    if (currentStride > prev) {
+      toast({
+        title: "⚡ Modo ahorro activado",
+        description: `Rendimiento bajo detectado, reduciendo muestreo (stride ${currentStride}).`,
+        duration: 3000,
+      });
+    } else {
+      toast({
+        title: "✓ Rendimiento restaurado",
+        description: `Muestreo completo activo (stride ${currentStride}).`,
+        duration: 2500,
+      });
+    }
+  }, [currentStride, isMonitoring, getBackpressureConfig]);
 
   // CANVAS PARA CAPTURA
   useEffect(() => {
@@ -210,8 +288,12 @@ const Index = () => {
     const scheduleNext = (video: HTMLVideoElement) => {
       if (!isProcessingRef.current) return;
       if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback(() => captureOneFrame());
+        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+          ppgPerf.markFrame(metadata);
+          captureOneFrame();
+        });
       } else {
+        ppgPerf.markFrame();
         frameLoopRef.current = requestAnimationFrame(() => captureOneFrame());
       }
     };
@@ -447,10 +529,7 @@ const Index = () => {
       lastSignal.timestamp
     );
 
-    // Mostrar onda en cuanto haya contacto (incluso UNSTABLE) — sin esto el monitor
-    // se ve plano hasta llegar a STABLE_CONTACT y el usuario cree que no mide.
-    const hasAnyContact = contactState !== 'NO_CONTACT';
-    setHeartbeatSignal(hasAnyContact ? heartBeatResult.filteredValue : 0);
+    setHeartbeatSignal(stableHumanSignal ? heartBeatResult.filteredValue : 0);
 
     if (!stableHumanSignal) {
       unstableFrameCounter.current++;
@@ -462,10 +541,7 @@ const Index = () => {
         setBeatMarker(0);
         setRRIntervals([]);
         setArrhythmiaCount("--");
-        if (arrhythmiaDetectedRef.current) {
-          arrhythmiaDetectedRef.current = false;
-          setArrhythmiaState(false);
-        }
+        arrhythmiaDetectedRef.current = false;
         setVitalSigns(prev => (
           prev.measurementConfidence === 'INVALID' &&
           prev.spo2 === 0 &&
@@ -547,7 +623,6 @@ const Index = () => {
           const isArrhythmiaDetected = arrhythmiaStatus.includes("ARRITMIA DETECTADA");
           if (isArrhythmiaDetected !== arrhythmiaDetectedRef.current) {
             arrhythmiaDetectedRef.current = isArrhythmiaDetected;
-            setArrhythmiaState(isArrhythmiaDetected);
 
             if (isArrhythmiaDetected) {
               if (navigator.vibrate) {
@@ -564,7 +639,7 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setArrhythmiaState, setRGBData, getRGBStats]);
+  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setRGBData, getRGBStats]);
 
   // AUTO-FINALIZAR a los 60 segundos (1 minuto)
   useEffect(() => {
@@ -639,6 +714,121 @@ const Index = () => {
           />
         </div>
 
+        {/* AJUSTES — botón discreto top-right */}
+        <button
+          type="button"
+          onClick={() => setShowSettings(true)}
+          aria-label="Ajustes"
+          className="absolute top-2 right-2 z-30 p-2 rounded-full bg-black/40 text-white/70 hover:text-white hover:bg-black/60 transition-colors"
+        >
+          <SettingsIcon className="h-4 w-4" />
+        </button>
+
+        {showSettings && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setShowSettings(false)}>
+            <div className="bg-zinc-900 text-white rounded-lg p-5 w-[90%] max-w-sm border border-white/10" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-semibold">Ajustes</h3>
+                <button onClick={() => setShowSettings(false)} aria-label="Cerrar" className="text-white/60 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={telemetryOn}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setPerfConsent(v);
+                    setTelemetryOn(v);
+                  }}
+                />
+                <span className="text-sm leading-snug">
+                  <span className="font-medium">Métricas anónimas de rendimiento</span>
+                  <span className="block text-white/60 text-xs mt-1">
+                    Envía estadísticas de FPS, latencia y calidad del pipeline para depurar problemas. No incluye datos personales ni mediciones biométricas.
+                  </span>
+                </span>
+              </label>
+
+              <div className="mt-5 pt-4 border-t border-white/10">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={bpCfg.enabled}
+                    onChange={(e) => updateBp({ enabled: e.target.checked, forceStride: undefined })}
+                  />
+                  <span className="text-sm leading-snug">
+                    <span className="font-medium">Backpressure adaptativo</span>
+                    <span className="block text-white/60 text-xs mt-1">
+                      Reduce el muestreo espacial (stride) cuando el dispositivo no llega al fps objetivo. No altera la frecuencia temporal.
+                    </span>
+                  </span>
+                </label>
+
+                <div className={`mt-3 grid grid-cols-2 gap-3 ${bpCfg.enabled && typeof bpCfg.forceStride !== 'number' ? '' : 'opacity-50 pointer-events-none'}`}>
+                  <label className="text-xs text-white/70">
+                    fps bajo (sube stride)
+                    <input
+                      type="number" min={5} max={59} step={1}
+                      value={bpCfg.lowFpsThreshold}
+                      onChange={(e) => updateBp({ lowFpsThreshold: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-white/70">
+                    fps alto (baja stride)
+                    <input
+                      type="number" min={6} max={60} step={1}
+                      value={bpCfg.highFpsThreshold}
+                      onChange={(e) => updateBp({ highFpsThreshold: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-white/70">
+                    Sostenido (ms)
+                    <input
+                      type="number" min={250} max={30000} step={250}
+                      value={bpCfg.sustainMs}
+                      onChange={(e) => updateBp({ sustainMs: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                  <label className="text-xs text-white/70">
+                    Stride máximo
+                    <input
+                      type="number" min={3} max={8} step={1}
+                      value={bpCfg.maxStride}
+                      onChange={(e) => updateBp({ maxStride: Number(e.target.value) })}
+                      className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-3 flex items-center gap-2">
+                  <span className="text-xs text-white/70">Forzar stride:</span>
+                  {[undefined, 3, 4, 5].map((s) => (
+                    <button
+                      key={String(s)}
+                      type="button"
+                      onClick={() => updateBp({ forceStride: s })}
+                      className={`text-xs px-2 py-1 rounded border ${
+                        (bpCfg.forceStride ?? 'auto') === (s ?? 'auto')
+                          ? 'bg-white/20 border-white/40 text-white'
+                          : 'bg-zinc-800 border-white/10 text-white/70 hover:text-white'
+                      }`}
+                    >
+                      {s === undefined ? 'auto' : s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="relative z-10 h-full">
           <div className="flex-1 h-full">
             <PPGSignalMeter 
@@ -656,6 +846,9 @@ const Index = () => {
               bpm={heartRate}
               spo2={vitalSigns.spo2}
               rrIntervals={rrIntervals}
+              elapsedTime={elapsedTime}
+              perfusionIndex={lastSignal?.perfusionIndex || 0}
+              pressure={vitalSigns.pressure}
             />
           </div>
 

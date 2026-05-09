@@ -2,6 +2,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { PPGSignalProcessor } from '../modules/signal-processing/PPGSignalProcessor';
 import { ProcessedSignal, ProcessingError } from '../types/signal';
+import {
+  loadBackpressureConfig,
+  saveBackpressureConfig,
+  type BackpressureConfig,
+} from '../lib/perf/backpressureConfig';
 
 /**
  * HOOK ÚNICO Y DEFINITIVO - ELIMINADAS TODAS LAS DUPLICIDADES
@@ -13,6 +18,7 @@ export const useSignalProcessor = () => {
   const [lastSignal, setLastSignal] = useState<ProcessedSignal | null>(null);
   const [error, setError] = useState<ProcessingError | null>(null);
   const [framesProcessed, setFramesProcessed] = useState(0);
+  const [currentStride, setCurrentStride] = useState<number>(3);
   
   // CONTROL ÚNICO DE INSTANCIA - PREVENIR DUPLICIDADES ABSOLUTAMENTE
   const instanceLock = useRef<boolean>(false);
@@ -51,6 +57,8 @@ export const useSignalProcessor = () => {
     // CREAR PROCESADOR ÚNICO
     try {
       processorRef.current = new PPGSignalProcessor(onSignalReady, onError);
+      // Aplicar configuración persistida del backpressure
+      try { processorRef.current.setBackpressureConfig(loadBackpressureConfig()); } catch {}
       initializationState.current = 'READY';
     } catch (err) {
       initializationState.current = 'ERROR';
@@ -139,16 +147,56 @@ export const useSignalProcessor = () => {
     return processorRef.current.getRGBStats();
   }, []);
 
+  // Estado de backpressure (stride adaptativo + fps estimado) para telemetría
+  const getBackpressureState = useCallback(() => {
+    if (!processorRef.current) return { pixelStride: 3, estimatedSampleRate: 0, activeSource: 'RG' };
+    return processorRef.current.getBackpressureState();
+  }, []);
+
+  const getBackpressureConfig = useCallback((): BackpressureConfig => {
+    if (!processorRef.current) return loadBackpressureConfig();
+    return processorRef.current.getBackpressureConfig();
+  }, []);
+
+  const setBackpressureConfig = useCallback((partial: Partial<BackpressureConfig>): BackpressureConfig => {
+    const cfg = processorRef.current
+      ? processorRef.current.setBackpressureConfig(partial)
+      : { ...loadBackpressureConfig(), ...partial };
+    saveBackpressureConfig(cfg);
+    return cfg;
+  }, []);
+
+  // Polling ligero (1 Hz) del stride activo durante la medición. Permite a la
+  // UI reaccionar a cambios automáticos del backpressure adaptativo sin tocar
+  // el hot path del procesador.
+  useEffect(() => {
+    if (!isProcessing) return;
+    const tick = () => {
+      if (!processorRef.current) return;
+      try {
+        const s = processorRef.current.getBackpressureState().pixelStride;
+        setCurrentStride((prev) => (prev !== s ? s : prev));
+      } catch {}
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [isProcessing]);
+
   return {
     isProcessing,
     lastSignal,
     error,
     framesProcessed,
+    currentStride,
     startProcessing,
     stopProcessing,
     calibrate,
     processFrame,
     getRGBStats,
+    getBackpressureState,
+    getBackpressureConfig,
+    setBackpressureConfig,
     debugInfo: {
       sessionId: sessionIdRef.current,
       initializationState: initializationState.current,

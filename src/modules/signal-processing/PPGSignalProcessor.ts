@@ -1,5 +1,13 @@
 import type { ProcessedSignal, ProcessingError, SignalProcessor as SignalProcessorInterface, ContactState } from '../../types/signal';
 import { BandpassFilter } from './BandpassFilter';
+import { createLogger, ppgPerf } from '../../utils/logger';
+import {
+  DEFAULT_BACKPRESSURE_CONFIG,
+  sanitizeBackpressureConfig,
+  type BackpressureConfig,
+} from '../../lib/perf/backpressureConfig';
+
+const log = createLogger('PPGSignalProcessor');
 
 interface ROIMetrics {
   rawRed: number;
@@ -27,6 +35,22 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private readonly ACDC_WINDOW = 180;
   private readonly TILE_COLUMNS = 5;
   private readonly TILE_ROWS = 5;
+
+  // === BACKPRESSURE / ADAPTIVE STRIDE ===
+  // Stride de muestreo de píxeles dentro del ROI. 3 = baseline (cada 3 píxeles).
+  // Sube a 4 si fps < 20 sostenido > 3s, baja a 3 cuando fps >= 25.
+  // Evita reescribir el pipeline cuando el dispositivo es lento; sólo reduce el
+  // muestreo espacial preservando la temporal (que es lo que importa para BPM).
+  private pixelStride = 3;
+  private lastBackpressureCheck = 0;
+  private lowFpsSinceMs = 0;
+  private highFpsSinceMs = 0;
+  private readonly BACKPRESSURE_CHECK_MS = 1000;
+  private backpressureConfig: BackpressureConfig = { ...DEFAULT_BACKPRESSURE_CONFIG };
+
+  // Buffer reutilizable de tiles (evita Array.from + map por frame).
+  private readonly tileBuffer: { red: number; green: number; blue: number; count: number }[] =
+    Array.from({ length: this.TILE_COLUMNS * this.TILE_ROWS }, () => ({ red: 0, green: 0, blue: 0, count: 0 }));
 
   // Buffers
   private rawBuffer: number[] = [];
@@ -75,9 +99,8 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private smoothedBlue = 0;
   private smoothedCoverage = 0;
   private smoothedFingerScore = 0;
-  // Más rápido para adquisición real (antes 0.05/0.06 — bloqueaba detección de dedo varios segundos)
-  private readonly RGB_SMOOTH_ALPHA = 0.18;
-  private readonly COVERAGE_SMOOTH_ALPHA = 0.22;
+  private readonly RGB_SMOOTH_ALPHA = 0.05;       // era 0.10 — más suave
+  private readonly COVERAGE_SMOOTH_ALPHA = 0.06;  // era 0.12 — más suave
 
   // IMU / Motion
   private motionScore = 0;
@@ -127,8 +150,11 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     this.frameCount++;
     const timestamp = Date.now();
     this.updateSampleRate(timestamp);
+    this.maybeAdaptBackpressure(timestamp);
 
+    const endRoi = ppgPerf.start('roi');
     const roi = this.extractROI(imageData);
+    endRoi();
     this.updateContactState(roi);
 
     const motionArtifact = this.motionScore > this.MOTION_THRESHOLD;
@@ -180,14 +206,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       this.rawBuffer.shift();
     }
 
+    const endFilt = ppgPerf.start('bandpass');
     const filtered = this.bandpassFilter.filter(pulseSource.value);
+    endFilt();
     this.filteredBuffer.push(filtered);
     if (this.filteredBuffer.length > this.BUFFER_SIZE) {
       this.filteredBuffer.shift();
     }
 
+    const endDeriv = ppgPerf.start('derivatives');
     this.calculateDerivatives();
+    endDeriv();
+    const endSqi = ppgPerf.start('sqi');
     this.signalQuality = this.calculateSignalQuality();
+    endSqi();
 
     const perfusionIndex = this.calculatePerfusionIndex();
     const adjustedQuality = motionArtifact
@@ -200,10 +232,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const now = Date.now();
     if (now - this.lastLogTime >= 2000) {
       this.lastLogTime = now;
-      console.log(
-        `📷 PPG [${pulseSource.label}] Filt=${filtered.toFixed(3)} ` +
-        `Q=${gatedQuality.toFixed(0)}% PI=${perfusionIndex.toFixed(2)} ` +
-        `Contact=${this.contactState} FPS=${this.estimatedSampleRate.toFixed(0)}`
+      const snap = ppgPerf.snapshot();
+      log.info(
+        `[${pulseSource.label}] Filt=${filtered.toFixed(3)} Q=${gatedQuality.toFixed(0)}% ` +
+        `PI=${perfusionIndex.toFixed(2)} Contact=${this.contactState} ` +
+        `FPS=${snap.fps.toFixed(1)} jitter=${snap.jitterMs.toFixed(1)}ms ` +
+        `roi=${(snap.stages.roi?.p95 ?? 0).toFixed(2)}ms ` +
+        `filt=${(snap.stages.bandpass?.p95 ?? 0).toFixed(2)}ms ` +
+        `sqi=${(snap.stages.sqi?.p95 ?? 0).toFixed(2)}ms ` +
+        `dropEst=${snap.droppedEstimate}`
       );
     }
 
@@ -326,16 +363,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         notBlownOut;
       return maintainContact;
     } else {
-      // ACQUIRE contact — firma hemoglobina realista con flash:
-      // mantenemos exigencia clínica pero sin chicken-and-egg en fingerScore.
+      // ACQUIRE contact — strict hemoglobin thresholds
       const acquireContact =
-        r > 70 &&
-        rgRatio > 1.12 &&
-        redDominance > 14 &&
-        totalIntensity > 110 &&
-        this.smoothedCoverage > 0.20 &&
-        this.smoothedFingerScore > 0.20 &&
-        this.motionScore < 2.0 &&
+        r > 80 &&
+        rgRatio > 1.2 &&
+        redDominance > 20 &&
+        totalIntensity > 120 && totalIntensity < 760 &&
+        this.smoothedCoverage > 0.35 &&
+        this.smoothedFingerScore > 0.40 &&
+        this.motionScore < 1.5 &&
         notBlownOut;
       return acquireContact;
     }
@@ -380,16 +416,20 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     const endX = startX + Math.floor(roiSize);
     const endY = startY + Math.floor(roiSize);
 
-    const tiles = Array.from({ length: this.TILE_COLUMNS * this.TILE_ROWS }, () => ({
-      red: 0, green: 0, blue: 0, count: 0,
-    }));
+    // Reset reusable tile buffer (no GC churn por frame)
+    const tiles = this.tileBuffer;
+    for (let i = 0; i < tiles.length; i++) {
+      const t = tiles[i];
+      t.red = 0; t.green = 0; t.blue = 0; t.count = 0;
+    }
 
     const roiWidth = Math.max(1, endX - startX);
     const roiHeight = Math.max(1, endY - startY);
 
-    // Sample every 3rd pixel for performance
-    for (let y = startY; y < endY; y += 3) {
-      for (let x = startX; x < endX; x += 3) {
+    // Sample every Nth pixel — N adaptativo (3 normal, 4 bajo backpressure)
+    const stride = this.pixelStride;
+    for (let y = startY; y < endY; y += stride) {
+      for (let x = startX; x < endX; x += stride) {
         const i = (y * width + x) * 4;
         const tileX = Math.min(this.TILE_COLUMNS - 1, Math.floor(((x - startX) / roiWidth) * this.TILE_COLUMNS));
         const tileY = Math.min(this.TILE_ROWS - 1, Math.floor(((y - startY) / roiHeight) * this.TILE_ROWS));
@@ -434,16 +474,15 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       return { rawRed: 0, rawGreen: 0, rawBlue: 0, coverageRatio: 0, fingerScore: 0 };
     }
 
-    // Tile válido por hemoglobina real (independiente de combinedScore EMA,
-    // así no hay chicken-and-egg al arrancar la sesión)
     const fingerTiles = averagedTiles.filter((tile) =>
       tile.red > 55 &&
-      tile.total > 110 &&
-      tile.redDominance > 10 &&
-      tile.rednessRatio > 1.06
+      tile.total > 120 &&
+      tile.redDominance > 12 &&
+      tile.rednessRatio > 1.08 &&
+      tile.combinedScore > 0.42
     );
 
-    const selectedTiles = fingerTiles.length >= 3
+    const selectedTiles = fingerTiles.length >= 5
       ? fingerTiles
       : averagedTiles;
 
@@ -457,19 +496,10 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       return tw > 0 ? ws / tw : averagedTiles.reduce((s, t) => s + t[channel], 0) / averagedTiles.length;
     };
 
-    const coverageRatio = fingerTiles.length / Math.max(1, averagedTiles.length);
-    // fingerScore robusto: usa frameScore (sin EMA) cuando hay fingerTiles,
-    // si no, derivar de la mejor tile candidata para no quedar atascado en 0.
-    let avgFingerScore = 0;
-    if (fingerTiles.length > 0) {
-      avgFingerScore =
-        fingerTiles.reduce((s, t) => s + Math.max(t.frameScore, t.combinedScore), 0) /
-        fingerTiles.length;
-    } else if (averagedTiles.length > 0) {
-      // Tomar el mejor tile candidato como semilla parcial (no inventa, refleja el ROI real)
-      const bestFrame = Math.max(...averagedTiles.map((t) => t.frameScore));
-      avgFingerScore = bestFrame * 0.5; // partial credit — permite ramp-up sin saturar
-    }
+    const coverageRatio = fingerTiles.length / averagedTiles.length;
+    const avgFingerScore = fingerTiles.length > 0
+      ? fingerTiles.reduce((s, t) => s + t.combinedScore, 0) / fingerTiles.length
+      : 0;
 
     return {
       rawRed: weightedAverage('red'),
@@ -819,6 +849,60 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
     return Math.min(max, Math.max(min, value));
   }
 
+  /**
+   * Backpressure: si el fps real cae por debajo de 20 durante > 3s, sube el
+   * stride espacial a 4 (≈1.78× más rápido el bucle de píxeles). Cuando el fps
+   * vuelve a >= 25 sostenido > 3s, restaura stride 3. No toca el resto del
+   * pipeline ni la frecuencia temporal de muestreo.
+   */
+  private maybeAdaptBackpressure(nowMs: number): void {
+    if (nowMs - this.lastBackpressureCheck < this.BACKPRESSURE_CHECK_MS) return;
+    this.lastBackpressureCheck = nowMs;
+    const cfg = this.backpressureConfig;
+
+    // Stride forzado (modo manual / test) — bypass total.
+    if (typeof cfg.forceStride === 'number') {
+      if (this.pixelStride !== cfg.forceStride) {
+        this.pixelStride = cfg.forceStride;
+        log.info(`Backpressure FORCED stride=${this.pixelStride}`);
+      }
+      this.lowFpsSinceMs = 0; this.highFpsSinceMs = 0;
+      return;
+    }
+
+    // Adaptación deshabilitada → vuelve a baseline (3) y no toca más.
+    if (!cfg.enabled) {
+      if (this.pixelStride !== 3) {
+        this.pixelStride = 3;
+        log.info('Backpressure DISABLED — stride reset to 3');
+      }
+      this.lowFpsSinceMs = 0; this.highFpsSinceMs = 0;
+      return;
+    }
+
+    const fps = ppgPerf.snapshot().fps;
+    if (fps <= 0) return;
+
+    if (fps < cfg.lowFpsThreshold) {
+      this.highFpsSinceMs = 0;
+      if (this.lowFpsSinceMs === 0) this.lowFpsSinceMs = nowMs;
+      else if (this.pixelStride < cfg.maxStride && nowMs - this.lowFpsSinceMs >= cfg.sustainMs) {
+        this.pixelStride = Math.min(cfg.maxStride, this.pixelStride + 1);
+        log.warn(`Backpressure ON — fps=${fps.toFixed(1)} stride=${this.pixelStride}`);
+      }
+    } else if (fps >= cfg.highFpsThreshold) {
+      this.lowFpsSinceMs = 0;
+      if (this.highFpsSinceMs === 0) this.highFpsSinceMs = nowMs;
+      else if (this.pixelStride > 3 && nowMs - this.highFpsSinceMs >= cfg.sustainMs) {
+        this.pixelStride = Math.max(3, this.pixelStride - 1);
+        log.info(`Backpressure OFF — fps=${fps.toFixed(1)} stride=${this.pixelStride}`);
+      }
+    } else {
+      this.lowFpsSinceMs = 0;
+      this.highFpsSinceMs = 0;
+    }
+  }
+
   getRGBStats() {
     return {
       redAC: this.redAC, redDC: this.redDC,
@@ -828,5 +912,28 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
         ? (this.redAC / this.redDC) / (this.greenAC / this.greenDC)
         : 0,
     };
+  }
+
+  /** Estado actual del backpressure adaptativo (para telemetría). */
+  getBackpressureState() {
+    return {
+      pixelStride: this.pixelStride,
+      estimatedSampleRate: this.estimatedSampleRate,
+      activeSource: this.activeSource,
+      config: { ...this.backpressureConfig },
+    };
+  }
+
+  /** Aplica una nueva configuración de backpressure (saneada). */
+  setBackpressureConfig(partial: Partial<BackpressureConfig>): BackpressureConfig {
+    this.backpressureConfig = sanitizeBackpressureConfig({ ...this.backpressureConfig, ...partial });
+    // Forzar re-evaluación inmediata
+    this.lastBackpressureCheck = 0;
+    this.maybeAdaptBackpressure(typeof performance !== 'undefined' ? performance.now() : Date.now());
+    return { ...this.backpressureConfig };
+  }
+
+  getBackpressureConfig(): BackpressureConfig {
+    return { ...this.backpressureConfig };
   }
 }
