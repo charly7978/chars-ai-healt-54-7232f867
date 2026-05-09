@@ -524,9 +524,35 @@ const Index = () => {
     }
     
     const savedResults = resetVitalSigns();
-    
-    // Guardar medición en la base de datos automáticamente
-    if (savedResults || vitalSigns.spo2 > 0) {
+
+    // === QUALITY GATE ENFORCEMENT ===
+    // Block save + result visualization when the PI / Cardiac Power Ratio
+    // gate did not accept a sufficient fraction of frames during the session.
+    const gateAcc = gateAcceptedFramesRef.current;
+    const gateTot = gateTotalFramesRef.current;
+    const gateRatio = gateTot > 0 ? gateAcc / gateTot : 0;
+    const gatePassedSession =
+      gateAcc >= GATE_MIN_ACCEPTED_FRAMES &&
+      gateRatio >= GATE_MIN_ACCEPTED_RATIO;
+
+    if (!gatePassedSession) {
+      // Hard block: do not persist, do not display results.
+      console.warn('🚫 Quality gate blocked save/results', {
+        acceptedFrames: gateAcc,
+        totalFrames: gateTot,
+        ratio: gateRatio,
+        lastReason: gateLastReasonRef.current,
+        lastPI: gateLastPiRef.current,
+        lastPowerRatio: gateLastRatioRef.current,
+      });
+      toast({
+        variant: "destructive",
+        title: "🚫 Medición rechazada por calidad",
+        description: `Señal insuficiente (PI=${gateLastPiRef.current.toFixed(4)}, banda cardíaca=${(gateLastRatioRef.current * 100).toFixed(0)}%, frames OK=${gateAcc}/${gateTot}). No se guardó ningún resultado.`,
+        duration: 6000,
+      });
+    } else if (savedResults || vitalSigns.spo2 > 0) {
+      // Guardar medición en la base de datos automáticamente
       const dataToSave = savedResults || vitalSigns;
       await saveMeasurement({
         heartRate,
@@ -534,7 +560,7 @@ const Index = () => {
         signalQuality: lastSignal?.quality || 0
       });
     }
-    
+
     // Detener cámara
     setIsCameraOn(false);
     
@@ -545,11 +571,29 @@ const Index = () => {
     
     setIsMonitoring(false);
     setIsCalibrating(false);
-    
-    if (savedResults) {
-      setVitalSigns(savedResults);
+
+    if (gatePassedSession) {
+      if (savedResults) {
+        setVitalSigns(savedResults);
+      }
+      setShowResults(true);
+    } else {
+      // Gate failed: clear visible vitals so the rejected reading is not shown.
+      setVitalSigns(prev => ({
+        ...prev,
+        spo2: 0,
+        glucose: 0,
+        hemoglobin: 0,
+        pressure: { systolic: 0, diastolic: 0, confidence: 'INSUFFICIENT' as const, featureQuality: 0 },
+        arrhythmiaCount: 0,
+        arrhythmiaStatus: "SIN ARRITMIAS|0",
+        lipids: { totalCholesterol: 0, triglycerides: 0 },
+        signalQuality: 0,
+        measurementConfidence: 'INVALID',
+      }));
+      setHeartRate(0);
+      setShowResults(false);
     }
-    setShowResults(true);
     
     // Generar resumen estadístico
     const total = totalBeatsRef.current;
