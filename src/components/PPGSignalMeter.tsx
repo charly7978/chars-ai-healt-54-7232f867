@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Heart, Activity } from 'lucide-react';
 import { CircularBuffer, PPGDataPoint } from '../utils/CircularBuffer';
+import { deriveMapAndPp, PRESSURE_SOURCE_NOTE } from '../lib/vitals/derivedPressure';
 
 interface PPGSignalMeterProps {
   value: number;
@@ -25,6 +26,11 @@ interface PPGSignalMeterProps {
   elapsedTime?: number;
   perfusionIndex?: number;
   pressure?: { systolic: number; diastolic: number; confidence?: string; featureQuality?: number };
+  /** stride actual del backpressure adaptativo (1, 2, 3, 4, …). Se usa para
+   *  marcar visualmente en el trend cuándo el algoritmo cambió parámetros. */
+  currentStride?: number;
+  /** true durante la fase corta de adquisición posterior a iniciar la medición. */
+  isAcquiring?: boolean;
 }
 
 const CONFIG = {
@@ -83,7 +89,9 @@ const PPGSignalMeter = ({
   rrIntervals = [],
   elapsedTime = 0,
   perfusionIndex = 0,
-  pressure
+  pressure,
+  currentStride = 0,
+  isAcquiring = false,
 }: PPGSignalMeterProps) => {
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,7 +99,7 @@ const PPGSignalMeter = ({
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -107,9 +115,30 @@ const PPGSignalMeter = ({
   const bpmStatsRef = useRef<{ min: number; max: number; sum: number; n: number }>({ min: 0, max: 0, sum: 0, n: 0 });
   const bpmTrendRef = useRef<{ t: number; bpm: number }[]>([]);
   const lastBpmSampleRef = useRef<number>(0);
+  // Marcas en el trend cuando el algoritmo cambia parámetros (p.ej. stride).
+  // Guardamos timestamp absoluto y etiqueta corta para anotación visual.
+  const algoMarksRef = useRef<{ t: number; label: string; kind: 'stride' | 'gain' | 'filter' }[]>([]);
+  const lastStrideSeenRef = useRef<number>(0);
 
   useEffect(() => {
-    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure };
+    propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring };
+
+    // Marca cuando el algoritmo cambia stride (única señal de "cambio de
+    // parámetros" disponible hoy desde Index). Si en el futuro se exponen
+    // gain/filter, se pueden añadir aquí con kind: 'gain' | 'filter'.
+    if (currentStride && currentStride !== lastStrideSeenRef.current) {
+      if (lastStrideSeenRef.current !== 0) {
+        algoMarksRef.current.push({
+          t: Date.now(),
+          label: `stride ${currentStride}`,
+          kind: 'stride',
+        });
+        // Mantener solo marcas dentro de la ventana visible del trend (~80s).
+        const cutoff = Date.now() - 90_000;
+        algoMarksRef.current = algoMarksRef.current.filter(m => m.t >= cutoff);
+      }
+      lastStrideSeenRef.current = currentStride;
+    }
     
     // Compute HRV metrics from RR intervals
     if (rrIntervals && rrIntervals.length >= 2) {
@@ -144,8 +173,9 @@ const PPGSignalMeter = ({
       // Reset trend stats when contact is lost
       bpmStatsRef.current = { min: 0, max: 0, sum: 0, n: 0 };
       bpmTrendRef.current = [];
+      algoMarksRef.current = [];
     }
-  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure]);
+  }, [value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring]);
 
   useEffect(() => {
     if (isPeak && isFingerDetected) {
@@ -365,7 +395,11 @@ const PPGSignalMeter = ({
     ctx.font = 'bold 11px "SF Mono", Consolas, monospace';
     ctx.fillStyle = COLORS.TEXT_PRIMARY;
     ctx.textAlign = 'left';
-    ctx.fillText('● MONITOR · PARÁMETROS HEMODINÁMICOS', panelX + 10, panelY + 15);
+    const headerLabel = propsRef.current.isAcquiring
+      ? '● ADQUISICIÓN · CONFIRMANDO COBERTURA Y PERFIL DE DEDO…'
+      : '● MONITOR · PARÁMETROS HEMODINÁMICOS';
+    ctx.fillStyle = propsRef.current.isAcquiring ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
+    ctx.fillText(headerLabel, panelX + 10, panelY + 15);
 
     // Reloj + elapsed (derecha del header)
     const d = new Date();
@@ -447,11 +481,13 @@ const PPGSignalMeter = ({
     ctx.fillStyle = piColor;
     ctx.fillRect(piBarX, piBarY, 110 * piPct, 5);
 
-    // MAP / PP (cell 2)
+    // MAP / PP (cell 2) — derivados por el módulo único `deriveMapAndPp`
+    // (fórmulas estándar SBP/DBP). Si la entrada no es coherente, devuelve 0.
     const sys = pressure?.systolic || 0;
     const dia = pressure?.diastolic || 0;
-    const map = sys > 0 && dia > 0 ? Math.round(dia + (sys - dia) / 3) : 0;
-    const pp = sys > 0 && dia > 0 ? sys - dia : 0;
+    const derived = deriveMapAndPp({ systolic: sys, diastolic: dia });
+    const map = derived.valid ? Math.round(derived.map) : 0;
+    const pp = derived.valid ? Math.round(derived.pp) : 0;
     const mapColor = map === 0 ? COLORS.TEXT_SECONDARY : (map < 65 || map > 110) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
     drawCell(panelX + colW * 2, 'MAP · TAM', map > 0 ? `${map}` : '--', mapColor, 'mmHg · objetivo 70–105');
     ctx.font = '9px "SF Mono", Consolas, monospace';
@@ -475,48 +511,120 @@ const PPGSignalMeter = ({
       ctx.stroke();
     }
 
-    // === Mini trend strip de BPM (debajo del panel) ===
+    // === Trend de PR con eje temporal real (segundos) y marcas de cambios
+    // de parámetros del algoritmo (stride). Esto reemplaza la franja basada
+    // en índice de muestra por una con tiempo absoluto: cada punto se
+    // posiciona según (tNow - p.t) sobre una ventana fija (60s).
     const trend = bpmTrendRef.current;
-    if (trend.length >= 2) {
-      const tx = panelX;
-      const ty = panelY + panelH + 6;
-      const tw = panelW;
-      const th = 26;
-      ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
-      ctx.fillRect(tx, ty, tw, th);
-      ctx.strokeStyle = 'rgba(34, 197, 94, 0.25)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(tx, ty, tw, th);
+    const tx = panelX;
+    const ty = panelY + panelH + 6;
+    const tw = panelW;
+    const th = 38; // un poco más alto para acomodar el eje
+    const labelW = 96;
+    const plotX0 = tx + labelW;
+    const plotX1 = tx + tw - 6;
+    const plotW = plotX1 - plotX0;
+    const plotY0 = ty + 14;
+    const plotY1 = ty + th - 8;
+    const plotH = plotY1 - plotY0;
+    const WINDOW_S = 60; // ventana temporal mostrada
+    const tNow = Date.now();
+    const tMinMs = tNow - WINDOW_S * 1000;
 
-      ctx.font = '9px "SF Mono", Consolas, monospace';
-      ctx.fillStyle = COLORS.TEXT_SECONDARY;
-      ctx.textAlign = 'left';
-      ctx.fillText('TENDENCIA PR', tx + 6, ty + 11);
+    // Fondo y borde
+    ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
+    ctx.fillRect(tx, ty, tw, th);
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tx, ty, tw, th);
 
-      const minB = Math.min(...trend.map(p => p.bpm));
-      const maxB = Math.max(...trend.map(p => p.bpm));
-      const range = Math.max(10, maxB - minB);
+    // Título + escala
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    ctx.fillText('TENDENCIA PR · 60 s', tx + 6, ty + 11);
+
+    // Ticks de tiempo (cada 15s) en el eje X
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+    ctx.fillStyle = COLORS.SCALE_TEXT;
+    ctx.font = '8px "SF Mono", Consolas, monospace';
+    ctx.textAlign = 'center';
+    for (let s = 0; s <= WINDOW_S; s += 15) {
+      const px = plotX0 + ((WINDOW_S - s) / WINDOW_S) * plotW;
       ctx.beginPath();
-      ctx.strokeStyle = COLORS.TEXT_PRIMARY;
-      ctx.lineWidth = 1.5;
-      trend.forEach((p, i) => {
-        const px = tx + 90 + (i / (trend.length - 1)) * (tw - 100);
-        const py = ty + th - 4 - ((p.bpm - minB) / range) * (th - 8);
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      });
+      ctx.moveTo(px, plotY1);
+      ctx.lineTo(px, plotY1 + 2);
       ctx.stroke();
-
-      ctx.textAlign = 'right';
-      ctx.fillStyle = COLORS.TEXT_SECONDARY;
-      ctx.fillText(`${Math.round(minB)}–${Math.round(maxB)} bpm`, tx + tw - 6, ty + 11);
+      ctx.fillText(s === 0 ? 'ahora' : `-${s}s`, px, plotY1 + 11);
     }
 
-    // === Footer técnico: sweep, gain, filtro, alarmas ===
+    if (trend.length >= 2) {
+      const visible = trend.filter(p => p.t >= tMinMs);
+      if (visible.length >= 2) {
+        const minB = Math.min(...visible.map(p => p.bpm));
+        const maxB = Math.max(...visible.map(p => p.bpm));
+        const range = Math.max(10, maxB - minB);
+
+        // Línea de tendencia
+        ctx.beginPath();
+        ctx.strokeStyle = COLORS.TEXT_PRIMARY;
+        ctx.lineWidth = 1.5;
+        visible.forEach((p, i) => {
+          const tFrac = (p.t - tMinMs) / (WINDOW_S * 1000);
+          const px = plotX0 + tFrac * plotW;
+          const py = plotY0 + plotH - ((p.bpm - minB) / range) * plotH;
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+
+        ctx.textAlign = 'right';
+        ctx.font = '9px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = COLORS.TEXT_SECONDARY;
+        ctx.fillText(`${Math.round(minB)}–${Math.round(maxB)} bpm`, tx + tw - 6, ty + 11);
+      }
+    }
+
+    // Marcas verticales por cambios de parámetros del algoritmo (stride).
+    // Línea discontinua + etiqueta corta en el borde superior del plot.
+    const visibleMarks = algoMarksRef.current.filter(m => m.t >= tMinMs);
+    if (visibleMarks.length > 0) {
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1;
+      ctx.font = '8px "SF Mono", Consolas, monospace';
+      visibleMarks.forEach(m => {
+        const tFrac = (m.t - tMinMs) / (WINDOW_S * 1000);
+        const px = plotX0 + tFrac * plotW;
+        ctx.strokeStyle = m.kind === 'stride'
+          ? COLORS.TEXT_WARNING
+          : COLORS.SYSTOLIC_MARKER;
+        ctx.beginPath();
+        ctx.moveTo(px, plotY0);
+        ctx.lineTo(px, plotY1);
+        ctx.stroke();
+        ctx.fillStyle = COLORS.TEXT_WARNING;
+        ctx.textAlign = 'left';
+        ctx.fillText(m.label, px + 2, plotY0 + 8);
+      });
+      ctx.restore();
+    }
+
+    // === Footer técnico: sweep, gain, filtro, alarmas + fuente MAP/PP ===
     ctx.font = '9px "SF Mono", Consolas, monospace';
     ctx.fillStyle = COLORS.TEXT_SECONDARY;
     ctx.textAlign = 'left';
     const fy = H - 8;
-    ctx.fillText('SWEEP 25mm/s   GAIN ×1.0   FILTRO 0.5–4 Hz   FUENTE PPG/RG', panelX + 10, fy);
+    const strideTxt = propsRef.current.currentStride
+      ? `STRIDE ${propsRef.current.currentStride}`
+      : 'STRIDE auto';
+    ctx.fillText(
+      `SWEEP 25mm/s   GAIN ×1.0   FILTRO 0.5–4 Hz   ${strideTxt}   FUENTE PPG/RG`,
+      panelX + 10, fy,
+    );
+    // Línea adicional con el origen explícito de MAP/PP (a 14 px debajo del
+    // panel principal pero todavía visible dentro del canvas).
+    ctx.fillStyle = COLORS.SCALE_TEXT;
+    ctx.fillText(PRESSURE_SOURCE_NOTE, panelX + 10, fy - 14);
     ctx.textAlign = 'right';
     const alarms: string[] = [];
     if (bpm > 0 && (bpm < 50 || bpm > 120)) alarms.push(`HR!`);

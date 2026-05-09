@@ -46,6 +46,15 @@ const Index = () => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [rrIntervals, setRRIntervals] = useState<number[]>([]);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+
+  // Fase corta de adquisición: durante los primeros segundos tras "iniciar"
+  // se usa para confirmar coverage y perfil de detección antes de empezar a
+  // mostrar BPM. No bloquea el procesador (sigue corriendo y aprendiendo
+  // baselines), solo posterga la visualización de la cifra para evitar mostrar
+  // valores espurios mientras el dedo se acomoda.
+  const ACQUISITION_MS = 4000;
+  const [isAcquiring, setIsAcquiring] = useState(false);
+  const acquisitionStartedAtRef = useRef<number>(0);
   
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
@@ -333,6 +342,12 @@ const Index = () => {
     startProcessing();
     setIsCameraOn(true);
     setIsMonitoring(true);
+
+    // Marcar inicio de la fase de adquisición y limpiarla al cumplirse el
+    // tiempo. Si el usuario detiene antes, finalizeMeasurement la apaga.
+    setIsAcquiring(true);
+    acquisitionStartedAtRef.current = performance.now();
+    setTimeout(() => setIsAcquiring(false), ACQUISITION_MS);
     
     // Timer de medición
     if (measurementTimerRef.current) {
@@ -429,6 +444,7 @@ const Index = () => {
     
     setIsMonitoring(false);
     setIsCalibrating(false);
+    setIsAcquiring(false);
     
     if (savedResults) {
       setVitalSigns(savedResults);
@@ -476,6 +492,7 @@ const Index = () => {
     setShowResults(false);
     setMeasurementSummary(null);
     setIsCalibrating(false);
+    setIsAcquiring(false);
     setElapsedTime(0);
     setHeartRate(0);
     totalBeatsRef.current = 0;
@@ -518,10 +535,16 @@ const Index = () => {
     
     const signalValue = lastSignal.filteredValue;
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
+    // Gate más permisivo: STABLE_CONTACT pasa siempre por umbrales mínimos,
+    // pero también UNSTABLE_CONTACT con calidad razonable y perfusión real
+    // puede alimentar el HeartBeatProcessor (durante adquisición/recuperación).
+    // El procesador ya trunca la calidad cuando no hay STABLE_CONTACT, así que
+    // este criterio sigue siendo estricto en la práctica.
+    const q = lastSignal.quality || 0;
+    const pi = lastSignal.perfusionIndex || 0;
     const stableHumanSignal =
-      contactState === 'STABLE_CONTACT' &&
-      (lastSignal.quality || 0) >= 12 &&
-      (lastSignal.perfusionIndex || 0) >= 0.005;
+      (contactState === 'STABLE_CONTACT' && q >= 8 && pi >= 0.003) ||
+      (contactState === 'UNSTABLE_CONTACT' && q >= 14 && pi >= 0.005);
 
     const heartBeatResult = processHeartBeat(
       signalValue,
@@ -571,7 +594,12 @@ const Index = () => {
 
     // Señal estable — resetear contador de inestabilidad
     unstableFrameCounter.current = 0;
-    setHeartRate(heartBeatResult.bpm);
+    // Durante la fase de adquisición no publicamos BPM al UI (evita "saltos
+    // iniciales" mientras el HeartBeatProcessor aún no consolidó plantilla).
+    // El procesador sigue recibiendo muestras y madurando internamente.
+    if (!isAcquiring) {
+      setHeartRate(heartBeatResult.bpm);
+    }
 
     if (heartBeatResult.isPeak) {
       setBeatMarker(1);
@@ -639,7 +667,7 @@ const Index = () => {
         }
       }
     }
-  }, [lastSignal, isMonitoring, processHeartBeat, processVitalSigns, setRGBData, getRGBStats]);
+  }, [lastSignal, isMonitoring, isAcquiring, processHeartBeat, processVitalSigns, setRGBData, getRGBStats]);
 
   // AUTO-FINALIZAR a los 60 segundos (1 minuto)
   useEffect(() => {
@@ -849,6 +877,8 @@ const Index = () => {
               elapsedTime={elapsedTime}
               perfusionIndex={lastSignal?.perfusionIndex || 0}
               pressure={vitalSigns.pressure}
+              currentStride={currentStride}
+              isAcquiring={isAcquiring}
             />
           </div>
 
