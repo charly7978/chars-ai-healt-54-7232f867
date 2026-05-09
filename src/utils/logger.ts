@@ -150,6 +150,13 @@ export class PerfTracker {
     this.droppedEstimate = 0;
     this.frames = 0;
   }
+
+  /** Devuelve un snapshot y resetea atómicamente. Útil para flush periódico. */
+  drainSnapshot() {
+    const s = this.snapshot();
+    this.reset();
+    return s;
+  }
 }
 
 /** Singleton compartido para el pipeline PPG. */
