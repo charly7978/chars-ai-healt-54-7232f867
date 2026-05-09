@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { Heart, Activity } from 'lucide-react';
 import { CircularBuffer, PPGDataPoint } from '../utils/CircularBuffer';
+import { deriveMapAndPp, PRESSURE_SOURCE_NOTE } from '../lib/vitals/derivedPressure';
 
 interface PPGSignalMeterProps {
   value: number;
@@ -25,6 +26,11 @@ interface PPGSignalMeterProps {
   elapsedTime?: number;
   perfusionIndex?: number;
   pressure?: { systolic: number; diastolic: number; confidence?: string; featureQuality?: number };
+  /** stride actual del backpressure adaptativo (1, 2, 3, 4, …). Se usa para
+   *  marcar visualmente en el trend cuándo el algoritmo cambió parámetros. */
+  currentStride?: number;
+  /** true durante la fase corta de adquisición posterior a iniciar la medición. */
+  isAcquiring?: boolean;
 }
 
 const CONFIG = {
@@ -83,7 +89,9 @@ const PPGSignalMeter = ({
   rrIntervals = [],
   elapsedTime = 0,
   perfusionIndex = 0,
-  pressure
+  pressure,
+  currentStride = 0,
+  isAcquiring = false,
 }: PPGSignalMeterProps) => {
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,7 +99,7 @@ const PPGSignalMeter = ({
   const isRunningRef = useRef(false);
   const dataBufferRef = useRef<CircularBuffer | null>(null);
   
-  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure });
+  const propsRef = useRef({ value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure, currentStride, isAcquiring });
   const lastPeakTimeRef = useRef(0);
   const [showPulse, setShowPulse] = useState(false);
   
@@ -107,6 +115,10 @@ const PPGSignalMeter = ({
   const bpmStatsRef = useRef<{ min: number; max: number; sum: number; n: number }>({ min: 0, max: 0, sum: 0, n: 0 });
   const bpmTrendRef = useRef<{ t: number; bpm: number }[]>([]);
   const lastBpmSampleRef = useRef<number>(0);
+  // Marcas en el trend cuando el algoritmo cambia parámetros (p.ej. stride).
+  // Guardamos timestamp absoluto y etiqueta corta para anotación visual.
+  const algoMarksRef = useRef<{ t: number; label: string; kind: 'stride' | 'gain' | 'filter' }[]>([]);
+  const lastStrideSeenRef = useRef<number>(0);
 
   useEffect(() => {
     propsRef.current = { value, quality, isFingerDetected, arrhythmiaStatus, preserveResults, isPeak, bpm, spo2, rrIntervals, rawArrhythmiaData, elapsedTime, perfusionIndex, pressure };
