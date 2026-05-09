@@ -100,12 +100,11 @@ const Index = () => {
   // ---- Telemetría de rendimiento (opt-in) ----
   const [telemetryOn, setTelemetryOn] = useState<boolean>(() => getPerfConsent());
   const [showSettings, setShowSettings] = useState(false);
-  const cameraDiagRef = useRef<Record<string, unknown>>({});
   usePerfTelemetry({
     enabled: telemetryOn && isMonitoring,
     intervalMs: 15000,
     context: {
-      getCamera: () => cameraDiagRef.current,
+      getCamera: () => cameraRef.current?.getDiagnostics?.() ?? {},
       getPipeline: () => ({
         sqi: lastSignal?.quality ?? 0,
         fingerDetected: !!lastSignal?.fingerDetected,
