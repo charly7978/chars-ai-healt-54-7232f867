@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { HeartBeatProcessor } from '../modules/HeartBeatProcessor';
 import type { ContactState } from '../types/signal';
+import type { QualityGateReason } from '../lib/ppg/quality/measurementGate';
 
 interface HeartBeatResult {
   bpm: number;
@@ -13,6 +14,10 @@ interface HeartBeatResult {
     intervals: number[];
     lastPeakTime: number | null;
   };
+  gateAccepted: boolean;
+  gateReason: QualityGateReason;
+  perfusionIndex: number;
+  cardiacPowerRatio: number;
 }
 
 /**
@@ -72,6 +77,8 @@ export const useHeartBeatProcessor = () => {
         bpm: currentBPMRef.current, confidence: 0, isPeak: false,
         filteredValue: 0, arrhythmiaCount: 0, signalQuality: 0,
         rrData: { intervals: [], lastPeakTime: null },
+        gateAccepted: false, gateReason: 'INSUFFICIENT_SAMPLES',
+        perfusionIndex: 0, cardiacPowerRatio: 0,
       };
     }
 
@@ -94,6 +101,8 @@ export const useHeartBeatProcessor = () => {
         bpm: 0, confidence: 0, isPeak: false,
         filteredValue: 0, arrhythmiaCount: 0, signalQuality: 0,
         rrData: { intervals: [], lastPeakTime: null },
+        gateAccepted: false, gateReason: 'INSUFFICIENT_SAMPLES',
+        perfusionIndex: 0, cardiacPowerRatio: 0,
       };
     }
 
@@ -104,6 +113,8 @@ export const useHeartBeatProcessor = () => {
         isPeak: false, filteredValue: 0, arrhythmiaCount: 0,
         signalQuality: signalQualityRef.current,
         rrData: { intervals: [], lastPeakTime: null },
+        gateAccepted: false, gateReason: 'INSUFFICIENT_SAMPLES',
+        perfusionIndex: 0, cardiacPowerRatio: 0,
       };
     }
     lastProcessTimeRef.current = currentTime;
@@ -135,6 +146,10 @@ export const useHeartBeatProcessor = () => {
       arrhythmiaCount: result.arrhythmiaCount,
       signalQuality: roundedSQI,
       rrData,
+      gateAccepted: result.gateAccepted,
+      gateReason: result.gateReason,
+      perfusionIndex: result.perfusionIndex,
+      cardiacPowerRatio: result.cardiacPowerRatio,
     };
   }, []);
 
