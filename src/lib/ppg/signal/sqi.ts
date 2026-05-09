@@ -15,10 +15,25 @@ export interface SqiBreakdown {
   readonly kurtosis: number;
 }
 
+export interface SqiWeights {
+  perfusionScale: number;
+  weightPerfusion: number;
+  weightSkewness: number;
+  weightKurtosis: number;
+}
+
+const DEFAULT_WEIGHTS: SqiWeights = {
+  perfusionScale: 25,
+  weightPerfusion: 0.55,
+  weightSkewness: 0.25,
+  weightKurtosis: 0.2,
+};
+
 export function computeSqi(
   filtered: Float32Array,
   filteredLength: number,
   dc: number,
+  weights: SqiWeights = DEFAULT_WEIGHTS,
 ): SqiBreakdown {
   if (filteredLength < 16 || !Number.isFinite(dc) || Math.abs(dc) < 1e-6) {
     return { sqi: 0, perfusionIndex: 0, skewness: 0, kurtosis: 0 };
@@ -55,13 +70,23 @@ export function computeSqi(
   const ac = max - min;
   const perfusionIndex = ac / Math.abs(dc);
 
-  // Heuristic combination — bounded to [0, 1].
-  const perfTerm = Math.min(1, perfusionIndex * 25);
+  // Heuristic combination — bounded to [0, 1]. Weights auto-normalize so the
+  // operator can rebias the index without exceeding unity.
+  const wSum =
+    weights.weightPerfusion + weights.weightSkewness + weights.weightKurtosis;
+  const norm = wSum > 1e-6 ? 1 / wSum : 0;
+  const perfTerm = Math.min(1, perfusionIndex * weights.perfusionScale);
   const skewTerm = 1 / (1 + Math.exp(-3 * (skewness - 0.2)));
   const kurtTerm = 1 - Math.min(1, Math.abs(kurtosis - 1.5) / 6);
   const sqi = Math.max(
     0,
-    Math.min(1, perfTerm * 0.55 + skewTerm * 0.25 + kurtTerm * 0.2),
+    Math.min(
+      1,
+      (perfTerm * weights.weightPerfusion +
+        skewTerm * weights.weightSkewness +
+        kurtTerm * weights.weightKurtosis) *
+        norm,
+    ),
   );
 
   return { sqi, perfusionIndex, skewness, kurtosis };
