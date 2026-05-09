@@ -31,12 +31,12 @@ export function setActiveProfile(profileId: string): void {
 export function recordVerdict(sample: number, verdict: SanityVerdict, window: number[]): void {
   let verdictTag: AuditEntry["verdict"];
   let detail: string | undefined;
-  if (verdict.ok) {
-    verdictTag = "OK";
-    detail = undefined;
-  } else {
+  if (verdict.ok === false) {
     verdictTag = verdict.reason;
     detail = verdict.detail;
+  } else {
+    verdictTag = "OK";
+    detail = undefined;
   }
   const entry: AuditEntry = {
     ts: Date.now(),
