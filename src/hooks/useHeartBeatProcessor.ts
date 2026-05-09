@@ -154,17 +154,12 @@ export const useHeartBeatProcessor = () => {
     processingStateRef.current = 'ACTIVE';
   }, []);
 
-  const setArrhythmiaState = useCallback((_isArrhythmiaDetected: boolean) => {
-    // No-op: arrhythmia state is managed by ArrhythmiaProcessor directly
-  }, []);
-
   return {
     currentBPM,
     confidence,
     signalQuality,
     processSignal,
     reset,
-    setArrhythmiaState,
     debugInfo: {
       sessionId: sessionIdRef.current,
       processingState: processingStateRef.current,
