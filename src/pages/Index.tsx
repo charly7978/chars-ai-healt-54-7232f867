@@ -154,6 +154,23 @@ const Index = () => {
     setCustomJSON("");
     rebuildSanityChecker(sanityProfileId);
   }, [sanityProfileId, rebuildSanityChecker]);
+
+  // PPG runtime tuning (ROI grid + finger detection + SQI thresholds).
+  const [ppgCfg, setPpgCfg] = useState<PpgRuntimeConfig>(() => getPpgRuntimeConfig());
+  useEffect(() => subscribePpgRuntimeConfig(setPpgCfg), []);
+  const updateRoi = useCallback((patch: Partial<PpgRuntimeConfig["roi"]>) => {
+    setPpgRuntimeConfig({ roi: { ...getPpgRuntimeConfig().roi, ...patch } });
+  }, []);
+  const updateFinger = useCallback((patch: Partial<PpgRuntimeConfig["finger"]>) => {
+    setPpgRuntimeConfig({ finger: { ...getPpgRuntimeConfig().finger, ...patch } });
+  }, []);
+  const updateSqi = useCallback((patch: Partial<PpgRuntimeConfig["sqi"]>) => {
+    setPpgRuntimeConfig({ sqi: { ...getPpgRuntimeConfig().sqi, ...patch } });
+  }, []);
+  const handlePpgReset = useCallback(() => {
+    resetPpgRuntimeConfig();
+    toast({ title: "✓ PPG defaults restaurados" });
+  }, []);
   
   // HOOKS DE PROCESAMIENTO
   const { 
