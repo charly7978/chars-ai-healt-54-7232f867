@@ -1,11 +1,6 @@
 import type { ProcessedSignal, ProcessingError, SignalProcessor as SignalProcessorInterface, ContactState } from '../../types/signal';
 import { BandpassFilter } from './BandpassFilter';
 import { createLogger, ppgPerf } from '../../utils/logger';
-import {
-  DEFAULT_BACKPRESSURE_CONFIG,
-  sanitizeBackpressureConfig,
-  type BackpressureConfig,
-} from '../../lib/perf/backpressureConfig';
 
 const log = createLogger('PPGSignalProcessor');
 
@@ -46,7 +41,7 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private lowFpsSinceMs = 0;
   private highFpsSinceMs = 0;
   private readonly BACKPRESSURE_CHECK_MS = 1000;
-  private backpressureConfig: BackpressureConfig = { ...DEFAULT_BACKPRESSURE_CONFIG };
+  private readonly BACKPRESSURE_SUSTAIN_MS = 3000;
 
   // Buffer reutilizable de tiles (evita Array.from + map por frame).
   private readonly tileBuffer: { red: number; green: number; blue: number; count: number }[] =
@@ -858,43 +853,21 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
   private maybeAdaptBackpressure(nowMs: number): void {
     if (nowMs - this.lastBackpressureCheck < this.BACKPRESSURE_CHECK_MS) return;
     this.lastBackpressureCheck = nowMs;
-    const cfg = this.backpressureConfig;
-
-    // Stride forzado (modo manual / test) — bypass total.
-    if (typeof cfg.forceStride === 'number') {
-      if (this.pixelStride !== cfg.forceStride) {
-        this.pixelStride = cfg.forceStride;
-        log.info(`Backpressure FORCED stride=${this.pixelStride}`);
-      }
-      this.lowFpsSinceMs = 0; this.highFpsSinceMs = 0;
-      return;
-    }
-
-    // Adaptación deshabilitada → vuelve a baseline (3) y no toca más.
-    if (!cfg.enabled) {
-      if (this.pixelStride !== 3) {
-        this.pixelStride = 3;
-        log.info('Backpressure DISABLED — stride reset to 3');
-      }
-      this.lowFpsSinceMs = 0; this.highFpsSinceMs = 0;
-      return;
-    }
-
     const fps = ppgPerf.snapshot().fps;
     if (fps <= 0) return;
 
-    if (fps < cfg.lowFpsThreshold) {
+    if (fps < 20) {
       this.highFpsSinceMs = 0;
       if (this.lowFpsSinceMs === 0) this.lowFpsSinceMs = nowMs;
-      else if (this.pixelStride < cfg.maxStride && nowMs - this.lowFpsSinceMs >= cfg.sustainMs) {
-        this.pixelStride = Math.min(cfg.maxStride, this.pixelStride + 1);
+      else if (this.pixelStride < 4 && nowMs - this.lowFpsSinceMs >= this.BACKPRESSURE_SUSTAIN_MS) {
+        this.pixelStride = 4;
         log.warn(`Backpressure ON — fps=${fps.toFixed(1)} stride=${this.pixelStride}`);
       }
-    } else if (fps >= cfg.highFpsThreshold) {
+    } else if (fps >= 25) {
       this.lowFpsSinceMs = 0;
       if (this.highFpsSinceMs === 0) this.highFpsSinceMs = nowMs;
-      else if (this.pixelStride > 3 && nowMs - this.highFpsSinceMs >= cfg.sustainMs) {
-        this.pixelStride = Math.max(3, this.pixelStride - 1);
+      else if (this.pixelStride > 3 && nowMs - this.highFpsSinceMs >= this.BACKPRESSURE_SUSTAIN_MS) {
+        this.pixelStride = 3;
         log.info(`Backpressure OFF — fps=${fps.toFixed(1)} stride=${this.pixelStride}`);
       }
     } else {
@@ -920,20 +893,6 @@ export class PPGSignalProcessor implements SignalProcessorInterface {
       pixelStride: this.pixelStride,
       estimatedSampleRate: this.estimatedSampleRate,
       activeSource: this.activeSource,
-      config: { ...this.backpressureConfig },
     };
-  }
-
-  /** Aplica una nueva configuración de backpressure (saneada). */
-  setBackpressureConfig(partial: Partial<BackpressureConfig>): BackpressureConfig {
-    this.backpressureConfig = sanitizeBackpressureConfig({ ...this.backpressureConfig, ...partial });
-    // Forzar re-evaluación inmediata
-    this.lastBackpressureCheck = 0;
-    this.maybeAdaptBackpressure(typeof performance !== 'undefined' ? performance.now() : Date.now());
-    return { ...this.backpressureConfig };
-  }
-
-  getBackpressureConfig(): BackpressureConfig {
-    return { ...this.backpressureConfig };
   }
 }

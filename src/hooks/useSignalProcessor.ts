@@ -2,11 +2,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { PPGSignalProcessor } from '../modules/signal-processing/PPGSignalProcessor';
 import { ProcessedSignal, ProcessingError } from '../types/signal';
-import {
-  loadBackpressureConfig,
-  saveBackpressureConfig,
-  type BackpressureConfig,
-} from '../lib/perf/backpressureConfig';
 
 /**
  * HOOK ÚNICO Y DEFINITIVO - ELIMINADAS TODAS LAS DUPLICIDADES
@@ -56,8 +51,6 @@ export const useSignalProcessor = () => {
     // CREAR PROCESADOR ÚNICO
     try {
       processorRef.current = new PPGSignalProcessor(onSignalReady, onError);
-      // Aplicar configuración persistida del backpressure
-      try { processorRef.current.setBackpressureConfig(loadBackpressureConfig()); } catch {}
       initializationState.current = 'READY';
     } catch (err) {
       initializationState.current = 'ERROR';
@@ -152,19 +145,6 @@ export const useSignalProcessor = () => {
     return processorRef.current.getBackpressureState();
   }, []);
 
-  const getBackpressureConfig = useCallback((): BackpressureConfig => {
-    if (!processorRef.current) return loadBackpressureConfig();
-    return processorRef.current.getBackpressureConfig();
-  }, []);
-
-  const setBackpressureConfig = useCallback((partial: Partial<BackpressureConfig>): BackpressureConfig => {
-    const cfg = processorRef.current
-      ? processorRef.current.setBackpressureConfig(partial)
-      : { ...loadBackpressureConfig(), ...partial };
-    saveBackpressureConfig(cfg);
-    return cfg;
-  }, []);
-
   return {
     isProcessing,
     lastSignal,
@@ -176,8 +156,6 @@ export const useSignalProcessor = () => {
     processFrame,
     getRGBStats,
     getBackpressureState,
-    getBackpressureConfig,
-    setBackpressureConfig,
     debugInfo: {
       sessionId: sessionIdRef.current,
       initializationState: initializationState.current,
