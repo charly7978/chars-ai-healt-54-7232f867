@@ -577,6 +577,32 @@ const Index = () => {
 
     // Señal estable — resetear contador de inestabilidad
     unstableFrameCounter.current = 0;
+    // Guardrail anti-simulación: si el stream de BPM se vuelve constante /
+    // repetitivo / fuera de rango fisiológico, congelamos la actualización
+    // y exponemos un estado de error en lugar de pintar datos sospechosos.
+    const verdict = bpmSanityRef.current.push(heartBeatResult.bpm);
+    if (!verdict.ok) {
+      const msg = `BPM stream ${verdict.reason} (${verdict.detail})`;
+      if (sanityErrorRef.current !== verdict.reason) {
+        sanityErrorRef.current = verdict.reason;
+        setSanityError(msg);
+        const now = performance.now();
+        if (now - sanityToastAtRef.current > 5000) {
+          sanityToastAtRef.current = now;
+          toast({
+            variant: "destructive",
+            title: "⚠ Señal sospechosa detectada",
+            description: msg,
+          });
+        }
+      }
+      // No actualizamos heartRate ni vitales mientras el verdict sea inválido.
+      return;
+    }
+    if (sanityErrorRef.current) {
+      sanityErrorRef.current = null;
+      setSanityError(null);
+    }
     setHeartRate(heartBeatResult.bpm);
 
     if (heartBeatResult.isPeak) {
