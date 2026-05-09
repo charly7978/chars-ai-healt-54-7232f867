@@ -492,6 +492,7 @@ const Index = () => {
     setShowResults(false);
     setMeasurementSummary(null);
     setIsCalibrating(false);
+    setIsAcquiring(false);
     setElapsedTime(0);
     setHeartRate(0);
     totalBeatsRef.current = 0;
