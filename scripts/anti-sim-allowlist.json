@@ -1,4 +1,11 @@
 {
-  "$schema": "Centralized allowlist for anti-simulation guardrail. Every entry MUST include reason and ref (issue/PR id).",
-  "entries": []
+  "$schema": "Centralized allowlist for anti-simulation guardrail. Every entry MUST include reason and ref (issue/PR id). Set `dist: true` for entries that apply to the built bundle scanner.",
+  "entries": [
+    {
+      "dist": true,
+      "pattern": "MATH_RANDOM",
+      "reason": "React internals (event listener key, fiber id) and @supabase localStorage probe use Math.random for non-medical, non-signal-path identifier generation. Verified: zero references reach src/modules/signal-processing/** or src/modules/vital-signs/**.",
+      "ref": "GUARDRAIL-DIST-RUNTIME"
+    }
+  ]
 }
