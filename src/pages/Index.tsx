@@ -444,6 +444,7 @@ const Index = () => {
     
     setIsMonitoring(false);
     setIsCalibrating(false);
+    setIsAcquiring(false);
     
     if (savedResults) {
       setVitalSigns(savedResults);
