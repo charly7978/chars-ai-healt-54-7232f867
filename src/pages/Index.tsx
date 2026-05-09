@@ -32,6 +32,9 @@ import {
   downloadCSV as downloadAuditCSV,
   getEntries as getAuditEntries,
   getNegativeCount as getAuditNegativeCount,
+  getPersistedEntries as getPersistedAuditEntries,
+  getPersistedNegativeCount as getPersistedAuditNegativeCount,
+  clearPersistedLog as clearPersistedAuditLog,
 } from "@/lib/sanity/sanityAuditLog";
 
 import { supabase } from "@/integrations/supabase/client";
@@ -1003,6 +1006,34 @@ const Index = () => {
                       Limpiar
                     </button>
                   </div>
+                </div>
+
+                <div className="mt-3 pt-3 border-t border-white/10">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-white/70">
+                      Histórico persistido: {getPersistedAuditEntries().length}
+                      {getPersistedAuditNegativeCount() > 0 && (
+                        <span className="ml-1 text-amber-400">({getPersistedAuditNegativeCount()} alertas)</span>
+                      )}
+                    </span>
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => downloadAuditJSON(`sanity-audit-history-${Date.now()}.json`, "persisted")}
+                        className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                        JSON
+                      </button>
+                      <button type="button" onClick={() => downloadAuditCSV(`sanity-audit-history-${Date.now()}.csv`, "persisted")}
+                        className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                        CSV
+                      </button>
+                      <button type="button" onClick={() => { clearPersistedAuditLog(); setAuditNegativeCount(c => c); }}
+                        className="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-white/10">
+                        Borrar
+                      </button>
+                    </div>
+                  </div>
+                  <p className="mt-1 text-[10px] text-white/40">
+                    Sobrevive a recargas. Retención máx: 2000 entradas.
+                  </p>
                 </div>
               </div>
             </div>
