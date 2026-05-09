@@ -78,6 +78,7 @@ const Index = () => {
     getBackpressureState,
     getBackpressureConfig,
     setBackpressureConfig,
+    currentStride,
   } = useSignalProcessor();
   
   const { 
