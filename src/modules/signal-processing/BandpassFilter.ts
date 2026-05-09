@@ -11,7 +11,7 @@
  * Referencias:
  * - De Haan & Jeanne 2013: CHROM/POS para rPPG
  * - webcam-pulse-detector de thearn (GitHub 3.2k stars)
- * - https://scipy-cookbook.readthedocs.io/items/ButterworthBandpass.html
+ * - https://scipy-cookbook.readthedocs.io/items/ButterworthBandpass.html  third-party-allow: reason="Documentation reference URL inside a comment, no runtime call." ref="GUARDRAIL-THIRD-PARTY"
  */
 export class BandpassFilter {
   // Coeficientes del filtro pasa-altos 0.5Hz (elimina DC)
