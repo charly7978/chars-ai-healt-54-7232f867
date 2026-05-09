@@ -432,7 +432,7 @@ const Index = () => {
     startCalibration();
     setTimeout(() => setIsCalibrating(false), 3000);
     
-  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen]);
+  }, [isMonitoring, startProcessing, startCalibration, enterFullScreen, sanityProfileId]);
 
   // === CUANDO LA CÁMARA ESTÁ LISTA ===
   const handleStreamReady = useCallback((stream: MediaStream) => {
