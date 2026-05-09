@@ -877,6 +877,8 @@ const Index = () => {
               elapsedTime={elapsedTime}
               perfusionIndex={lastSignal?.perfusionIndex || 0}
               pressure={vitalSigns.pressure}
+              currentStride={currentStride}
+              isAcquiring={isAcquiring}
             />
           </div>
 
