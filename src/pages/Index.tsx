@@ -209,8 +209,12 @@ const Index = () => {
     const scheduleNext = (video: HTMLVideoElement) => {
       if (!isProcessingRef.current) return;
       if ('requestVideoFrameCallback' in video) {
-        (video as any).requestVideoFrameCallback(() => captureOneFrame());
+        (video as any).requestVideoFrameCallback((_now: number, metadata: any) => {
+          ppgPerf.markFrame(metadata);
+          captureOneFrame();
+        });
       } else {
+        ppgPerf.markFrame();
         frameLoopRef.current = requestAnimationFrame(() => captureOneFrame());
       }
     };
