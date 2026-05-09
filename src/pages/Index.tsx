@@ -657,6 +657,47 @@ const Index = () => {
           />
         </div>
 
+        {/* AJUSTES — botón discreto top-right */}
+        <button
+          type="button"
+          onClick={() => setShowSettings(true)}
+          aria-label="Ajustes"
+          className="absolute top-2 right-2 z-30 p-2 rounded-full bg-black/40 text-white/70 hover:text-white hover:bg-black/60 transition-colors"
+        >
+          <SettingsIcon className="h-4 w-4" />
+        </button>
+
+        {showSettings && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setShowSettings(false)}>
+            <div className="bg-zinc-900 text-white rounded-lg p-5 w-[90%] max-w-sm border border-white/10" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-semibold">Ajustes</h3>
+                <button onClick={() => setShowSettings(false)} aria-label="Cerrar" className="text-white/60 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={telemetryOn}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setPerfConsent(v);
+                    setTelemetryOn(v);
+                  }}
+                />
+                <span className="text-sm leading-snug">
+                  <span className="font-medium">Métricas anónimas de rendimiento</span>
+                  <span className="block text-white/60 text-xs mt-1">
+                    Envía estadísticas de FPS, latencia y calidad del pipeline para depurar problemas. No incluye datos personales ni mediciones biométricas.
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+        )}
+
         <div className="relative z-10 h-full">
           <div className="flex-1 h-full">
             <PPGSignalMeter 
