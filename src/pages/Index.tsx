@@ -656,11 +656,9 @@ const Index = () => {
             />
           </div>
 
-          {/* CONTADOR DE ARRITMIAS - Solo texto discreto, la visualización está en la onda */}
-
-          {/* SIGNOS VITALES */}
-          <div className="absolute inset-x-0 top-[55%] bottom-[60px] bg-black/10 px-4 py-6">
-            <div className="grid grid-cols-3 gap-4 place-items-center">
+          {/* SIGNOS VITALES — overlay transparente sobre el monitor a pantalla completa */}
+          <div className="absolute inset-x-0 bottom-[60px] px-3 py-3 pointer-events-none bg-gradient-to-t from-black/70 via-black/30 to-transparent">
+            <div className="grid grid-cols-3 gap-2 place-items-center pointer-events-auto">
               <VitalSign 
                 label="FRECUENCIA CARDÍACA"
                 value={heartRate > 0 ? Math.round(heartRate) : "--"}
