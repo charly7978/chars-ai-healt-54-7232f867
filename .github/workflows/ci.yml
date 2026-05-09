@@ -29,3 +29,5 @@ jobs:
         run: npm test -- --run
       - name: Build
         run: npm run build
+      - name: Anti-simulation guardrail (dist)
+        run: npm run check:no-sim:dist
