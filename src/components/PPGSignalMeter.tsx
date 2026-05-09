@@ -477,11 +477,13 @@ const PPGSignalMeter = ({
     ctx.fillStyle = piColor;
     ctx.fillRect(piBarX, piBarY, 110 * piPct, 5);
 
-    // MAP / PP (cell 2)
+    // MAP / PP (cell 2) — derivados por el módulo único `deriveMapAndPp`
+    // (fórmulas estándar SBP/DBP). Si la entrada no es coherente, devuelve 0.
     const sys = pressure?.systolic || 0;
     const dia = pressure?.diastolic || 0;
-    const map = sys > 0 && dia > 0 ? Math.round(dia + (sys - dia) / 3) : 0;
-    const pp = sys > 0 && dia > 0 ? sys - dia : 0;
+    const derived = deriveMapAndPp({ systolic: sys, diastolic: dia });
+    const map = derived.valid ? Math.round(derived.map) : 0;
+    const pp = derived.valid ? Math.round(derived.pp) : 0;
     const mapColor = map === 0 ? COLORS.TEXT_SECONDARY : (map < 65 || map > 110) ? COLORS.TEXT_WARNING : COLORS.TEXT_PRIMARY;
     drawCell(panelX + colW * 2, 'MAP · TAM', map > 0 ? `${map}` : '--', mapColor, 'mmHg · objetivo 70–105');
     ctx.font = '9px "SF Mono", Consolas, monospace';
