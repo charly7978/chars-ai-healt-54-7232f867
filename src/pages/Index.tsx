@@ -342,6 +342,12 @@ const Index = () => {
     startProcessing();
     setIsCameraOn(true);
     setIsMonitoring(true);
+
+    // Marcar inicio de la fase de adquisición y limpiarla al cumplirse el
+    // tiempo. Si el usuario detiene antes, finalizeMeasurement la apaga.
+    setIsAcquiring(true);
+    acquisitionStartedAtRef.current = performance.now();
+    setTimeout(() => setIsAcquiring(false), ACQUISITION_MS);
     
     // Timer de medición
     if (measurementTimerRef.current) {
