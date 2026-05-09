@@ -34,8 +34,8 @@ export function recordVerdict(sample: number, verdict: SanityVerdict, window: nu
     sessionId,
     sample,
     windowSize: window.length,
-    verdict: verdict.ok ? "OK" : verdict.reason,
-    detail: verdict.ok ? undefined : verdict.detail,
+    verdict: verdict.ok === true ? "OK" : verdict.reason,
+    detail: verdict.ok === true ? undefined : verdict.detail,
     bpmWindow: window.length > SNAPSHOT_CAP ? window.slice(-SNAPSHOT_CAP) : window.slice(),
     thresholdsId,
   };
