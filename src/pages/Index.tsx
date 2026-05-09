@@ -518,10 +518,16 @@ const Index = () => {
     
     const signalValue = lastSignal.filteredValue;
     const contactState = (lastSignal as any).contactState || (lastSignal.fingerDetected ? 'STABLE_CONTACT' : 'NO_CONTACT');
+    // Gate más permisivo: STABLE_CONTACT pasa siempre por umbrales mínimos,
+    // pero también UNSTABLE_CONTACT con calidad razonable y perfusión real
+    // puede alimentar el HeartBeatProcessor (durante adquisición/recuperación).
+    // El procesador ya trunca la calidad cuando no hay STABLE_CONTACT, así que
+    // este criterio sigue siendo estricto en la práctica.
+    const q = lastSignal.quality || 0;
+    const pi = lastSignal.perfusionIndex || 0;
     const stableHumanSignal =
-      contactState === 'STABLE_CONTACT' &&
-      (lastSignal.quality || 0) >= 12 &&
-      (lastSignal.perfusionIndex || 0) >= 0.005;
+      (contactState === 'STABLE_CONTACT' && q >= 8 && pi >= 0.003) ||
+      (contactState === 'UNSTABLE_CONTACT' && q >= 14 && pi >= 0.005);
 
     const heartBeatResult = processHeartBeat(
       signalValue,
