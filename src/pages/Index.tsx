@@ -14,6 +14,7 @@ import { toast } from "@/components/ui/use-toast";
 import { ppgPerf } from "@/utils/logger";
 import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
 import type { BackpressureConfig } from "@/lib/perf/backpressureConfig";
+import { VitalsSanityChecker } from "@/lib/sanity/vitalsSanity";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -65,6 +66,12 @@ const Index = () => {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
+  // anti-sim-allow: reason="Wires up the runtime detector for fabricated vitals streams." ref="GUARDRAIL-DIST-RUNTIME"
+  // Runtime guardrail: detect implausible vitals streams.
+  const bpmSanityRef = useRef(new VitalsSanityChecker({ min: 30, max: 220 }));
+  const sanityErrorRef = useRef<string | null>(null);
+  const sanityToastAtRef = useRef<number>(0);
+  const [sanityError, setSanityError] = useState<string | null>(null);
   
   // HOOKS DE PROCESAMIENTO
   const { 
@@ -485,6 +492,9 @@ const Index = () => {
     setHeartbeatSignal(0);
     setBeatMarker(0);
     setRRIntervals([]);
+    bpmSanityRef.current.reset();
+    sanityErrorRef.current = null;
+    setSanityError(null);
     setVitalSigns({ 
       spo2: 0,
       glucose: 0,
@@ -571,6 +581,32 @@ const Index = () => {
 
     // Señal estable — resetear contador de inestabilidad
     unstableFrameCounter.current = 0;
+    // Guardrail anti-simulación: si el stream de BPM se vuelve constante /
+    // repetitivo / fuera de rango fisiológico, congelamos la actualización
+    // y exponemos un estado de error en lugar de pintar datos sospechosos.
+    const verdict = bpmSanityRef.current.push(heartBeatResult.bpm);
+    if (verdict.ok === false) {
+      const msg = `BPM stream ${verdict.reason} (${verdict.detail})`;
+      if (sanityErrorRef.current !== verdict.reason) {
+        sanityErrorRef.current = verdict.reason;
+        setSanityError(msg);
+        const now = performance.now();
+        if (now - sanityToastAtRef.current > 5000) {
+          sanityToastAtRef.current = now;
+          toast({
+            variant: "destructive",
+            title: "⚠ Señal sospechosa detectada",
+            description: msg,
+          });
+        }
+      }
+      // No actualizamos heartRate ni vitales mientras el verdict sea inválido.
+      return;
+    }
+    if (sanityErrorRef.current) {
+      sanityErrorRef.current = null;
+      setSanityError(null);
+    }
     setHeartRate(heartBeatResult.bpm);
 
     if (heartBeatResult.isPeak) {
