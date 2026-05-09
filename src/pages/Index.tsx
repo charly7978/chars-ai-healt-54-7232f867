@@ -46,6 +46,15 @@ const Index = () => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [rrIntervals, setRRIntervals] = useState<number[]>([]);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+
+  // Fase corta de adquisición: durante los primeros segundos tras "iniciar"
+  // se usa para confirmar coverage y perfil de detección antes de empezar a
+  // mostrar BPM. No bloquea el procesador (sigue corriendo y aprendiendo
+  // baselines), solo posterga la visualización de la cifra para evitar mostrar
+  // valores espurios mientras el dedo se acomoda.
+  const ACQUISITION_MS = 4000;
+  const [isAcquiring, setIsAcquiring] = useState(false);
+  const acquisitionStartedAtRef = useRef<number>(0);
   
   const [measurementSummary, setMeasurementSummary] = useState<{
     totalBeats: number;
