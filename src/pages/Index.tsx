@@ -14,6 +14,7 @@ import { toast } from "@/components/ui/use-toast";
 import { ppgPerf } from "@/utils/logger";
 import { usePerfTelemetry, getPerfConsent, setPerfConsent } from "@/hooks/usePerfTelemetry";
 import type { BackpressureConfig } from "@/lib/perf/backpressureConfig";
+import { VitalsSanityChecker } from "@/lib/sanity/vitalsSanity";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -65,6 +66,11 @@ const Index = () => {
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameLoopRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
+  // Runtime guardrail: detect implausible synthetic vitals streams.
+  const bpmSanityRef = useRef(new VitalsSanityChecker({ min: 30, max: 220 }));
+  const sanityErrorRef = useRef<string | null>(null);
+  const sanityToastAtRef = useRef<number>(0);
+  const [sanityError, setSanityError] = useState<string | null>(null);
   
   // HOOKS DE PROCESAMIENTO
   const { 
