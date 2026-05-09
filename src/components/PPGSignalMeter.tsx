@@ -22,6 +22,9 @@ interface PPGSignalMeterProps {
   bpm?: number;
   spo2?: number;
   rrIntervals?: number[];
+  elapsedTime?: number;
+  perfusionIndex?: number;
+  pressure?: { systolic: number; diastolic: number; confidence?: string; featureQuality?: number };
 }
 
 const CONFIG = {
