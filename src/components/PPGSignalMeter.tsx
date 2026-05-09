@@ -728,6 +728,7 @@ const PPGSignalMeter = ({
       drawAmplitudeScale(ctx);
       drawTimeScale(ctx);
       drawVitalInfo(ctx, now);
+      drawClinicalPanel(ctx);
       
       if (preserve && !detected) {
         animationRef.current = requestAnimationFrame(render);
@@ -1132,7 +1133,7 @@ const PPGSignalMeter = ({
       isRunningRef.current = false;
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [drawGrid, drawAmplitudeScale, drawTimeScale, drawVitalInfo, getPlotArea]);
+  }, [drawGrid, drawAmplitudeScale, drawTimeScale, drawVitalInfo, drawClinicalPanel, getPlotArea]);
 
   const handleReset = useCallback(() => {
     dataBufferRef.current?.clear();
