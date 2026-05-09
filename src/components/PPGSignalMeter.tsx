@@ -189,50 +189,95 @@ const PPGSignalMeter = ({
     const { CANVAS_WIDTH: W, CANVAS_HEIGHT: H, COLORS } = CONFIG;
     const plot = getPlotArea();
     
-    ctx.fillStyle = COLORS.BG;
+    // === FONDO: monitor médico con vignette sutil ===
+    const bgGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) / 1.3);
+    bgGrad.addColorStop(0, '#0c1422');
+    bgGrad.addColorStop(1, '#05080f');
+    ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, W, H);
-    
-    ctx.fillStyle = 'rgba(0, 20, 10, 0.3)';
+
+    // Plot area inner background (verde profundo apenas perceptible)
+    const innerGrad = ctx.createLinearGradient(0, plot.y, 0, plot.y + plot.height);
+    innerGrad.addColorStop(0, 'rgba(0, 30, 18, 0.55)');
+    innerGrad.addColorStop(0.5, 'rgba(0, 22, 12, 0.45)');
+    innerGrad.addColorStop(1, 'rgba(0, 30, 18, 0.55)');
+    ctx.fillStyle = innerGrad;
     ctx.fillRect(plot.x, plot.y, plot.width, plot.height);
-    
-    ctx.strokeStyle = COLORS.GRID_MINOR;
+
+    // === GRILLA TIPO PAPEL ECG (1mm/5mm) ===
+    // Minor 1mm = 20px (subdivisiones cálidas)
+    ctx.strokeStyle = 'rgba(220, 60, 60, 0.07)';
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     for (let x = plot.x; x <= plot.x + plot.width; x += 20) {
-      ctx.moveTo(x, plot.y);
-      ctx.lineTo(x, plot.y + plot.height);
+      ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.height);
     }
     for (let y = plot.y; y <= plot.y + plot.height; y += 20) {
-      ctx.moveTo(plot.x, y);
-      ctx.lineTo(plot.x + plot.width, y);
+      ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.width, y);
     }
     ctx.stroke();
-    
-    ctx.strokeStyle = COLORS.GRID_MAJOR;
+
+    // Major 5mm = 100px
+    ctx.strokeStyle = 'rgba(220, 60, 60, 0.18)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let x = plot.x; x <= plot.x + plot.width; x += 100) {
-      ctx.moveTo(x, plot.y);
-      ctx.lineTo(x, plot.y + plot.height);
+      ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.height);
     }
     for (let y = plot.y; y <= plot.y + plot.height; y += 100) {
-      ctx.moveTo(plot.x, y);
-      ctx.lineTo(plot.x + plot.width, y);
+      ctx.moveTo(plot.x, y); ctx.lineTo(plot.x + plot.width, y);
     }
     ctx.stroke();
-    
+
+    // Cada 500px (~25mm = 1s a 25mm/s) — línea verde-azul más visible
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.22)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let x = plot.x; x <= plot.x + plot.width; x += 500) {
+      ctx.moveTo(x, plot.y); ctx.lineTo(x, plot.y + plot.height);
+    }
+    ctx.stroke();
+
+    // Marcas de segundos arriba de la grilla
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.55)';
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.textAlign = 'center';
+    const secs = CONFIG.WINDOW_MS / 1000;
+    for (let s = 0; s <= secs; s++) {
+      const x = plot.x + plot.width - (s / secs) * plot.width;
+      ctx.fillRect(x - 0.5, plot.y - 6, 1, 6);
+      if (s % 1 === 0) {
+        ctx.fillText(`${s}s`, x, plot.y - 9);
+      }
+    }
+
+    // Baseline
     ctx.strokeStyle = COLORS.BASELINE;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([8, 4]);
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([10, 6]);
     ctx.beginPath();
     ctx.moveTo(plot.x, plot.centerY);
     ctx.lineTo(plot.x + plot.width, plot.centerY);
     ctx.stroke();
     ctx.setLineDash([]);
-    
-    ctx.strokeStyle = 'rgba(34, 197, 94, 0.3)';
+
+    // Borde con esquinas en escuadra (corner ticks)
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.35)';
     ctx.lineWidth = 1;
     ctx.strokeRect(plot.x, plot.y, plot.width, plot.height);
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.7)';
+    ctx.lineWidth = 2;
+    const ct = 22;
+    ctx.beginPath();
+    // top-left
+    ctx.moveTo(plot.x, plot.y + ct); ctx.lineTo(plot.x, plot.y); ctx.lineTo(plot.x + ct, plot.y);
+    // top-right
+    ctx.moveTo(plot.x + plot.width - ct, plot.y); ctx.lineTo(plot.x + plot.width, plot.y); ctx.lineTo(plot.x + plot.width, plot.y + ct);
+    // bottom-left
+    ctx.moveTo(plot.x, plot.y + plot.height - ct); ctx.lineTo(plot.x, plot.y + plot.height); ctx.lineTo(plot.x + ct, plot.y + plot.height);
+    // bottom-right
+    ctx.moveTo(plot.x + plot.width - ct, plot.y + plot.height); ctx.lineTo(plot.x + plot.width, plot.y + plot.height); ctx.lineTo(plot.x + plot.width, plot.y + plot.height - ct);
+    ctx.stroke();
   }, [getPlotArea]);
 
   const drawAmplitudeScale = useCallback((ctx: CanvasRenderingContext2D) => {
