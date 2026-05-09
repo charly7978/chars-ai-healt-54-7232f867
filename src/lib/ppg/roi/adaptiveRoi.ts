@@ -25,14 +25,14 @@ const SAT_HIGH = 252;
 const DARK_LUMA = 20;
 
 export class AdaptiveRoi {
-  readonly cols: number;
-  readonly rows: number;
-  private readonly weights: Float32Array;
-  private readonly tileR: Float32Array;
-  private readonly tileG: Float32Array;
-  private readonly tileB: Float32Array;
-  private readonly tileScore: Float32Array;
-  private readonly tileBaseline: Float32Array;
+  cols: number;
+  rows: number;
+  private weights: Float32Array;
+  private tileR: Float32Array;
+  private tileG: Float32Array;
+  private tileB: Float32Array;
+  private tileScore: Float32Array;
+  private tileBaseline: Float32Array;
   private initialized = false;
 
   constructor(
@@ -48,6 +48,25 @@ export class AdaptiveRoi {
     this.tileB = new Float32Array(n);
     this.tileScore = new Float32Array(n);
     this.tileBaseline = new Float32Array(n);
+  }
+
+  /**
+   * Re-shape the tile grid at runtime. Reallocates internal buffers and
+   * resets the EMA baseline so the new geometry is not biased by stale
+   * scores from a different grid.
+   */
+  setGrid(cols: number, rows: number): void {
+    if (cols === this.cols && rows === this.rows) return;
+    this.cols = cols;
+    this.rows = rows;
+    const n = cols * rows;
+    this.weights = new Float32Array(n);
+    this.tileR = new Float32Array(n);
+    this.tileG = new Float32Array(n);
+    this.tileB = new Float32Array(n);
+    this.tileScore = new Float32Array(n);
+    this.tileBaseline = new Float32Array(n);
+    this.initialized = false;
   }
 
   process(

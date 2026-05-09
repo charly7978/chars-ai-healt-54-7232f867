@@ -12,6 +12,10 @@ import {
 } from "../types";
 import type { WorkerOutboundSnapshot } from "../worker/ppgWorker";
 import PpgWorker from "../worker/ppgWorker?worker";
+import {
+  getPpgRuntimeConfig,
+  subscribePpgRuntimeConfig,
+} from "../config/ppgRuntimeConfig";
 
 export interface UsePpgCaptureOptions {
   readonly video: HTMLVideoElement | null;
@@ -59,6 +63,7 @@ export function usePpgCapture(
   const lastUiUpdateRef = useRef(0);
   const fingerRef = useRef(false);
   const fpsRef = useRef(0);
+  const configRef = useRef(getPpgRuntimeConfig());
 
   const stop = useCallback(async () => {
     loopRef.current?.stop();
@@ -100,11 +105,13 @@ export function usePpgCapture(
 
       const downsampler = new FrameDownsampler();
       downsamplerRef.current = downsampler;
-      const roi = new AdaptiveRoi();
+      const cfg = configRef.current;
+      const roi = new AdaptiveRoi(cfg.roi.cols, cfg.roi.rows);
       roiRef.current = roi;
 
       const worker = new PpgWorker();
       workerRef.current = worker;
+      worker.postMessage({ type: "config", sqi: cfg.sqi });
       worker.addEventListener("message", (ev: MessageEvent<WorkerOutboundSnapshot>) => {
         const data = ev.data;
         if (!data || data.type !== "snapshot") return;
@@ -132,7 +139,7 @@ export function usePpgCapture(
         const w = workerRef.current;
         if (!ds || !region || !w) return;
         const rgba = ds.capture(video);
-        const detection = classifyFrame(rgba);
+        const detection = classifyFrame(rgba, configRef.current.finger);
         const aggregate = region.process(rgba, ds.width, ds.height);
         fingerRef.current = detection.fingerDetected;
         fpsRef.current = timing.fpsInstant;
@@ -162,6 +169,15 @@ export function usePpgCapture(
     };
     // start/stop intentionally re-run when dependencies change.
   }, [active, start, stop]);
+
+  // React to runtime tuning without restarting the camera.
+  useEffect(() => {
+    return subscribePpgRuntimeConfig((next) => {
+      configRef.current = next;
+      roiRef.current?.setGrid(next.roi.cols, next.roi.rows);
+      workerRef.current?.postMessage({ type: "config", sqi: next.sqi });
+    });
+  }, []);
 
   return {
     state,

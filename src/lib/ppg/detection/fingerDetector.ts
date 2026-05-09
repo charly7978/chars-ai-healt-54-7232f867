@@ -15,12 +15,28 @@ export interface FingerDetectionResult {
   readonly clipLow: number;
 }
 
-const SAT_HIGH = 252;
-const DARK_LUMA = 20;
-const RED_DOMINANCE = 35;
-const COVERAGE_THRESHOLD = 0.55;
+export interface FingerDetectionThresholds {
+  saturationHigh: number;
+  darkLuma: number;
+  redDominance: number;
+  coverage: number;
+}
 
-export function classifyFrame(rgba: Uint8ClampedArray): FingerDetectionResult {
+const DEFAULTS: FingerDetectionThresholds = {
+  saturationHigh: 252,
+  darkLuma: 20,
+  redDominance: 35,
+  coverage: 0.55,
+};
+
+export function classifyFrame(
+  rgba: Uint8ClampedArray,
+  thresholds: FingerDetectionThresholds = DEFAULTS,
+): FingerDetectionResult {
+  const SAT_HIGH = thresholds.saturationHigh;
+  const DARK_LUMA = thresholds.darkLuma;
+  const RED_DOMINANCE = thresholds.redDominance;
+  const COVERAGE_THRESHOLD = thresholds.coverage;
   const len = rgba.length;
   if (len < 4) {
     return {

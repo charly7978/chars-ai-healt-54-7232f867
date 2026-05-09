@@ -12,7 +12,7 @@ import { PPG_CONFIG } from "../types";
 import { BandpassBiquad } from "../signal/filters";
 import { RingBuffer } from "../signal/ringBuffer";
 import { RgbPcaFusion } from "../signal/signalFusion";
-import { computeSqi } from "../signal/sqi";
+import { computeSqi, type SqiWeights } from "../signal/sqi";
 
 export interface WorkerInboundSample {
   readonly type: "sample";
@@ -24,7 +24,15 @@ export interface WorkerInboundReset {
   readonly type: "reset";
 }
 
-export type WorkerInbound = WorkerInboundSample | WorkerInboundReset;
+export interface WorkerInboundConfig {
+  readonly type: "config";
+  readonly sqi: SqiWeights;
+}
+
+export type WorkerInbound =
+  | WorkerInboundSample
+  | WorkerInboundReset
+  | WorkerInboundConfig;
 
 export interface WorkerOutboundSnapshot {
   readonly type: "snapshot";
@@ -53,6 +61,12 @@ let dcEstimate = 0;
 let dcInitialized = false;
 let snapshotBuffer = new Float32Array(ringCapacity);
 let lastEmit = 0;
+let sqiWeights: SqiWeights = {
+  perfusionScale: 25,
+  weightPerfusion: 0.55,
+  weightSkewness: 0.25,
+  weightKurtosis: 0.2,
+};
 const EMIT_INTERVAL_MS = 1000 / PPG_CONFIG.STATE_THROTTLE_HZ;
 
 function handleSample(payload: Float32Array): void {
@@ -83,7 +97,7 @@ function handleSample(payload: Float32Array): void {
     snapshotBuffer = new Float32Array(filtered.capacity);
   }
   const samples = filtered.snapshot(snapshotBuffer);
-  const sqi = computeSqi(snapshotBuffer, samples, dcEstimate);
+  const sqi = computeSqi(snapshotBuffer, samples, dcEstimate, sqiWeights);
 
   // Hand ownership of the snapshot buffer to the main thread, then re-allocate.
   const out: WorkerOutboundSnapshot = {
@@ -117,4 +131,5 @@ self.addEventListener("message", (event: MessageEvent<WorkerInbound>) => {
   const msg = event.data;
   if (msg.type === "sample") handleSample(msg.payload);
   else if (msg.type === "reset") handleReset();
+  else if (msg.type === "config") sqiWeights = msg.sqi;
 });

@@ -36,6 +36,13 @@ import {
   getPersistedNegativeCount as getPersistedAuditNegativeCount,
   clearPersistedLog as clearPersistedAuditLog,
 } from "@/lib/sanity/sanityAuditLog";
+import {
+  getPpgRuntimeConfig,
+  setPpgRuntimeConfig,
+  resetPpgRuntimeConfig,
+  subscribePpgRuntimeConfig,
+  type PpgRuntimeConfig,
+} from "@/lib/ppg/config/ppgRuntimeConfig";
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -147,6 +154,23 @@ const Index = () => {
     setCustomJSON("");
     rebuildSanityChecker(sanityProfileId);
   }, [sanityProfileId, rebuildSanityChecker]);
+
+  // PPG runtime tuning (ROI grid + finger detection + SQI thresholds).
+  const [ppgCfg, setPpgCfg] = useState<PpgRuntimeConfig>(() => getPpgRuntimeConfig());
+  useEffect(() => subscribePpgRuntimeConfig(setPpgCfg), []);
+  const updateRoi = useCallback((patch: Partial<PpgRuntimeConfig["roi"]>) => {
+    setPpgRuntimeConfig({ roi: { ...getPpgRuntimeConfig().roi, ...patch } });
+  }, []);
+  const updateFinger = useCallback((patch: Partial<PpgRuntimeConfig["finger"]>) => {
+    setPpgRuntimeConfig({ finger: { ...getPpgRuntimeConfig().finger, ...patch } });
+  }, []);
+  const updateSqi = useCallback((patch: Partial<PpgRuntimeConfig["sqi"]>) => {
+    setPpgRuntimeConfig({ sqi: { ...getPpgRuntimeConfig().sqi, ...patch } });
+  }, []);
+  const handlePpgReset = useCallback(() => {
+    resetPpgRuntimeConfig();
+    toast({ title: "✓ PPG defaults restaurados" });
+  }, []);
   
   // HOOKS DE PROCESAMIENTO
   const { 
@@ -1034,6 +1058,125 @@ const Index = () => {
                   <p className="mt-1 text-[10px] text-white/40">
                     Sobrevive a recargas. Retención máx: 2000 entradas.
                   </p>
+                </div>
+
+                {/* PPG runtime tuning: ROI grid + finger + SQI */}
+                <div className="mt-4 pt-3 border-t border-white/10">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium">PPG tuning (ROI + SQI)</div>
+                    <button
+                      type="button"
+                      onClick={handlePpgReset}
+                      className="text-[11px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-white/10"
+                    >
+                      Defaults
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-white/40 mt-1">
+                    Cambios en vivo, sin reiniciar la cámara. Persiste en este dispositivo.
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-2 mt-3">
+                    <label className="text-[11px] text-white/70">
+                      ROI cols: <span className="text-white">{ppgCfg.roi.cols}</span>
+                      <input
+                        type="range" min={3} max={24} step={1}
+                        value={ppgCfg.roi.cols}
+                        onChange={(e) => updateRoi({ cols: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      ROI rows: <span className="text-white">{ppgCfg.roi.rows}</span>
+                      <input
+                        type="range" min={3} max={24} step={1}
+                        value={ppgCfg.roi.rows}
+                        onChange={(e) => updateRoi({ rows: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      Red dominance: <span className="text-white">{ppgCfg.finger.redDominance.toFixed(0)}</span>
+                      <input
+                        type="range" min={5} max={120} step={1}
+                        value={ppgCfg.finger.redDominance}
+                        onChange={(e) => updateFinger({ redDominance: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      Coverage min: <span className="text-white">{ppgCfg.finger.coverage.toFixed(2)}</span>
+                      <input
+                        type="range" min={0.05} max={0.95} step={0.01}
+                        value={ppgCfg.finger.coverage}
+                        onChange={(e) => updateFinger({ coverage: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      Sat. high: <span className="text-white">{ppgCfg.finger.saturationHigh}</span>
+                      <input
+                        type="range" min={200} max={255} step={1}
+                        value={ppgCfg.finger.saturationHigh}
+                        onChange={(e) => updateFinger({ saturationHigh: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      Dark luma: <span className="text-white">{ppgCfg.finger.darkLuma}</span>
+                      <input
+                        type="range" min={0} max={80} step={1}
+                        value={ppgCfg.finger.darkLuma}
+                        onChange={(e) => updateFinger({ darkLuma: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70 col-span-2">
+                      Perfusion scale: <span className="text-white">{ppgCfg.sqi.perfusionScale.toFixed(0)}</span>
+                      <input
+                        type="range" min={1} max={200} step={1}
+                        value={ppgCfg.sqi.perfusionScale}
+                        onChange={(e) => updateSqi({ perfusionScale: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      W. perfusion: <span className="text-white">{ppgCfg.sqi.weightPerfusion.toFixed(2)}</span>
+                      <input
+                        type="range" min={0} max={1} step={0.01}
+                        value={ppgCfg.sqi.weightPerfusion}
+                        onChange={(e) => updateSqi({ weightPerfusion: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      W. skewness: <span className="text-white">{ppgCfg.sqi.weightSkewness.toFixed(2)}</span>
+                      <input
+                        type="range" min={0} max={1} step={0.01}
+                        value={ppgCfg.sqi.weightSkewness}
+                        onChange={(e) => updateSqi({ weightSkewness: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      W. kurtosis: <span className="text-white">{ppgCfg.sqi.weightKurtosis.toFixed(2)}</span>
+                      <input
+                        type="range" min={0} max={1} step={0.01}
+                        value={ppgCfg.sqi.weightKurtosis}
+                        onChange={(e) => updateSqi({ weightKurtosis: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="text-[11px] text-white/70">
+                      SQI aceptable: <span className="text-white">{ppgCfg.sqi.acceptableSqi.toFixed(2)}</span>
+                      <input
+                        type="range" min={0} max={1} step={0.01}
+                        value={ppgCfg.sqi.acceptableSqi}
+                        onChange={(e) => updateSqi({ acceptableSqi: Number(e.target.value) })}
+                        className="w-full"
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>
