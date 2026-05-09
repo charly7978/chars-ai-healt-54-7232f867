@@ -507,40 +507,102 @@ const PPGSignalMeter = ({
       ctx.stroke();
     }
 
-    // === Mini trend strip de BPM (debajo del panel) ===
+    // === Trend de PR con eje temporal real (segundos) y marcas de cambios
+    // de parámetros del algoritmo (stride). Esto reemplaza la franja basada
+    // en índice de muestra por una con tiempo absoluto: cada punto se
+    // posiciona según (tNow - p.t) sobre una ventana fija (60s).
     const trend = bpmTrendRef.current;
-    if (trend.length >= 2) {
-      const tx = panelX;
-      const ty = panelY + panelH + 6;
-      const tw = panelW;
-      const th = 26;
-      ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
-      ctx.fillRect(tx, ty, tw, th);
-      ctx.strokeStyle = 'rgba(34, 197, 94, 0.25)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(tx, ty, tw, th);
+    const tx = panelX;
+    const ty = panelY + panelH + 6;
+    const tw = panelW;
+    const th = 38; // un poco más alto para acomodar el eje
+    const labelW = 96;
+    const plotX0 = tx + labelW;
+    const plotX1 = tx + tw - 6;
+    const plotW = plotX1 - plotX0;
+    const plotY0 = ty + 14;
+    const plotY1 = ty + th - 8;
+    const plotH = plotY1 - plotY0;
+    const WINDOW_S = 60; // ventana temporal mostrada
+    const tNow = Date.now();
+    const tMinMs = tNow - WINDOW_S * 1000;
 
-      ctx.font = '9px "SF Mono", Consolas, monospace';
-      ctx.fillStyle = COLORS.TEXT_SECONDARY;
-      ctx.textAlign = 'left';
-      ctx.fillText('TENDENCIA PR', tx + 6, ty + 11);
+    // Fondo y borde
+    ctx.fillStyle = 'rgba(8, 16, 28, 0.85)';
+    ctx.fillRect(tx, ty, tw, th);
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tx, ty, tw, th);
 
-      const minB = Math.min(...trend.map(p => p.bpm));
-      const maxB = Math.max(...trend.map(p => p.bpm));
-      const range = Math.max(10, maxB - minB);
+    // Título + escala
+    ctx.font = '9px "SF Mono", Consolas, monospace';
+    ctx.fillStyle = COLORS.TEXT_SECONDARY;
+    ctx.textAlign = 'left';
+    ctx.fillText('TENDENCIA PR · 60 s', tx + 6, ty + 11);
+
+    // Ticks de tiempo (cada 15s) en el eje X
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+    ctx.fillStyle = COLORS.SCALE_TEXT;
+    ctx.font = '8px "SF Mono", Consolas, monospace';
+    ctx.textAlign = 'center';
+    for (let s = 0; s <= WINDOW_S; s += 15) {
+      const px = plotX0 + ((WINDOW_S - s) / WINDOW_S) * plotW;
       ctx.beginPath();
-      ctx.strokeStyle = COLORS.TEXT_PRIMARY;
-      ctx.lineWidth = 1.5;
-      trend.forEach((p, i) => {
-        const px = tx + 90 + (i / (trend.length - 1)) * (tw - 100);
-        const py = ty + th - 4 - ((p.bpm - minB) / range) * (th - 8);
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      });
+      ctx.moveTo(px, plotY1);
+      ctx.lineTo(px, plotY1 + 2);
       ctx.stroke();
+      ctx.fillText(s === 0 ? 'ahora' : `-${s}s`, px, plotY1 + 11);
+    }
 
-      ctx.textAlign = 'right';
-      ctx.fillStyle = COLORS.TEXT_SECONDARY;
-      ctx.fillText(`${Math.round(minB)}–${Math.round(maxB)} bpm`, tx + tw - 6, ty + 11);
+    if (trend.length >= 2) {
+      const visible = trend.filter(p => p.t >= tMinMs);
+      if (visible.length >= 2) {
+        const minB = Math.min(...visible.map(p => p.bpm));
+        const maxB = Math.max(...visible.map(p => p.bpm));
+        const range = Math.max(10, maxB - minB);
+
+        // Línea de tendencia
+        ctx.beginPath();
+        ctx.strokeStyle = COLORS.TEXT_PRIMARY;
+        ctx.lineWidth = 1.5;
+        visible.forEach((p, i) => {
+          const tFrac = (p.t - tMinMs) / (WINDOW_S * 1000);
+          const px = plotX0 + tFrac * plotW;
+          const py = plotY0 + plotH - ((p.bpm - minB) / range) * plotH;
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+
+        ctx.textAlign = 'right';
+        ctx.font = '9px "SF Mono", Consolas, monospace';
+        ctx.fillStyle = COLORS.TEXT_SECONDARY;
+        ctx.fillText(`${Math.round(minB)}–${Math.round(maxB)} bpm`, tx + tw - 6, ty + 11);
+      }
+    }
+
+    // Marcas verticales por cambios de parámetros del algoritmo (stride).
+    // Línea discontinua + etiqueta corta en el borde superior del plot.
+    const visibleMarks = algoMarksRef.current.filter(m => m.t >= tMinMs);
+    if (visibleMarks.length > 0) {
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1;
+      ctx.font = '8px "SF Mono", Consolas, monospace';
+      visibleMarks.forEach(m => {
+        const tFrac = (m.t - tMinMs) / (WINDOW_S * 1000);
+        const px = plotX0 + tFrac * plotW;
+        ctx.strokeStyle = m.kind === 'stride'
+          ? COLORS.TEXT_WARNING
+          : COLORS.SYSTOLIC_MARKER;
+        ctx.beginPath();
+        ctx.moveTo(px, plotY0);
+        ctx.lineTo(px, plotY1);
+        ctx.stroke();
+        ctx.fillStyle = COLORS.TEXT_WARNING;
+        ctx.textAlign = 'left';
+        ctx.fillText(m.label, px + 2, plotY0 + 8);
+      });
+      ctx.restore();
     }
 
     // === Footer técnico: sweep, gain, filtro, alarmas ===
