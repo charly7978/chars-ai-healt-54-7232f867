@@ -1,108 +1,62 @@
+# Plan: Guardrail de transición dinámica + Toast de cambio de backpressure
 
-# Plan: Telemetría de rendimiento + cierre de optimizaciones del pipeline
+## 1. Guardrail test — transición dinámica stride 3 ↔ 4
 
-## Objetivo
-1. Persistir y enviar (con consentimiento) snapshots de `PerfTracker` para depurar en campo.
-2. Cerrar las optimizaciones reales pendientes que hoy impiden que la app use el 100% del hardware/software.
+**Archivo nuevo:** `src/modules/signal-processing/__tests__/BackpressureTransition.test.ts`
 
-Sin promesas vacías: solo lo que realmente mejora medición y rendimiento. No se altera la estética.
+Complementa el test existente `Backpressure.test.ts` (que compara sesiones independientes con stride forzado). Este nuevo test valida lo que pasa **dentro de una misma sesión** cuando el algoritmo cambia stride en caliente.
 
----
+**Escenario:**
+- Inicia sesión con `forceStride: 3`, alimenta ~10s de señal pulsátil sintética (72 BPM, 30 fps).
+- Captura BPM y confianza estabilizados (ventana pre-switch).
+- A mitad de sesión, llama a `setBackpressureConfig({ forceStride: 4 })` para simular el switch automático.
+- Continúa alimentando otros ~10s con la misma señal.
+- Captura BPM y confianza post-switch.
+- Repite el switch inverso (4 → 3) y mide otra ventana.
 
-## Parte 1 — Telemetría de rendimiento (PerfTracker → Cloud)
+**Invariantes verificados:**
+- Drift de BPM mediano pre vs post switch < 4 bpm (ambas direcciones).
+- Confianza media post-switch ≥ 80% de la pre-switch (no colapsa al transicionar).
+- No se emiten señales con `NaN`/`Infinity` durante la transición.
+- Ningún frame post-switch reporta `quality === 0` si pre-switch estaba estable.
+- Verificación adicional: el switch no introduce un "salto" instantáneo > 8 bpm en los siguientes 5 frames (continuidad).
 
-### 1.1 Tabla `perf_snapshots` en Lovable Cloud
-Migración con RLS (`auth.uid() = user_id`):
-- `id uuid PK`, `user_id uuid`, `session_id text`, `created_at timestamptz`
-- `fps numeric`, `jitter_ms numeric`, `dropped_estimate int`, `frames int`
-- `stages jsonb` (mean/p50/p95/max/n por etapa)
-- `device jsonb` (userAgent, hardwareConcurrency, deviceMemory, screen, dpr)
-- `camera jsonb` (resolución real, frameRate, torch, exposureMode, settings reales)
-- `pipeline jsonb` (sqi promedio, contactState ratios, activeSource, pressureState)
-- `app_version text`, `consent_given bool`
+## 2. Toast efímero al cambiar pixelStride
 
-### 1.2 Hook `usePerfTelemetry`
-- Lee toggle de consentimiento de `localStorage` (`perf_telemetry_consent`).
-- Cada 15 s (configurable) toma `ppgPerf.snapshot()` + métricas del pipeline.
-- Buffer en `IndexedDB` cuando offline; flush al recuperar conexión.
-- Envío vía `supabase.from('perf_snapshots').insert()` (RLS exige user logged-in; si no hay user → solo persiste local).
-- Reset del tracker tras flush exitoso.
+**Objetivo:** notificar visualmente al usuario solo cuando el backpressure adaptativo (no el override manual) cambia el stride en caliente.
 
-### 1.3 UI mínima de consentimiento
-- Switch dentro de un panel de ajustes ya existente (sin cambiar la estética del monitor).
-- Texto claro: "Enviar métricas anónimas de rendimiento para mejorar la app".
-- Default: **off**.
+**Cambios:**
 
-### 1.4 Página/edge function opcional de inspección
-- Edge function `perf-summary` (con verify_jwt) que devuelve agregados por device/sesión para debugging.
+### a) `src/hooks/useSignalProcessor.ts`
+- Añadir estado `currentStride` (number) actualizado vía polling ligero (cada 1s con `setInterval` mientras `isProcessing`) leyendo `getBackpressureState().pixelStride`.
+- Exponerlo en el return del hook.
 
----
+### b) `src/pages/Index.tsx`
+- `useEffect` que observa cambios en `currentStride`:
+  - Mantiene `prevStrideRef` para detectar transiciones.
+  - Solo dispara toast si:
+    - `isMonitoring === true` (medición activa).
+    - El cambio NO viene de `forceStride` (lee config, ignora si `forceStride` está definido).
+    - Han pasado >2s desde el inicio (evita toast en el arranque).
+  - Toast con `sonner`:
+    - **Stride sube (3→4, 4→5):** `toast.warning("⚡ Modo ahorro activado", { description: "Rendimiento bajo detectado, reduciendo muestreo (stride " + n + ")", duration: 3000 })`.
+    - **Stride baja (4→3):** `toast.success("✓ Rendimiento restaurado", { description: "Muestreo completo activo (stride 3)", duration: 2500 })`.
 
-## Parte 2 — Cierre de optimizaciones reales del pipeline
-
-Solo cosas que mueven la aguja. Nada cosmético.
-
-### 2.1 Frame timing real con `VideoFrameCallbackMetadata`
-- Verificar que `PPGSignalProcessor` reciba `mediaTime` del frame y lo use como `timestamp` (no `performance.now()` interno).
-- Estimar `fs` real vía EWMA de `Δmediatime` y propagarlo a `BandpassFilter` (recoef cuando cambie >5%).
-
-### 2.2 OffscreenCanvas + Web Worker para extracción ROI
-- Mover el loop de píxeles (extracción RGB por tile + clipping ratio) a un Worker con `OffscreenCanvas` cuando el navegador lo soporte.
-- Fallback: main thread como hoy.
-- Beneficio: libera el hilo principal en móviles, reduce jitter.
-
-### 2.3 Camera lock en fases con verificación real
-- Tras `applyConstraints`, leer `track.getSettings()` y registrar qué quedó activo (exposureMode, focusMode, whiteBalanceMode, frameRate, iso si aplica).
-- Si una fase falla, degradación silenciosa + log a telemetría.
-- Exponer `cameraDiagnostics` al snapshot de telemetría.
-
-### 2.4 Ring buffers Float32Array donde aún haya `push/shift`
-- Auditar `PPGSignalProcessor` y `HeartBeatProcessor` para reemplazar arrays mutables en hot path.
-
-### 2.5 Métricas instrumentadas (spans) ya en su sitio
-- Confirmar `ppgPerf.start('roi')`, `'filter'`, `'sqi'`, `'peak'` envuelven cada etapa.
-- Añadir span `'capture'` en `requestVideoFrameCallback` para medir copy de píxeles.
-
-### 2.6 Backpressure
-- Si `ppgPerf.snapshot().fps < 20` durante >3s, reducir tamaño de ROI fina (downscale 0.75) automáticamente; restaurar cuando vuelva a >25fps.
-- Registrar evento en telemetría.
-
----
-
-## Parte 3 — Verificación
-
-- Tests unitarios nuevos:
-  - `usePerfTelemetry`: flush, retry, respeto del toggle.
-  - Backpressure: simulación de fps bajo activa downscale.
-- Script `check:orphans` y CI ya existentes corren igual.
-- QA manual: medición de 60s con consentimiento on → fila en `perf_snapshots`; con consentimiento off → 0 filas.
-
----
+**No se añade badge persistente** — el usuario eligió toast efímero. El stride actual sigue visible en el modal de Ajustes y en la telemetría.
 
 ## Detalles técnicos
 
-**Archivos a crear:**
-- `supabase/migrations/<ts>_perf_snapshots.sql`
-- `src/hooks/usePerfTelemetry.ts`
-- `src/lib/perf/indexedDbBuffer.ts`
-- `src/workers/roi.worker.ts` (si OffscreenCanvas disponible)
-- `supabase/functions/perf-summary/index.ts` (opcional)
+- **Polling vs evento:** se usa polling 1s en el hook porque `PPGSignalProcessor` no expone callback de cambio de stride; agregar un emisor sería más invasivo. El polling es trivial (1 lectura síncrona/s).
+- **Diferenciación auto vs manual:** se compara contra `getBackpressureConfig().forceStride`. Si está definido, el cambio es manual y no se notifica.
+- **Sin cambios en lógica de procesamiento:** ni el algoritmo de adaptación ni el pipeline se tocan.
+- **Sonner ya está montado** en el árbol (lo usa el resto de la app).
 
-**Archivos a editar:**
-- `src/utils/logger.ts` — método `drainSnapshot()` que devuelve y resetea atómicamente.
-- `src/modules/signal-processing/PPGSignalProcessor.ts` — spans, fs real, hook al worker.
-- `src/components/CameraView.tsx` — diagnostics y lock por fases.
-- `src/pages/Index.tsx` — montar `usePerfTelemetry`, span `'capture'`, toggle.
+## Archivos afectados
 
-**Sin tocar estética**: el toggle va en un panel de ajustes plegable existente; el monitor cardiaco no cambia.
+- ✅ Nuevo: `src/modules/signal-processing/__tests__/BackpressureTransition.test.ts`
+- ✏️ Editado: `src/hooks/useSignalProcessor.ts` (añadir `currentStride`)
+- ✏️ Editado: `src/pages/Index.tsx` (efecto + toasts)
 
-**Privacidad**: nada de PII. user_id solo si está logueado; sin él, datos quedan en IndexedDB local.
+## Riesgos
 
----
-
-## Lo que NO hago (para no inflar el plan)
-- No prometo precisión clínica de SpO2/BP — eso no se arregla con telemetría.
-- No agrego servicios externos (PostHog/Sentry) salvo que lo pidas explícitamente.
-- No reescribo el HeartBeatProcessor — solo audito ring buffers en hot path.
-
-¿Apruebo y arranco?
+- Bajo. El polling es de lectura pura, no muta estado del procesador. Los toasts solo aparecen en transiciones reales, evitando spam por las condiciones de gating (isMonitoring, no manual, ventana de gracia).
