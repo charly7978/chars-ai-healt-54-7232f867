@@ -23,6 +23,8 @@ jobs:
         run: npm run typecheck
       - name: Repo hygiene (orphan imports)
         run: npm run check:orphans
+      - name: Anti-simulation guardrail
+        run: npm run check:no-sim
       - name: Tests
         run: npm test -- --run
       - name: Build
