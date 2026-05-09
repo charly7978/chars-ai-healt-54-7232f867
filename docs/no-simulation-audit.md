@@ -11,24 +11,24 @@
 | `Math.random` | `rg "Math\.random" src/` | **0 coincidencias** |
 | `simulate / mock / fake / dummy / stub` | `rg -i "simulat\|mock\|fake\|dummy\|stub"` | Solo `placeholder=` en `<input>` HTML de Auth (legítimo) |
 | Generadores sintéticos (`sine/cosine wave / synthetic / generate signal / seed`) | `rg -i "synthet\|sine.*wave\|generate.*signal\|seed"` | **0 coincidencias** |
-| `Math.sin / Math.cos` en pipeline | `rg "Math\.(sin\|cos)"` | Solo en `BandpassFilter.ts` (coeficientes Butterworth IIR) — **operación matemática legítima** |
+| `Math.sin / Math.cos` en pipeline | `rg "Math\.(sin\|cos)"` | Solo en `filters.ts` (coeficientes Butterworth) y `signalFusion.ts` (Cardano para PCA) — **operaciones matemáticas legítimas** |
 | Valores clínicos hardcoded (`120/80`, `98%`, baseline fijos) | `rg "120/80\|return.*spo2.*9[0-9]"` | Solo en **comentarios explicativos** ("SIN BASE FIJA 120/80") |
 
 ## Garantías por capa
 
-### 1. Captura de cámara (`CameraView.tsx`)
+### 1. Captura de cámara (`CameraView.tsx`, `src/lib/ppg/camera/`, `src/lib/ppg/capture/`)
 - Toda la señal proviene de píxeles reales del `MediaStream` con flash activo.
-- `requestVideoFrameCallback` para captura sincronizada al sensor.
+- `requestVideoFrameCallback` con `metadata.mediaTime` para timing real (no `Date.now()` interpolado).
 - Si la cámara o el torch fallan: degradación a estado de error explícito, **nunca** se inyecta señal sintética.
 
-### 2. Detección de dedo (`PPGSignalProcessor.updateContactState`)
+### 2. Detección de dedo (`fingerDetector.ts`, `PPGSignalProcessor.updateContactState`)
 - Clasificación por píxel (luma + chroma + pureza roja + clipping). Sin contacto → `state="finger-missing"`, `filtered=0`, `quality=0`.
 - Histéresis estricta: requiere firma real de hemoglobina (red dominance > 20, RG ratio > 1.2, coverage > 35%).
 
-### 3. Extracción ROI (`PPGSignalProcessor.extractROI`)
+### 3. Extracción ROI (`adaptiveRoi.ts`, `PPGSignalProcessor.extractROI`)
 - Promedios calculados sobre tiles válidos del frame. Si no hay tiles válidos → devuelve **ceros**, no defaults.
 
-### 4. Filtrado y normalización (`BandpassFilter.ts`)
+### 4. Filtrado y normalización (`BandpassFilter.ts`, `filters.ts`, `normalization.ts`)
 - Biquad Butterworth Direct Form I con `fs` real estimado del frame timing.
 - Reset de estados internos a `0` en overflow numérico — no se inyecta valor "plausible".
 
@@ -63,8 +63,9 @@
 
 | Ubicación | Uso de constante numérica | Justificación |
 |---|---|---|
-| `BandpassFilter.computeCoefficients` | `Math.sin`, `Math.cos`, `Math.tan` | Diseño analítico de coeficientes Butterworth IIR (transformación bilineal). |
-| `PPGSignalProcessor` — pesos de fuentes | constantes `0.45 / 0.40 / 0.15`… | Parámetros heurísticos del modelo de selección competitiva, no datos. |
+| `BiquadBandpass.setSampleRate` | `Math.sin`, `Math.cos`, `Math.sinh` | Diseño analítico de coeficientes IIR (transformación bilineal). |
+| `PcaSignalFusion` | `Math.cos(angle/3)` | Resolvente trigonométrico de Cardano para eigendecomposición 3×3 cerrada. |
+| `SqiEvaluator` | Pesos `0.35/0.25/0.20/0.10/0.10` | Coeficientes heurísticos del SQI; no son "datos" — son parámetros del modelo. |
 
 ## Conclusión
 
