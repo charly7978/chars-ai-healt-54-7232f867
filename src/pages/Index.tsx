@@ -938,6 +938,73 @@ const Index = () => {
                   ))}
                 </div>
               </div>
+
+              {/* Sanity profile + audit log */}
+              <div className="mt-5 pt-4 border-t border-white/10">
+                <div className="text-sm font-medium mb-2">Guardrail anti-simulación</div>
+                <label className="text-xs text-white/70 block">
+                  Perfil de umbrales
+                  <select
+                    value={sanityProfileId}
+                    onChange={(e) => handleProfileChange(e.target.value)}
+                    className="mt-1 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white"
+                  >
+                    {SANITY_PROFILES.map(p => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-[11px] text-white/50 mt-1">
+                  {SANITY_PROFILES.find(p => p.id === sanityProfileId)?.description}
+                </p>
+
+                <details className="mt-3 text-xs text-white/70">
+                  <summary className="cursor-pointer text-white/80">Umbrales efectivos / overrides JSON</summary>
+                  <pre className="mt-2 p-2 bg-zinc-800 rounded text-[10px] text-white/60 overflow-auto max-h-32">
+{JSON.stringify(resolveProfile(sanityProfileId).effective, null, 2)}
+                  </pre>
+                  <textarea
+                    value={customJSON}
+                    onChange={(e) => setCustomJSON(e.target.value)}
+                    placeholder='{ "windowSize": 40, "min": 35 }'
+                    rows={4}
+                    className="mt-2 w-full bg-zinc-800 border border-white/10 rounded px-2 py-1 text-white font-mono text-[11px]"
+                  />
+                  <div className="mt-2 flex gap-2">
+                    <button type="button" onClick={handleCustomApply}
+                      className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                      Aplicar overrides
+                    </button>
+                    <button type="button" onClick={handleCustomClear}
+                      className="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-white/10">
+                      Limpiar
+                    </button>
+                  </div>
+                </details>
+
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <span className="text-xs text-white/70">
+                    Veredictos: {getAuditEntries().length}
+                    {auditNegativeCount > 0 && (
+                      <span className="ml-1 text-amber-400">({auditNegativeCount} alertas)</span>
+                    )}
+                  </span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => downloadAuditJSON()}
+                      className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                      JSON
+                    </button>
+                    <button type="button" onClick={() => downloadAuditCSV()}
+                      className="text-xs px-2 py-1 rounded bg-white/15 hover:bg-white/25 border border-white/20">
+                      CSV
+                    </button>
+                    <button type="button" onClick={() => { clearAuditLog(); setAuditNegativeCount(0); }}
+                      className="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-white/10">
+                      Limpiar
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
