@@ -18,6 +18,7 @@ export const useSignalProcessor = () => {
   const [lastSignal, setLastSignal] = useState<ProcessedSignal | null>(null);
   const [error, setError] = useState<ProcessingError | null>(null);
   const [framesProcessed, setFramesProcessed] = useState(0);
+  const [currentStride, setCurrentStride] = useState<number>(3);
   
   // CONTROL ÚNICO DE INSTANCIA - PREVENIR DUPLICIDADES ABSOLUTAMENTE
   const instanceLock = useRef<boolean>(false);
@@ -165,11 +166,29 @@ export const useSignalProcessor = () => {
     return cfg;
   }, []);
 
+  // Polling ligero (1 Hz) del stride activo durante la medición. Permite a la
+  // UI reaccionar a cambios automáticos del backpressure adaptativo sin tocar
+  // el hot path del procesador.
+  useEffect(() => {
+    if (!isProcessing) return;
+    const tick = () => {
+      if (!processorRef.current) return;
+      try {
+        const s = processorRef.current.getBackpressureState().pixelStride;
+        setCurrentStride((prev) => (prev !== s ? s : prev));
+      } catch {}
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [isProcessing]);
+
   return {
     isProcessing,
     lastSignal,
     error,
     framesProcessed,
+    currentStride,
     startProcessing,
     stopProcessing,
     calibrate,
